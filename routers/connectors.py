@@ -5,6 +5,13 @@ from hummingbot.client.settings import AllConnectorSettings
 
 from deps import get_accounts_service
 from services.accounts_service import AccountsService
+from services.cowswap_runtime import (
+    COWSWAP_CONNECTOR_NAME,
+    cowswap_connector_config_map,
+    cowswap_connector_metadata,
+    cowswap_order_submission_blocker,
+    cowswap_supported_order_types,
+)
 from services.market_data_service import MarketDataService
 
 router = APIRouter(tags=["Connectors"], prefix="/connectors")
@@ -20,7 +27,10 @@ async def available_connectors():
     """
     all_connectors = AllConnectorSettings.get_connector_settings().keys()
     # Filter out DEX providers (contain '/') - these are accessed via Gateway networks
-    return [c for c in all_connectors if '/' not in c]
+    connectors = [c for c in all_connectors if '/' not in c]
+    if cowswap_connector_metadata() is not None and COWSWAP_CONNECTOR_NAME not in connectors:
+        connectors.append(COWSWAP_CONNECTOR_NAME)
+    return connectors
 
 
 @router.get("/{connector_name}/config-map", response_model=Dict[str, dict])
@@ -37,6 +47,12 @@ async def get_connector_config_map(connector_name: str, accounts_service: Accoun
         - type: The expected data type (e.g., "str", "SecretStr", "int")
         - required: Whether the field is required
     """
+    if connector_name == COWSWAP_CONNECTOR_NAME:
+        config_map = cowswap_connector_config_map()
+        if config_map is None:
+            raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found")
+        return config_map
+
     return accounts_service.get_connector_config_map(connector_name)
 
 
@@ -64,6 +80,11 @@ async def get_trading_rules(
         HTTPException: 404 if connector not found, 500 for other errors
     """
     try:
+        if connector_name == COWSWAP_CONNECTOR_NAME:
+            blocker = cowswap_order_submission_blocker(connector_name)
+            detail = blocker or "CowSwap runtime bridge is not initialized"
+            raise HTTPException(status_code=503, detail=detail)
+
         market_data_service: MarketDataService = request.app.state.market_data_service
 
         # Get trading rules (filtered by trading pairs if provided)
@@ -99,6 +120,12 @@ async def get_supported_order_types(request: Request, connector_name: str):
         HTTPException: 404 if connector not found, 500 for other errors
     """
     try:
+        if connector_name == COWSWAP_CONNECTOR_NAME:
+            order_types = cowswap_supported_order_types()
+            if order_types is None:
+                raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found")
+            return {"connector": connector_name, "supported_order_types": order_types}
+
         market_data_service: MarketDataService = request.app.state.market_data_service
 
         # Access connector through UnifiedConnectorService

@@ -29,6 +29,12 @@ from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
 from hummingbot.core.rate_oracle.rate_oracle import RateOracle
 from hummingbot.core.utils.async_utils import safe_ensure_future
 
+from services.cowswap_runtime import (
+    COWSWAP_CONNECTOR_NAME,
+    UNWIRED_RUNTIME_BLOCKER,
+    CowSwapRuntimeUnavailableError,
+    cowswap_order_submission_blocker,
+)
 from utils.file_system import fs_util
 from utils.hummingbot_api_config_adapter import HummingbotAPIConfigAdapter
 from utils.security import BackendAPISecurity
@@ -639,6 +645,10 @@ class UnifiedConnectorService:
         Gateway connector which auto-detects chain/network and uses the default wallet.
         The dex_name and trading_type are passed to methods, not to the connector.
         """
+        if connector_name == COWSWAP_CONNECTOR_NAME:
+            blocker = cowswap_order_submission_blocker(connector_name) or UNWIRED_RUNTIME_BLOCKER
+            raise CowSwapRuntimeUnavailableError(blocker)
+
         BackendAPISecurity.login_account(
             account_name=account_name,
             secrets_manager=self.secrets_manager
@@ -669,6 +679,10 @@ class UnifiedConnectorService:
 
     def _create_data_connector(self, connector_name: str) -> ConnectorBase:
         """Create a non-authenticated data connector."""
+        if connector_name == COWSWAP_CONNECTOR_NAME:
+            blocker = cowswap_order_submission_blocker(connector_name) or UNWIRED_RUNTIME_BLOCKER
+            raise ValueError(blocker)
+
         conn_setting = self._conn_settings.get(connector_name)
         if not conn_setting:
             raise ValueError(f"Connector {connector_name} not found")

@@ -12,6 +12,7 @@ from hummingbot.core.data_type.common import OrderType, PositionAction, Position
 
 from config import settings
 from database import AccountRepository, AsyncDatabaseManager, FundingRepository, OrderRepository, TradeRepository
+from services.cowswap_runtime import COWSWAP_CONNECTOR_NAME, cowswap_connector_config_map, cowswap_order_submission_blocker
 from services.gateway_client import GatewayClient
 from services.gateway_transaction_poller import GatewayTransactionPoller
 from utils.file_system import fs_util
@@ -934,6 +935,12 @@ class AccountsService:
         :param connector_name: The name of the connector.
         :return: The connector config map.
         """
+        if connector_name == COWSWAP_CONNECTOR_NAME:
+            config_map = cowswap_connector_config_map()
+            if config_map is None:
+                raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found")
+            return config_map
+
         from services.unified_connector_service import UnifiedConnectorService
         return UnifiedConnectorService.get_connector_config_map(connector_name)
 
@@ -1392,6 +1399,10 @@ class AccountsService:
 
         if not self._connector_service:
             raise HTTPException(status_code=500, detail="Connector service not initialized")
+
+        blocker = cowswap_order_submission_blocker(connector_name)
+        if blocker:
+            raise HTTPException(status_code=503, detail=blocker)
 
         connector = await self._connector_service.get_trading_connector(account_name, connector_name)
         
