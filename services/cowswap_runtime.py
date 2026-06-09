@@ -9,8 +9,10 @@ from typing import Any, NamedTuple
 COWSWAP_CONNECTOR_NAME = "cowswap"
 PACKAGE_MISSING_BLOCKER = "hummingbot_cowswap is not installed"
 UNWIRED_RUNTIME_BLOCKER = (
-    "CowSwap runtime signer/EVM reader/token map is not wired in Hummingbot API/Gateway; "
-    "CowSwap order submission is disabled"
+    "CowSwap order submission is disabled: Hummingbot API only exposes safe CowSwap connector metadata. "
+    "Missing runtime wiring for secure EIP-712 signer, CoW runtime order store, "
+    "EVM balance/allowance reader, configured token map, and API lifecycle calls; "
+    "raw private keys in config/env are rejected"
 )
 PRIVATE_KEY_BLOCKER = "raw private-key config fields are not accepted by the CowSwap API registration"
 
@@ -31,9 +33,20 @@ class CowSwapRuntimeStatus(NamedTuple):
 ImportModule = Callable[[str], Any]
 
 
+class CowSwapRuntimeDependencies(NamedTuple):
+    """Explicit dependencies required before CowSwap order runtime is enabled."""
+
+    signer_provider: Any | None = None
+    evm_reader: Any | None = None
+    token_map: Mapping[str, Any] | None = None
+    order_store: Any | None = None
+    owner_address: str = ""
+
+
 def get_cowswap_runtime_status(
     *,
     import_module: ImportModule = importlib.import_module,
+    runtime_dependencies: CowSwapRuntimeDependencies | None = None,
 ) -> CowSwapRuntimeStatus:
     """Return whether CowSwap can be registered without claiming order readiness."""
     metadata = _load_connector_metadata(import_module)
@@ -47,10 +60,14 @@ def get_cowswap_runtime_status(
 
     blockers = _registration_blockers(metadata)
     registration_available = len(blockers) == 0
-    runtime_blockers = () if not registration_available else (UNWIRED_RUNTIME_BLOCKER,)
+    runtime_blockers = (
+        ()
+        if not registration_available
+        else _runtime_dependency_blockers(runtime_dependencies)
+    )
     return CowSwapRuntimeStatus(
         registration_available=registration_available,
-        runtime_available=False,
+        runtime_available=registration_available and not runtime_blockers,
         metadata=metadata if registration_available else None,
         blockers=tuple(blockers) + runtime_blockers,
     )
@@ -111,36 +128,37 @@ def cowswap_order_submission_blocker(
     return "; ".join(status.blockers)
 
 
-def build_cowswap_runtime_connector(  # noqa: PLR0913
+async def place_cowswap_market_order(
     *,
-    config: Any,
-    store: Any,
-    signer: Any,
-    evm_reader: Any,
-    tokens_by_pair: Mapping[str, Any] | None,
-    client: Any = None,
-    runtime_config: Mapping[str, Any] | None = None,
-    import_module: ImportModule = importlib.import_module,
-) -> Any:
-    """Build the external CowSwap bridge only when all runtime dependencies exist."""
-    _raise_if_raw_private_key_material(runtime_config)
-    _require_present(config, "config")
-    _require_present(store, "store")
-    _require_present(signer, "signer")
-    _require_present(evm_reader, "evm_reader")
-    if not tokens_by_pair:
-        raise CowSwapRuntimeUnavailableError("missing token map")
+    runtime: Any | None,
+    trading_pair: str,
+    side: str,
+    amount: str,
+) -> str:
+    """Delegate a CowSwap MARKET order to an initialized runtime bridge."""
+    if runtime is None:
+        raise CowSwapRuntimeUnavailableError("CowSwap runtime is not initialized")
 
-    bridge_module = _load_runtime_bridge(import_module)
-    return bridge_module.build_cowswap_runtime_bridge(
-        config=config,
-        store=store,
-        signer=signer,
-        evm_reader=evm_reader,
-        tokens_by_pair=tokens_by_pair,
-        client=client,
-        runtime_config=runtime_config,
-    )
+    normalized_side = side.upper()
+    if normalized_side == "SELL":
+        result = await runtime.submit_sell_order(
+            trading_pair=trading_pair,
+            amount=amount,
+        )
+    elif normalized_side == "BUY":
+        result = await runtime.submit_buy_order(
+            trading_pair=trading_pair,
+            amount=amount,
+        )
+    else:
+        raise ValueError("CowSwap side must be BUY or SELL")
+
+    client_order_id = _extract_client_order_id(result)
+    if not client_order_id:
+        raise CowSwapRuntimeUnavailableError(
+            "CowSwap runtime did not return a client_order_id",
+        )
+    return client_order_id
 
 
 def _load_connector_metadata(import_module: ImportModule) -> Mapping[str, Any] | None:
@@ -158,17 +176,6 @@ def _load_connector_metadata(import_module: ImportModule) -> Mapping[str, Any] |
     except ImportError:
         return None
     return metadata if isinstance(metadata, Mapping) else None
-
-
-def _load_runtime_bridge(import_module: ImportModule) -> Any:
-    try:
-        bridge_module = import_module("hummingbot_cowswap.runtime_bridge")
-    except ImportError as exc:
-        raise CowSwapRuntimeUnavailableError(PACKAGE_MISSING_BLOCKER) from exc
-
-    if not callable(getattr(bridge_module, "build_cowswap_runtime_bridge", None)):
-        raise CowSwapRuntimeUnavailableError("hummingbot_cowswap runtime bridge is missing")
-    return bridge_module
 
 
 def _registration_blockers(metadata: Mapping[str, Any]) -> list[str]:
@@ -189,9 +196,32 @@ def _registration_blockers(metadata: Mapping[str, Any]) -> list[str]:
     return blockers
 
 
-def _raise_if_raw_private_key_material(runtime_config: Mapping[str, Any] | None) -> None:
-    if _has_raw_private_key_material(runtime_config):
-        raise CowSwapRuntimeUnavailableError(PRIVATE_KEY_BLOCKER)
+def _runtime_dependency_blockers(
+    dependencies: CowSwapRuntimeDependencies | None,
+) -> tuple[str, ...]:
+    if dependencies is None:
+        return (UNWIRED_RUNTIME_BLOCKER,)
+
+    blockers: list[str] = []
+    if dependencies.signer_provider is None:
+        blockers.append("secure EIP-712 signer is missing")
+    if dependencies.evm_reader is None:
+        blockers.append("EVM balance/allowance reader is missing")
+    if not dependencies.token_map:
+        blockers.append("configured token map is missing")
+    if dependencies.order_store is None:
+        blockers.append("CoW runtime order store is missing")
+    if not dependencies.owner_address:
+        blockers.append("owner address is missing")
+    return tuple(blockers)
+
+
+def _extract_client_order_id(result: Any) -> str | None:
+    if isinstance(result, Mapping):
+        value = result.get("client_order_id")
+    else:
+        value = getattr(result, "client_order_id", None)
+    return str(value) if value else None
 
 
 def _has_raw_private_key_material(mapping: Mapping[str, Any] | None) -> bool:
@@ -242,8 +272,3 @@ def _config_field_info(value: Any) -> dict[str, Any]:
         "required": False,
         "default": str(value),
     }
-
-
-def _require_present(value: Any, name: str) -> None:
-    if value is None:
-        raise CowSwapRuntimeUnavailableError(f"missing {name}")
