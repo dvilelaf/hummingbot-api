@@ -1572,9 +1572,13 @@ class AccountsService:
         # Check if order exists in in-flight orders
         if client_order_id not in connector.in_flight_orders:
             raise HTTPException(status_code=404, detail=f"Order '{client_order_id}' not found in active orders")
+        order = connector.in_flight_orders[client_order_id]
+        trading_pair = getattr(order, "trading_pair", None)
+        if not trading_pair:
+            raise HTTPException(status_code=500, detail=f"Order '{client_order_id}' is missing trading pair")
         
         try:
-            result = connector.cancel(trading_pair="NA", client_order_id=client_order_id)
+            result = connector.cancel(trading_pair=trading_pair, client_order_id=client_order_id)
             logger.info(f"Initiated cancellation for order {client_order_id} on {connector_name} (Account: {account_name})")
             return result
         except Exception as e:
