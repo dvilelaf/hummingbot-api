@@ -22,6 +22,24 @@ def _transaction_hash(result: dict) -> str | None:
     )
 
 
+def _gateway_status(result: dict) -> str:
+    status = str(result.get("status") or "submitted").strip().lower()
+    if status == "confirmed":
+        return "confirmed"
+    if status in {"failed", "failure", "error", "reverted", "revert"}:
+        return "failed"
+    if str(result.get("code", "")).strip() == "-1":
+        return "failed"
+    return "submitted"
+
+
+def _raise_if_gateway_failed(result: dict) -> None:
+    if _gateway_status(result) != "failed":
+        return
+    detail = result.get("message") or result.get("detail") or "Gateway transaction failed"
+    raise HTTPException(status_code=502, detail=str(detail))
+
+
 @router.post("/lp/add", response_model=RouterLiquidityResponse)
 async def add_router_liquidity(
     request: RouterAddLiquidityRequest,
@@ -50,10 +68,11 @@ async def add_router_liquidity(
         )
         if not result:
             raise HTTPException(status_code=500, detail="Gateway service is not able to add liquidity")
+        _raise_if_gateway_failed(result)
         transaction_hash = _transaction_hash(result)
         if not transaction_hash:
             raise HTTPException(status_code=500, detail="No transaction hash returned from Gateway")
-        return RouterLiquidityResponse(transaction_hash=transaction_hash, status="submitted")
+        return RouterLiquidityResponse(transaction_hash=transaction_hash, status=_gateway_status(result))
     except HTTPException:
         raise
     except ValueError as exc:
@@ -90,10 +109,11 @@ async def remove_router_liquidity(
         )
         if not result:
             raise HTTPException(status_code=500, detail="Gateway service is not able to remove liquidity")
+        _raise_if_gateway_failed(result)
         transaction_hash = _transaction_hash(result)
         if not transaction_hash:
             raise HTTPException(status_code=500, detail="No transaction hash returned from Gateway")
-        return RouterLiquidityResponse(transaction_hash=transaction_hash, status="submitted")
+        return RouterLiquidityResponse(transaction_hash=transaction_hash, status=_gateway_status(result))
     except HTTPException:
         raise
     except ValueError as exc:

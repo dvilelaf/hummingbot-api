@@ -2,11 +2,19 @@ import asyncio
 import importlib.util
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / "services" / "gateway_client.py"
 spec = importlib.util.spec_from_file_location("gateway_client_under_test", MODULE_PATH)
 gateway_client = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gateway_client)
 GatewayClient = gateway_client.GatewayClient
+
+ROUTER_MODULE_PATH = Path(__file__).resolve().parents[1] / "routers" / "gateway_lp.py"
+router_spec = importlib.util.spec_from_file_location("gateway_lp_under_test", ROUTER_MODULE_PATH)
+gateway_lp = importlib.util.module_from_spec(router_spec)
+router_spec.loader.exec_module(gateway_lp)
 
 
 def test_router_add_liquidity_posts_gateway_payload():
@@ -93,6 +101,60 @@ def test_router_remove_liquidity_posts_gateway_payload():
             },
         ),
     ]
+
+
+def test_execute_quote_posts_wallet_address_payload():
+    calls = []
+    client = GatewayClient(base_url="http://gateway.local")
+
+    async def fake_request(method, path, params=None, json=None):
+        calls.append((method, path, params, json))
+        return {"signature": "0xquote"}
+
+    client._request = fake_request
+
+    result = asyncio.run(
+        client.execute_quote(
+            connector="jupiter",
+            network="mainnet-beta",
+            wallet_address="Wallet111111111111111111111111111111111",
+            quote_id="quote-123",
+        ),
+    )
+
+    assert result == {"signature": "0xquote"}
+    assert calls == [
+        (
+            "POST",
+            "connectors/jupiter/router/execute-quote",
+            None,
+            {
+                "network": "mainnet-beta",
+                "walletAddress": "Wallet111111111111111111111111111111111",
+                "quoteId": "quote-123",
+            },
+        ),
+    ]
+
+
+def test_gateway_lp_status_preserves_confirmed_and_submitted():
+    assert gateway_lp._gateway_status({"status": "confirmed", "transaction_hash": "0x1"}) == "confirmed"
+    assert gateway_lp._gateway_status({"transaction_hash": "0x1"}) == "submitted"
+
+
+def test_gateway_lp_failed_status_raises_even_with_transaction_hash():
+    with pytest.raises(HTTPException) as exc_info:
+        gateway_lp._raise_if_gateway_failed(
+            {
+                "code": -1,
+                "message": "execution reverted",
+                "status": "FAILED",
+                "transaction_hash": "0xreverted",
+            },
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail == "execution reverted"
 
 
 def test_gateway_lp_router_is_registered_in_main():

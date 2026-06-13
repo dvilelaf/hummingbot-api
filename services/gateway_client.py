@@ -435,7 +435,7 @@ class GatewayClient:
         """Execute a previously obtained quote"""
         return await self._request("POST", f"connectors/{connector}/router/execute-quote", json={
             "network": network,
-            "address": wallet_address,
+            "walletAddress": wallet_address,
             "quoteId": quote_id
         })
 
