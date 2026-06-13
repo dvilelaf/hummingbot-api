@@ -20,6 +20,7 @@ from services.cowswap_runtime import (
     cowswap_order_records,
     cowswap_order_submission_blocker,
     place_cowswap_market_order,
+    poll_cowswap_order,
 )
 from services.gateway_client import GatewayClient
 from services.gateway_transaction_poller import GatewayTransactionPoller
@@ -1689,6 +1690,26 @@ class AccountsService:
         except Exception as e:
             logger.error(f"Failed to initiate cancellation for order {client_order_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to initiate order cancellation: {str(e)}")
+
+    async def poll_order(self, account_name: str, connector_name: str, client_order_id: str) -> Dict:
+        """Poll one order when the connector exposes an explicit lifecycle poll."""
+        if connector_name != COWSWAP_CONNECTOR_NAME:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Connector '{connector_name}' does not support explicit order polling",
+            )
+
+        try:
+            return await poll_cowswap_order(
+                runtime=self._cowswap_runtime,
+                client_order_id=client_order_id,
+            )
+        except Exception as e:
+            logger.error(f"Failed to poll CowSwap order {client_order_id}: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to poll CowSwap order: {str(e)}",
+            )
     
     async def set_leverage(self, account_name: str, connector_name: str,
                           trading_pair: str, leverage: int) -> Dict[str, str]:

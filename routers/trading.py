@@ -1,14 +1,8 @@
 import logging
 import math
 
-from typing import Dict, List, Optional
-
 from fastapi import APIRouter, Depends, HTTPException
-
-# Create module-specific logger
-logger = logging.getLogger(__name__)
 from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, TradeType
-from pydantic import BaseModel
 from starlette import status
 
 from deps import get_accounts_service, get_connector_service
@@ -24,6 +18,9 @@ from models import (
 )
 from models.accounts import LeverageRequest, PositionModeRequest
 from services.accounts_service import AccountsService
+
+# Create module-specific logger
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Trading"], prefix="/trading")
 
@@ -115,6 +112,31 @@ async def cancel_order(
         raise HTTPException(status_code=500, detail=f"Error cancelling order: {str(e)}")
 
 
+@router.post("/{account_name}/{connector_name}/orders/{client_order_id}/poll")
+async def poll_order(
+    account_name: str,
+    connector_name: str,
+    client_order_id: str,
+    accounts_service: AccountsService = Depends(get_accounts_service),
+):
+    """
+    Poll a connector order by its client order ID when explicit polling is supported.
+
+    CowSwap needs an explicit poll because order settlement status is owned by the
+    CoW Protocol API rather than emitted by a long-lived exchange websocket.
+    """
+    try:
+        return await accounts_service.poll_order(
+            account_name=account_name,
+            connector_name=connector_name,
+            client_order_id=client_order_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error polling order: {str(e)}")
+
+
 @router.post("/positions", response_model=PaginatedResponse)
 async def get_positions(
     filter_request: PositionFilterRequest,
@@ -163,8 +185,6 @@ async def get_positions(
                             all_positions.extend(positions)
                         except Exception as e:
                             # Log error but continue with other connectors
-                            import logging
-
                             logger.warning(f"Failed to get positions for {account_name}/{connector_name}: {e}")
 
         # Sort by cursor_id for consistent pagination
@@ -261,8 +281,6 @@ async def get_active_orders(
 
                         except Exception as e:
                             # Log error but continue with other connectors
-                            import logging
-
                             logger.warning(f"Failed to get active orders for {account_name}/{connector_name}: {e}")
 
         # Sort by cursor_id for consistent pagination
@@ -357,8 +375,6 @@ async def get_orders(
                 all_orders.extend(orders)
             except Exception as e:
                 # Log error but continue with other accounts
-                import logging
-
                 logger.warning(f"Failed to get orders for {account_name}: {e}")
 
         # Apply filters for multiple values
@@ -462,8 +478,6 @@ async def get_trades(
                 all_trades.extend(trades)
             except Exception as e:
                 # Log error but continue with other accounts
-                import logging
-
                 logger.warning(f"Failed to get trades for {account_name}: {e}")
 
         # Apply filters for multiple values
@@ -661,8 +675,6 @@ async def get_funding_payments(
                             all_funding_payments.extend(payments)
                         except Exception as e:
                             # Log error but continue with other connectors
-                            import logging
-
                             logger.warning(f"Failed to get funding payments for {account_name}/{connector_name}: {e}")
 
         # Sort by timestamp (most recent first) and then by cursor_id for consistency
