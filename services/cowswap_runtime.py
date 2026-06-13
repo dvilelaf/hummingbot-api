@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import importlib
+import json
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Mapping
+from decimal import Decimal
+from pathlib import Path
 from typing import Any, NamedTuple
 
 COWSWAP_CONNECTOR_NAME = "cowswap"
@@ -15,6 +20,16 @@ UNWIRED_RUNTIME_BLOCKER = (
     "raw private keys in config/env are rejected"
 )
 PRIVATE_KEY_BLOCKER = "raw private-key config fields are not accepted by the CowSwap API registration"
+BASE_WETH = {
+    "symbol": "WETH",
+    "address": "0x4200000000000000000000000000000000000006",
+    "decimals": 18,
+}
+BASE_USDC = {
+    "symbol": "USDC",
+    "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "decimals": 6,
+}
 
 
 class CowSwapRuntimeUnavailableError(RuntimeError):
@@ -41,6 +56,173 @@ class CowSwapRuntimeDependencies(NamedTuple):
     token_map: Mapping[str, Any] | None = None
     order_store: Any | None = None
     owner_address: str = ""
+
+
+class GatewayCowSigner:
+    """CoW EIP-712 signer backed by Gateway-managed Ethereum wallets."""
+
+    def __init__(self, *, gateway_url: str, network: str, owner_address: str, config: Any) -> None:
+        self.gateway_url = gateway_url.rstrip("/")
+        self.network = network
+        self.owner_address = owner_address
+        self.config = config
+
+    def sign_order_payload(self, order: dict[str, object]) -> dict[str, object]:
+        from hummingbot_cowswap.cowpy import ensure_cowpy_submodule_imports
+        from hummingbot_cowswap.signing import _cow_order, _validate_order_payload, settlement_contract
+
+        ensure_cowpy_submodule_imports()
+        from cowdao_cowpy.contracts.order import ORDER_TYPE_FIELDS, compute_order_uid, hash_order, normalize_order
+
+        _validate_order_payload(self.config, order)
+        domain = _signing_domain_dict(self.config)
+        cow_order = _cow_order(order)
+        normalized_order = normalize_order(cow_order)
+        signature = self._sign_typed_data(
+            domain=domain,
+            types={"Order": ORDER_TYPE_FIELDS},
+            value=normalized_order,
+        )
+        order_digest = hash_order(_signing_domain_object(self.config), cow_order)
+        expected_order_uid = compute_order_uid(_signing_domain_object(self.config), cow_order, self.config.owner)
+        return {
+            **order,
+            "signature": signature,
+            "signing_scheme": "eip712",
+            "verifying_contract": settlement_contract(self.config),
+            "order_digest": "0x" + order_digest.hex(),
+            "expected_order_uid": expected_order_uid,
+        }
+
+    def sign_order_cancellation(self, order_uids: list[str]) -> dict[str, object]:
+        if not order_uids:
+            raise ValueError("order cancellation requires at least one order UID")
+        from hummingbot_cowswap.cowpy import ensure_cowpy_submodule_imports
+
+        ensure_cowpy_submodule_imports()
+        from cowdao_cowpy.contracts.order import CANCELLATIONS_TYPE_FIELDS
+
+        signature = self._sign_typed_data(
+            domain=_signing_domain_dict(self.config),
+            types={"OrderCancellations": CANCELLATIONS_TYPE_FIELDS},
+            value={"orderUids": order_uids},
+        )
+        return {
+            "order_uids": tuple(order_uids),
+            "signature": signature,
+            "signing_scheme": "eip712",
+        }
+
+    def _sign_typed_data(self, *, domain: Mapping[str, Any], types: Mapping[str, Any], value: Mapping[str, Any]) -> str:
+        response = _gateway_post(
+            self.gateway_url,
+            "wallet/sign-typed-data",
+            {
+                "chain": "ethereum",
+                "network": self.network,
+                "address": self.owner_address,
+                "domain": dict(domain),
+                "types": dict(types),
+                "value": dict(value),
+            },
+        )
+        signature = response.get("signature")
+        if not signature:
+            raise CowSwapRuntimeUnavailableError("Gateway did not return an EIP-712 signature")
+        return str(signature)
+
+
+class GatewayEvmReader:
+    """Synchronous EVM balance/allowance reader backed by Gateway HTTP routes."""
+
+    def __init__(self, *, gateway_url: str, network: str) -> None:
+        self.gateway_url = gateway_url.rstrip("/")
+        self.network = network
+
+    def balance_of(self, token: Any, owner: str) -> str:
+        response = _gateway_post(
+            self.gateway_url,
+            "chains/ethereum/balances",
+            {"network": self.network, "address": owner, "tokens": [token.symbol]},
+        )
+        balances = response.get("balances")
+        if not isinstance(balances, Mapping):
+            raise CowSwapRuntimeUnavailableError("Gateway balances response is missing balances")
+        return _human_amount_to_atomic(str(balances.get(token.symbol, "0")), int(token.decimals))
+
+    def allowance(self, token: Any, owner: str, spender: str) -> str:
+        response = _gateway_post(
+            self.gateway_url,
+            "chains/ethereum/allowances",
+            {"network": self.network, "address": owner, "spender": spender, "tokens": [token.symbol]},
+        )
+        approvals = response.get("approvals")
+        if not isinstance(approvals, Mapping):
+            raise CowSwapRuntimeUnavailableError("Gateway allowances response is missing approvals")
+        return _human_amount_to_atomic(str(approvals.get(token.symbol, "0")), int(token.decimals))
+
+
+def build_cowswap_runtime(
+    *,
+    gateway_url: str,
+    owner_address: str,
+    data_dir: str | Path,
+    chain_id: int = 8453,
+    chain_name: str = "base",
+    network: str = "base",
+    env: str = "staging",
+    receiver_address: str | None = None,
+    app_data: str = "0x" + "00" * 32,
+    slippage_bps: int = 50,
+    token_map: Mapping[str, tuple[Mapping[str, Any], Mapping[str, Any]]] | None = None,
+    import_module: ImportModule = importlib.import_module,
+) -> tuple[Any, CowSwapRuntimeDependencies]:
+    """Build a CowSwap adapter runtime using Gateway-managed signing and reads."""
+    CoWConfig = import_module("hummingbot_cowswap.models").CoWConfig
+    CoWToken = import_module("hummingbot_cowswap.models").CoWToken
+    CoWConnector = import_module("hummingbot_cowswap.connector").CoWConnector
+    HummingbotCoWAdapter = import_module("hummingbot_cowswap.hummingbot_adapter").HummingbotCoWAdapter
+    JsonOrderStore = import_module("hummingbot_cowswap.persistence").JsonOrderStore
+
+    normalized_token_map = token_map or {"WETH-USDC": (BASE_WETH, BASE_USDC)}
+    tokens_by_pair = {
+        pair: (CoWToken(**base_token), CoWToken(**quote_token))
+        for pair, (base_token, quote_token) in normalized_token_map.items()
+    }
+    config = CoWConfig(
+        chain_id=chain_id,
+        chain_name=chain_name,
+        owner=owner_address,
+        receiver=receiver_address or owner_address,
+        app_data=app_data,
+        slippage_bps=slippage_bps,
+        env=env,
+    )
+    store_path = Path(data_dir) / "cowswap-orders.json"
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    order_store = JsonOrderStore(store_path)
+    signer = GatewayCowSigner(
+        gateway_url=gateway_url,
+        network=network,
+        owner_address=owner_address,
+        config=config,
+    )
+    evm_reader = GatewayEvmReader(gateway_url=gateway_url, network=network)
+    connector = CoWConnector(
+        config=config,
+        store=order_store,
+        signer=signer,
+        evm_reader=evm_reader,
+    )
+    runtime = HummingbotCoWAdapter(connector, tokens_by_pair)
+    dependencies = CowSwapRuntimeDependencies(
+        signer_provider=signer,
+        evm_reader=evm_reader,
+        token_map=tokens_by_pair,
+        order_store=order_store,
+        owner_address=owner_address,
+    )
+    return runtime, dependencies
 
 
 def get_cowswap_runtime_status(
@@ -249,6 +431,59 @@ def _has_raw_private_key_material(mapping: Mapping[str, Any] | None) -> bool:
             return True
 
     return False
+
+
+def _signing_domain_object(config: Any) -> Any:
+    from hummingbot_cowswap.signing import _signing_domain
+
+    return _signing_domain(config)
+
+
+def _signing_domain_dict(config: Any) -> dict[str, Any]:
+    domain = _signing_domain_object(config)
+    to_dict = getattr(domain, "to_dict", None)
+    if callable(to_dict):
+        return dict(to_dict())
+    return {
+        "name": domain.name,
+        "version": domain.version,
+        "chainId": domain.chainId,
+        "verifyingContract": domain.verifyingContract,
+    }
+
+
+def _gateway_post(gateway_url: str, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    request = urllib.request.Request(
+        f"{gateway_url.rstrip('/')}/{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise CowSwapRuntimeUnavailableError(f"Gateway {path} failed: HTTP {exc.code}: {detail}") from exc
+    except OSError as exc:
+        raise CowSwapRuntimeUnavailableError(f"Gateway {path} failed: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise CowSwapRuntimeUnavailableError(f"Gateway {path} returned a non-object response")
+    if data.get("error"):
+        raise CowSwapRuntimeUnavailableError(f"Gateway {path} failed: {data['error']}")
+    return data
+
+
+def _human_amount_to_atomic(amount: str, decimals: int) -> str:
+    parsed = Decimal(amount)
+    if parsed <= 0:
+        return "0"
+    scale = Decimal(10) ** decimals
+    atomic = parsed * scale
+    if atomic != atomic.to_integral_value():
+        atomic = atomic.quantize(Decimal("1"))
+    return str(int(atomic))
 
 
 def _walk_mapping(mapping: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:

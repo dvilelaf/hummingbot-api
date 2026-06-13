@@ -81,9 +81,25 @@ async def get_trading_rules(
     """
     try:
         if connector_name == COWSWAP_CONNECTOR_NAME:
-            blocker = cowswap_order_submission_blocker(connector_name)
-            detail = blocker or "CowSwap runtime bridge is not initialized"
-            raise HTTPException(status_code=503, detail=detail)
+            accounts_service: AccountsService = request.app.state.accounts_service
+            dependencies = getattr(accounts_service, "_cowswap_runtime_dependencies", None)
+            blocker = cowswap_order_submission_blocker(
+                connector_name,
+                runtime_dependencies=dependencies,
+            )
+            if blocker:
+                raise HTTPException(status_code=503, detail=blocker)
+            runtime = getattr(accounts_service, "_cowswap_runtime", None)
+            if runtime is None:
+                raise HTTPException(status_code=503, detail="CowSwap runtime bridge is not initialized")
+            rules = getattr(runtime, "trading_rules", {})
+            pairs = trading_pairs or list(rules.keys())
+            return {
+                pair: _cowswap_trading_rule_payload(rules[pair])
+                if pair in rules
+                else {"error": f"Trading pair {pair} not found"}
+                for pair in pairs
+            }
 
         market_data_service: MarketDataService = request.app.state.market_data_service
 
@@ -99,6 +115,23 @@ async def get_trading_rules(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving trading rules: {str(e)}")
+
+
+def _cowswap_trading_rule_payload(rule) -> dict:
+    return {
+        "min_order_size": float(getattr(rule, "min_order_size", 0)),
+        "max_order_size": None,
+        "min_price_increment": float(getattr(rule, "min_price_increment", 0)),
+        "min_base_amount_increment": float(getattr(rule, "min_base_amount_increment", 0)),
+        "min_quote_amount_increment": float(getattr(rule, "min_quote_amount_increment", 0)),
+        "min_notional_size": 0.0,
+        "min_order_value": 0.0,
+        "max_price_significant_digits": None,
+        "supports_limit_orders": False,
+        "supports_market_orders": True,
+        "buy_order_collateral_token": None,
+        "sell_order_collateral_token": None,
+    }
 
 
 @router.get("/{connector_name}/order-types")

@@ -1449,6 +1449,8 @@ class AccountsService:
                 raise
             except Exception as e:
                 logger.error(f"Failed to place {trade_type} CowSwap order: {e}")
+                if str(e).startswith("insufficient "):
+                    raise HTTPException(status_code=400, detail=str(e))
                 raise HTTPException(status_code=500, detail=f"Failed to place CowSwap trade: {str(e)}")
 
         connector = await self._connector_service.get_trading_connector(account_name, connector_name)
