@@ -184,6 +184,25 @@ class GatewayClient:
             "passphrase": passphrase
         })
 
+    async def sign_typed_data(
+        self,
+        chain: str,
+        network: str,
+        address: str,
+        domain: Dict,
+        types: Dict,
+        value: Dict,
+    ) -> Dict:
+        """Sign EIP-712 typed data with a Gateway-managed wallet."""
+        return await self._request("POST", "wallet/sign-typed-data", json={
+            "chain": chain,
+            "network": network,
+            "address": address,
+            "domain": domain,
+            "types": types,
+            "value": value,
+        })
+
     async def send_transaction(
         self,
         chain: str,
@@ -220,6 +239,22 @@ class GatewayClient:
         return await self._request("POST", f"chains/{chain}/balances", json={
             "network": network,
             "address": address,
+            "tokens": tokens if tokens is not None else []
+        })
+
+    async def get_allowances(
+        self,
+        chain: str,
+        network: str,
+        address: str,
+        spender: str,
+        tokens: Optional[List[str]] = None,
+    ) -> Dict:
+        """Get token allowances for a wallet and spender."""
+        return await self._request("POST", f"chains/{chain}/allowances", json={
+            "network": network,
+            "address": address,
+            "spender": spender,
             "tokens": tokens if tokens is not None else []
         })
 
