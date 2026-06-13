@@ -10,11 +10,14 @@ cowswap_runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cowswap_runtime)
 
 COWSWAP_CONNECTOR_NAME = cowswap_runtime.COWSWAP_CONNECTOR_NAME
+cancel_cowswap_order = cowswap_runtime.cancel_cowswap_order
 cowswap_connector_config_map = cowswap_runtime.cowswap_connector_config_map
 cowswap_connector_metadata = cowswap_runtime.cowswap_connector_metadata
+cowswap_order_records = cowswap_runtime.cowswap_order_records
 cowswap_order_submission_blocker = cowswap_runtime.cowswap_order_submission_blocker
 cowswap_supported_order_types = cowswap_runtime.cowswap_supported_order_types
 get_cowswap_runtime_status = cowswap_runtime.get_cowswap_runtime_status
+poll_cowswap_order = cowswap_runtime.poll_cowswap_order
 place_cowswap_market_order = cowswap_runtime.place_cowswap_market_order
 CowSwapRuntimeDependencies = cowswap_runtime.CowSwapRuntimeDependencies
 CowSwapRuntimeUnavailableError = cowswap_runtime.CowSwapRuntimeUnavailableError
@@ -201,6 +204,18 @@ class FakeCowSwapRuntime:
         self.calls.append(("buy", trading_pair, amount))
         return {"client_order_id": "buy-1"}
 
+    async def cancel(self, client_order_id):
+        self.calls.append(("cancel", client_order_id))
+        return {"client_order_id": client_order_id, "state": "CANCELLED"}
+
+    async def poll(self, client_order_id):
+        self.calls.append(("poll", client_order_id))
+        return {
+            "client_order_id": client_order_id,
+            "order_uid": "0xuid",
+            "state": "SUBMITTED",
+        }
+
 
 def test_place_cowswap_market_order_delegates_sell():
     runtime = FakeCowSwapRuntime()
@@ -264,6 +279,56 @@ def test_place_cowswap_market_order_rejects_unsupported_side():
         assert "side must be BUY or SELL" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_cancel_cowswap_order_delegates_to_runtime_adapter():
+    runtime = FakeCowSwapRuntime()
+
+    cancelled = asyncio.run(cancel_cowswap_order(runtime=runtime, client_order_id="cow-1"))
+
+    assert cancelled == "cow-1"
+    assert runtime.calls == [("cancel", "cow-1")]
+
+
+def test_poll_cowswap_order_serializes_order_evidence():
+    runtime = FakeCowSwapRuntime()
+
+    payload = asyncio.run(poll_cowswap_order(runtime=runtime, client_order_id="cow-1"))
+
+    assert payload["connector_name"] == COWSWAP_CONNECTOR_NAME
+    assert payload["client_order_id"] == "cow-1"
+    assert payload["exchange_order_id"] == "0xuid"
+
+
+def test_cowswap_order_records_reads_json_store(tmp_path):
+    store_path = tmp_path / "cowswap-orders.json"
+    store_path.write_text(
+        (
+            '{"cow-1": {"client_order_id": "cow-1", "trading_pair": "WETH-USDC",'
+            ' "order_uid": "0xuid", "state": "SUBMITTED"}}'
+        ),
+        encoding="utf-8",
+    )
+    dependencies = CowSwapRuntimeDependencies(
+        signer_provider=object(),
+        evm_reader=object(),
+        token_map={"WETH-USDC": object()},
+        order_store=SimpleNamespace(path=store_path),
+        owner_address="0x00000000000000000000000000000000000000aa",
+    )
+
+    records = cowswap_order_records(runtime=None, runtime_dependencies=dependencies)
+
+    assert records == [
+        {
+            "client_order_id": "cow-1",
+            "connector_name": COWSWAP_CONNECTOR_NAME,
+            "exchange_order_id": "0xuid",
+            "order_uid": "0xuid",
+            "state": "SUBMITTED",
+            "trading_pair": "WETH-USDC",
+        },
+    ]
 
 
 def test_non_cowswap_orders_have_no_cowswap_blocker():

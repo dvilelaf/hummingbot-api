@@ -347,6 +347,39 @@ async def place_cowswap_market_order(
     return client_order_id
 
 
+async def cancel_cowswap_order(*, runtime: Any | None, client_order_id: str) -> str:
+    """Cancel a CowSwap order through the initialized runtime adapter."""
+    if runtime is None:
+        raise CowSwapRuntimeUnavailableError("CowSwap runtime is not initialized")
+    result = await runtime.cancel(client_order_id)
+    cancelled_id = _extract_client_order_id(result) or client_order_id
+    return cancelled_id
+
+
+async def poll_cowswap_order(*, runtime: Any | None, client_order_id: str) -> dict[str, Any]:
+    """Poll and serialize one CowSwap order through the initialized runtime adapter."""
+    if runtime is None:
+        raise CowSwapRuntimeUnavailableError("CowSwap runtime is not initialized")
+    return _serialize_cowswap_order(await runtime.poll(client_order_id))
+
+
+def cowswap_order_records(
+    *,
+    runtime: Any | None,
+    runtime_dependencies: CowSwapRuntimeDependencies | None,
+) -> list[dict[str, Any]]:
+    """Return persisted CowSwap order evidence without claiming DB-backed orders."""
+    records: list[dict[str, Any]] = []
+    records.extend(_runtime_in_flight_orders(runtime))
+    records.extend(_store_orders(runtime_dependencies.order_store if runtime_dependencies else None))
+    deduped: dict[str, dict[str, Any]] = {}
+    for record in records:
+        client_order_id = str(record.get("client_order_id", ""))
+        if client_order_id:
+            deduped[client_order_id] = record
+    return list(deduped.values())
+
+
 def _load_connector_metadata(import_module: ImportModule) -> Mapping[str, Any] | None:
     try:
         metadata_module = import_module("hummingbot_cowswap.runtime_metadata")
@@ -408,6 +441,62 @@ def _extract_client_order_id(result: Any) -> str | None:
     else:
         value = getattr(result, "client_order_id", None)
     return str(value) if value else None
+
+
+def _runtime_in_flight_orders(runtime: Any | None) -> list[dict[str, Any]]:
+    if runtime is None:
+        return []
+    in_flight = getattr(runtime, "in_flight_orders", {})
+    if not isinstance(in_flight, Mapping):
+        return []
+    return [_serialize_cowswap_order(order) for order in in_flight.values()]
+
+
+def _store_orders(order_store: Any | None) -> list[dict[str, Any]]:
+    if order_store is None:
+        return []
+    store_path = getattr(order_store, "path", None)
+    if store_path is None:
+        return []
+    path = Path(store_path)
+    if not path.exists():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        return []
+    return [
+        _serialize_cowswap_order(raw_order)
+        for raw_order in payload.values()
+    ]
+
+
+def _serialize_cowswap_order(order: Any) -> dict[str, Any]:
+    if hasattr(order, "model_dump"):
+        payload = order.model_dump(mode="json")
+    elif isinstance(order, Mapping):
+        payload = dict(order)
+    else:
+        payload = {
+            name: getattr(order, name)
+            for name in (
+                "client_order_id",
+                "trading_pair",
+                "order_uid",
+                "state",
+                "raw_status",
+                "executed_sell",
+                "executed_buy",
+                "settlement_tx_hash",
+            )
+            if hasattr(order, name)
+        }
+    normalized = dict(payload)
+    state = normalized.get("state")
+    if state is not None and not isinstance(state, str):
+        normalized["state"] = getattr(state, "name", str(state))
+    normalized["connector_name"] = COWSWAP_CONNECTOR_NAME
+    normalized["exchange_order_id"] = normalized.get("order_uid")
+    return normalized
 
 
 def _has_raw_private_key_material(mapping: Mapping[str, Any] | None) -> bool:

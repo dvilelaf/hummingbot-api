@@ -3,7 +3,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 from fastapi import HTTPException
 from hummingbot.client.config.config_crypt import ETHKeyFileSecretManger
@@ -15,7 +15,9 @@ from database import AccountRepository, AsyncDatabaseManager, FundingRepository,
 from services.cowswap_runtime import (
     COWSWAP_CONNECTOR_NAME,
     CowSwapRuntimeDependencies,
+    cancel_cowswap_order,
     cowswap_connector_config_map,
+    cowswap_order_records,
     cowswap_order_submission_blocker,
     place_cowswap_market_order,
 )
@@ -976,7 +978,7 @@ class AccountsService:
 
         try:
             # Update the connector keys (this saves the credentials to file and validates them)
-            connector = await self._connector_service.update_connector_keys(account_name, connector_name, credentials)
+            await self._connector_service.update_connector_keys(account_name, connector_name, credentials)
 
             await self.update_account_state()
         except Exception as e:
@@ -1629,6 +1631,16 @@ class AccountsService:
         Returns:
             Dictionary of active orders
         """
+        if connector_name == COWSWAP_CONNECTOR_NAME:
+            return {
+                str(order["client_order_id"]): order
+                for order in cowswap_order_records(
+                    runtime=self._cowswap_runtime,
+                    runtime_dependencies=self._cowswap_runtime_dependencies,
+                )
+                if order.get("client_order_id")
+            }
+
         connector = await self.get_connector_instance(account_name, connector_name)
         return {order_id: order.to_json() for order_id, order in connector.in_flight_orders.items()}
     
@@ -1647,6 +1659,19 @@ class AccountsService:
         Raises:
             HTTPException: 404 if order not found, 500 if cancellation fails
         """
+        if connector_name == COWSWAP_CONNECTOR_NAME:
+            try:
+                return await cancel_cowswap_order(
+                    runtime=self._cowswap_runtime,
+                    client_order_id=client_order_id,
+                )
+            except Exception as e:
+                logger.error(f"Failed to initiate CowSwap cancellation for order {client_order_id}: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to initiate CowSwap order cancellation: {str(e)}",
+                )
+
         connector = await self.get_connector_instance(account_name, connector_name)
         
         # Check if order exists in in-flight orders
@@ -1775,6 +1800,17 @@ class AccountsService:
                         start_time: Optional[int] = None, end_time: Optional[int] = None,
                         limit: int = 100, offset: int = 0) -> List[Dict]:
         """Get order history using OrderRepository."""
+        if connector_name == COWSWAP_CONNECTOR_NAME:
+            orders = cowswap_order_records(
+                runtime=self._cowswap_runtime,
+                runtime_dependencies=self._cowswap_runtime_dependencies,
+            )
+            if trading_pair:
+                orders = [order for order in orders if order.get("trading_pair") == trading_pair]
+            if status:
+                orders = [order for order in orders if str(order.get("state", "")).upper() == status.upper()]
+            return orders[offset : offset + limit]
+
         await self.ensure_db_initialized()
         
         try:
