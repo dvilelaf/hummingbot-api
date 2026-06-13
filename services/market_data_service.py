@@ -557,6 +557,8 @@ class MarketDataService:
             if not connector:
                 return {"error": f"No connector available for {connector_name}"}
 
+            await self._ensure_trading_pairs_registered(connector, trading_pairs)
+
             # Ensure trading rules are loaded
             if not connector.trading_rules or len(connector.trading_rules) == 0:
                 await connector._update_trading_rules()
@@ -589,6 +591,25 @@ class MarketDataService:
         except Exception as e:
             logger.error(f"Error getting trading rules for {connector_name}: {e}")
             return {"error": str(e)}
+
+    async def _ensure_trading_pairs_registered(
+            self,
+            connector,
+            trading_pairs: Optional[List[str]],
+    ) -> None:
+        """Register requested pairs before refreshing connector trading rules."""
+        if not trading_pairs:
+            return
+
+        connector_pairs = getattr(connector, "_trading_pairs", None)
+        if isinstance(connector_pairs, list):
+            for trading_pair in trading_pairs:
+                if trading_pair not in connector_pairs:
+                    connector_pairs.append(trading_pair)
+
+        initialize_symbol_map = getattr(connector, "_initialize_trading_pair_symbol_map", None)
+        if callable(initialize_symbol_map):
+            await initialize_symbol_map()
 
     # ==================== Funding Info ====================
 
