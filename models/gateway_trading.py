@@ -57,6 +57,41 @@ class SwapExecuteResponse(BaseModel):
 
 
 # ============================================
+# Router Liquidity Models (AMM routers such as Aerodrome)
+# ============================================
+
+class RouterAddLiquidityRequest(BaseModel):
+    """Request to add liquidity through a Gateway router connector"""
+    connector: str = Field(description="Gateway router connector (e.g., 'aerodrome')")
+    network: str = Field(description="Network ID in 'chain-network' format (e.g., 'ethereum-base')")
+    token_a: str = Field(description="First token symbol or address")
+    token_b: str = Field(description="Second token symbol or address")
+    amount_a: Decimal = Field(description="Desired amount of token_a")
+    amount_b: Decimal = Field(description="Desired amount of token_b")
+    pool_type: str = Field(default="volatile", description="Pool type, e.g. 'stable' or 'volatile'")
+    slippage_pct: Optional[Decimal] = Field(default=1.0, description="Maximum slippage percentage")
+    wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+
+
+class RouterRemoveLiquidityRequest(BaseModel):
+    """Request to remove liquidity through a Gateway router connector"""
+    connector: str = Field(description="Gateway router connector (e.g., 'aerodrome')")
+    network: str = Field(description="Network ID in 'chain-network' format (e.g., 'ethereum-base')")
+    token_a: str = Field(description="First token symbol or address")
+    token_b: str = Field(description="Second token symbol or address")
+    liquidity: Decimal = Field(description="LP token amount to remove")
+    pool_type: str = Field(default="volatile", description="Pool type, e.g. 'stable' or 'volatile'")
+    slippage_pct: Optional[Decimal] = Field(default=1.0, description="Maximum slippage percentage")
+    wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+
+
+class RouterLiquidityResponse(BaseModel):
+    """Response after submitting a router liquidity transaction"""
+    transaction_hash: str = Field(description="Transaction hash")
+    status: str = Field(default="submitted", description="Transaction status")
+
+
+# ============================================
 # CLMM Liquidity Models (Meteora, Raydium, Uniswap V3)
 # ============================================
 

@@ -439,6 +439,58 @@ class GatewayClient:
             "quoteId": quote_id
         })
 
+    async def router_add_liquidity(
+        self,
+        connector: str,
+        network: str,
+        wallet_address: str,
+        token_a: str,
+        token_b: str,
+        amount_a: float,
+        amount_b: float,
+        pool_type: str,
+        slippage_pct: Optional[float] = None
+    ) -> Dict:
+        """Add liquidity through a Gateway router connector"""
+        payload = {
+            "network": network,
+            "walletAddress": wallet_address,
+            "tokenA": token_a,
+            "tokenB": token_b,
+            "amountA": str(amount_a),
+            "amountB": str(amount_b),
+            "poolType": pool_type
+        }
+        if slippage_pct is not None:
+            payload["slippagePct"] = slippage_pct
+
+        return await self._request("POST", f"connectors/{connector}/router/add-liquidity", json=payload)
+
+    async def router_remove_liquidity(
+        self,
+        connector: str,
+        network: str,
+        wallet_address: str,
+        token_a: str,
+        token_b: str,
+        liquidity: float,
+        pool_type: str,
+        slippage_pct: Optional[float] = None
+    ) -> Dict:
+        """Remove liquidity through a Gateway router connector"""
+        payload = {
+            "network": network,
+            "walletAddress": wallet_address,
+            "tokenA": token_a,
+            "tokenB": token_b,
+            "liquidity": str(liquidity),
+            "poolType": pool_type
+        }
+        if slippage_pct is not None:
+            payload["slippagePct"] = slippage_pct
+
+        return await self._request("POST", f"connectors/{connector}/router/remove-liquidity", json=payload)
+
     # ============================================
     # Liquidity Operations - CLMM (Concentrated Liquidity)
     # ============================================

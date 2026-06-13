@@ -51,6 +51,7 @@ from routers import (  # noqa: E402
     executors,
     gateway,
     gateway_clmm,
+    gateway_lp,
     gateway_swap,
     market_data,
     portfolio,
@@ -386,6 +387,7 @@ app.include_router(portfolio.router, dependencies=[Depends(auth_user)])
 app.include_router(trading.router, dependencies=[Depends(auth_user)])
 app.include_router(gateway_swap.router, dependencies=[Depends(auth_user)])
 app.include_router(gateway_clmm.router, dependencies=[Depends(auth_user)])
+app.include_router(gateway_lp.router, dependencies=[Depends(auth_user)])
 app.include_router(bot_orchestration.router, dependencies=[Depends(auth_user)])
 app.include_router(controllers.router, dependencies=[Depends(auth_user)])
 app.include_router(scripts.router, dependencies=[Depends(auth_user)])
