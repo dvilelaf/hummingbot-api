@@ -24,6 +24,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Gateway Swaps"], prefix="/gateway")
 
 
+def _gateway_error_detail(result: dict) -> str | None:
+    error = result.get("error") or result.get("message") or result.get("detail")
+    return str(error) if error else None
+
+
+def _valid_quote_amount(value) -> Decimal | None:
+    if value is None:
+        return None
+    amount = Decimal(str(value))
+    return amount if amount > 0 else None
+
+
+def _raise_if_invalid_quote(result: dict) -> None:
+    detail = _gateway_error_detail(result)
+    if detail:
+        raise HTTPException(status_code=502, detail=detail)
+
+    price = Decimal(str(result.get("price", 0)))
+    amount_in = _valid_quote_amount(result.get("amountIn") or result.get("amount_in"))
+    amount_out = _valid_quote_amount(result.get("amountOut") or result.get("amount_out"))
+    if price <= 0 or amount_in is None or amount_out is None:
+        raise HTTPException(status_code=502, detail="Gateway returned an invalid swap quote")
+
+
 def get_transaction_status_from_response(gateway_response: dict) -> str:
     """
     Determine transaction status from Gateway response.
@@ -86,13 +110,14 @@ async def get_swap_quote(
             slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0,
             pool_address=None
         )
+        _raise_if_invalid_quote(result)
 
         # Extract amounts from Gateway response (snake_case for consistency)
         amount_in_raw = result.get("amountIn") or result.get("amount_in")
         amount_out_raw = result.get("amountOut") or result.get("amount_out")
 
-        amount_in = Decimal(str(amount_in_raw)) if amount_in_raw else None
-        amount_out = Decimal(str(amount_out_raw)) if amount_out_raw else None
+        amount_in = _valid_quote_amount(amount_in_raw)
+        amount_out = _valid_quote_amount(amount_out_raw)
 
         # Extract gas estimate (try both camelCase and snake_case)
         gas_estimate = result.get("gasEstimate") or result.get("gas_estimate")
