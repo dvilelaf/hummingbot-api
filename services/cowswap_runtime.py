@@ -117,12 +117,16 @@ def cowswap_order_submission_blocker(
     connector_name: str,
     *,
     import_module: ImportModule = importlib.import_module,
+    runtime_dependencies: CowSwapRuntimeDependencies | None = None,
 ) -> str | None:
     """Return a pre-submit blocker for CowSwap orders, or None for other connectors."""
     if connector_name != COWSWAP_CONNECTOR_NAME:
         return None
 
-    status = get_cowswap_runtime_status(import_module=import_module)
+    status = get_cowswap_runtime_status(
+        import_module=import_module,
+        runtime_dependencies=runtime_dependencies,
+    )
     if not status.blockers:
         return None
     return "; ".join(status.blockers)

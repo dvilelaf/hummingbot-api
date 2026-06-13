@@ -140,6 +140,29 @@ def test_cowswap_runtime_status_can_report_ready_with_explicit_dependencies():
     assert status.blockers == ()
 
 
+def test_cowswap_order_blocker_clears_only_with_explicit_runtime_dependencies():
+    metadata = {
+        "connector": COWSWAP_CONNECTOR_NAME,
+        "config_map": {"uses_raw_private_key": False},
+        "order_types": ["MARKET"],
+    }
+    dependencies = CowSwapRuntimeDependencies(
+        signer_provider=object(),
+        evm_reader=object(),
+        token_map={"WETH-USDC": object()},
+        order_store=object(),
+        owner_address="0x00000000000000000000000000000000000000aa",
+    )
+
+    blocker = cowswap_order_submission_blocker(
+        COWSWAP_CONNECTOR_NAME,
+        import_module=metadata_importer(metadata),
+        runtime_dependencies=dependencies,
+    )
+
+    assert blocker is None
+
+
 def test_cowswap_runtime_status_names_missing_dependencies():
     metadata = {
         "connector": COWSWAP_CONNECTOR_NAME,
@@ -268,3 +291,24 @@ def test_api_files_wire_cowswap_through_fail_closed_gate():
 
     assert "CowSwapRuntimeUnavailableError" in unified_source
     assert "connector_name == COWSWAP_CONNECTOR_NAME" in unified_source
+
+
+def test_accounts_service_uses_runtime_delegate_only_after_cowswap_dependency_gate():
+    accounts_source = (ROOT / "services" / "accounts_service.py").read_text()
+
+    assert "place_cowswap_market_order" in accounts_source
+    assert "CowSwapRuntimeDependencies" in accounts_source
+
+    place_trade_index = accounts_source.index("async def place_trade")
+    dependencies_index = accounts_source.index("_cowswap_runtime_dependencies", place_trade_index)
+    blocker_index = accounts_source.index("cowswap_order_submission_blocker", dependencies_index)
+    runtime_delegate_index = accounts_source.index("place_cowswap_market_order", blocker_index)
+    connector_lookup_index = accounts_source.index(
+        "get_trading_connector(account_name, connector_name)",
+        blocker_index,
+    )
+    cowswap_branch_source = accounts_source[dependencies_index:connector_lookup_index]
+
+    assert "_cowswap_runtime_dependencies" in cowswap_branch_source
+    assert "order_type != OrderType.MARKET" in cowswap_branch_source
+    assert runtime_delegate_index < connector_lookup_index

@@ -12,7 +12,13 @@ from hummingbot.core.data_type.common import OrderType, PositionAction, Position
 
 from config import settings
 from database import AccountRepository, AsyncDatabaseManager, FundingRepository, OrderRepository, TradeRepository
-from services.cowswap_runtime import COWSWAP_CONNECTOR_NAME, cowswap_connector_config_map, cowswap_order_submission_blocker
+from services.cowswap_runtime import (
+    COWSWAP_CONNECTOR_NAME,
+    CowSwapRuntimeDependencies,
+    cowswap_connector_config_map,
+    cowswap_order_submission_blocker,
+    place_cowswap_market_order,
+)
 from services.gateway_client import GatewayClient
 from services.gateway_transaction_poller import GatewayTransactionPoller
 from utils.file_system import fs_util
@@ -494,6 +500,18 @@ class AccountsService:
 
         # Trading interfaces per account (for executor use)
         self._trading_interfaces: Dict[str, AccountTradingInterface] = {}
+        self._cowswap_runtime = None
+        self._cowswap_runtime_dependencies: CowSwapRuntimeDependencies | None = None
+
+    def configure_cowswap_runtime(
+        self,
+        *,
+        runtime,
+        runtime_dependencies: CowSwapRuntimeDependencies | None,
+    ):
+        """Inject an initialized CowSwap runtime bridge and its readiness dependencies."""
+        self._cowswap_runtime = runtime
+        self._cowswap_runtime_dependencies = runtime_dependencies
 
     def get_trading_interface(self, account_name: str) -> AccountTradingInterface:
         """
@@ -1400,11 +1418,41 @@ class AccountsService:
         if not self._connector_service:
             raise HTTPException(status_code=500, detail="Connector service not initialized")
 
-        blocker = cowswap_order_submission_blocker(connector_name)
+        runtime_dependencies = (
+            self._cowswap_runtime_dependencies
+            if connector_name == COWSWAP_CONNECTOR_NAME
+            else None
+        )
+        blocker = cowswap_order_submission_blocker(
+            connector_name,
+            runtime_dependencies=runtime_dependencies,
+        )
         if blocker:
             raise HTTPException(status_code=503, detail=blocker)
 
+        if connector_name == COWSWAP_CONNECTOR_NAME:
+            if order_type != OrderType.MARKET:
+                raise HTTPException(status_code=400, detail="CowSwap only supports MARKET orders")
+            try:
+                order_id = await place_cowswap_market_order(
+                    runtime=self._cowswap_runtime,
+                    trading_pair=trading_pair,
+                    side=trade_type.name,
+                    amount=str(amount),
+                )
+                logger.info(
+                    f"Placed {trade_type} order for {amount} {trading_pair} on {connector_name} "
+                    f"(Account: {account_name}). Order ID: {order_id}"
+                )
+                return order_id
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to place {trade_type} CowSwap order: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to place CowSwap trade: {str(e)}")
+
         connector = await self._connector_service.get_trading_connector(account_name, connector_name)
+        await self._ensure_trading_pair_rules_loaded(connector, connector_name, trading_pair)
         
         # Validate price for limit orders
         if order_type in [OrderType.LIMIT, OrderType.LIMIT_MAKER] and price is None:
@@ -1497,6 +1545,28 @@ class AccountsService:
         except Exception as e:
             logger.error(f"Failed to place {trade_type} order: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to place trade: {str(e)}")
+
+    async def _ensure_trading_pair_rules_loaded(
+        self,
+        connector,
+        connector_name: str,
+        trading_pair: str,
+    ) -> None:
+        """Load trading rules for a requested pair before submit validation."""
+        trading_pairs = getattr(connector, "_trading_pairs", None)
+        if isinstance(trading_pairs, list) and trading_pair not in trading_pairs:
+            trading_pairs.append(trading_pair)
+
+        if trading_pair in getattr(connector, "trading_rules", {}):
+            return
+
+        try:
+            await connector._initialize_trading_pair_symbol_map()
+            await connector._update_trading_rules()
+        except Exception as e:
+            logger.error(
+                f"Failed to load trading rules for {connector_name}/{trading_pair}: {e}"
+            )
     
     async def get_connector_instance(self, account_name: str, connector_name: str):
         """
