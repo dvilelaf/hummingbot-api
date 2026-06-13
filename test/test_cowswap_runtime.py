@@ -16,6 +16,7 @@ cowswap_connector_metadata = cowswap_runtime.cowswap_connector_metadata
 cowswap_order_records = cowswap_runtime.cowswap_order_records
 cowswap_order_submission_blocker = cowswap_runtime.cowswap_order_submission_blocker
 cowswap_supported_order_types = cowswap_runtime.cowswap_supported_order_types
+cowswap_token_map_from_json = cowswap_runtime.cowswap_token_map_from_json
 get_cowswap_runtime_status = cowswap_runtime.get_cowswap_runtime_status
 poll_cowswap_order = cowswap_runtime.poll_cowswap_order
 place_cowswap_market_order = cowswap_runtime.place_cowswap_market_order
@@ -329,6 +330,45 @@ def test_cowswap_order_records_reads_json_store(tmp_path):
             "trading_pair": "WETH-USDC",
         },
     ]
+
+
+def test_cowswap_token_map_from_json_accepts_base_quote_object():
+    token_map = cowswap_token_map_from_json(
+        (
+            '{"USDC-WETH": {'
+            '"base": {"symbol": "USDC", "address": "0x1", "decimals": 6},'
+            '"quote": {"symbol": "WETH", "address": "0x2", "decimals": 18}'
+            "}}"
+        ),
+    )
+
+    base_token, quote_token = token_map["USDC-WETH"]
+    assert base_token["symbol"] == "USDC"
+    assert quote_token["symbol"] == "WETH"
+
+
+def test_cowswap_token_map_from_json_accepts_pair_array():
+    token_map = cowswap_token_map_from_json(
+        (
+            '{"WETH-USDC": ['
+            '{"symbol": "WETH", "address": "0x2", "decimals": 18},'
+            '{"symbol": "USDC", "address": "0x1", "decimals": 6}'
+            "]}"
+        ),
+    )
+
+    base_token, quote_token = token_map["WETH-USDC"]
+    assert base_token["symbol"] == "WETH"
+    assert quote_token["symbol"] == "USDC"
+
+
+def test_cowswap_token_map_from_json_rejects_non_object():
+    try:
+        cowswap_token_map_from_json("[]")
+    except ValueError as exc:
+        assert "must be a JSON object" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_non_cowswap_orders_have_no_cowswap_blocker():

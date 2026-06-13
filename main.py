@@ -65,7 +65,7 @@ from routers import (  # noqa: E402
 )
 from services.accounts_service import AccountsService  # noqa: E402
 from services.backtesting_service import BacktestingService  # noqa: E402
-from services.cowswap_runtime import build_cowswap_runtime  # noqa: E402
+from services.cowswap_runtime import build_cowswap_runtime, cowswap_token_map_from_json  # noqa: E402
 from services.bots_orchestrator import BotsOrchestrator  # noqa: E402
 from services.docker_service import DockerService  # noqa: E402
 from services.executor_service import ExecutorService  # noqa: E402
@@ -229,6 +229,7 @@ async def lifespan(app: FastAPI):
             env=env_text("COWSWAP_ENV", "staging"),
             app_data=env_text("COWSWAP_APP_DATA", "0x" + "00" * 32),
             slippage_bps=env_int("COWSWAP_SLIPPAGE_BPS", 50),
+            token_map=cowswap_token_map_from_json(os.environ.get("COWSWAP_TOKEN_MAP_JSON")),
         )
         accounts_service.configure_cowswap_runtime(
             runtime=cowswap_runtime,

@@ -225,6 +225,28 @@ def build_cowswap_runtime(
     return runtime, dependencies
 
 
+def cowswap_token_map_from_json(raw: str | None) -> Mapping[str, tuple[Mapping[str, Any], Mapping[str, Any]]] | None:
+    """Parse optional token-map JSON from env without changing connector logic."""
+    if raw is None or not raw.strip():
+        return None
+    payload = json.loads(raw)
+    if not isinstance(payload, Mapping):
+        raise ValueError("COWSWAP_TOKEN_MAP_JSON must be a JSON object")
+    token_map: dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
+    for pair, value in payload.items():
+        if isinstance(value, Mapping):
+            base_token = value.get("base")
+            quote_token = value.get("quote")
+        elif isinstance(value, list | tuple) and len(value) == 2:
+            base_token, quote_token = value
+        else:
+            raise ValueError(f"CowSwap token map entry for {pair} must define base and quote tokens")
+        if not isinstance(base_token, Mapping) or not isinstance(quote_token, Mapping):
+            raise ValueError(f"CowSwap token map entry for {pair} must contain token objects")
+        token_map[str(pair)] = (base_token, quote_token)
+    return token_map
+
+
 def get_cowswap_runtime_status(
     *,
     import_module: ImportModule = importlib.import_module,
