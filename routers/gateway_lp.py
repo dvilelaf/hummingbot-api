@@ -61,8 +61,8 @@ async def add_router_liquidity(
             wallet_address=wallet_address,
             token_a=request.token_a,
             token_b=request.token_b,
-            amount_a=float(request.amount_a),
-            amount_b=float(request.amount_b),
+            amount_a=request.amount_a,
+            amount_b=request.amount_b,
             pool_type=request.pool_type,
             slippage_pct=float(request.slippage_pct) if request.slippage_pct is not None else None,
         )
@@ -103,7 +103,7 @@ async def remove_router_liquidity(
             wallet_address=wallet_address,
             token_a=request.token_a,
             token_b=request.token_b,
-            liquidity=float(request.liquidity),
+            liquidity=request.liquidity,
             pool_type=request.pool_type,
             slippage_pct=float(request.slippage_pct) if request.slippage_pct is not None else None,
         )

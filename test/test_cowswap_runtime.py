@@ -193,11 +193,11 @@ class FakeCowSwapRuntime:
     def __init__(self):
         self.calls = []
 
-    async def submit_sell_order(self, *, trading_pair, amount):
+    async def sell(self, *, trading_pair, amount):
         self.calls.append(("sell", trading_pair, amount))
         return SimpleNamespace(client_order_id="sell-1")
 
-    async def submit_buy_order(self, *, trading_pair, amount):
+    async def buy(self, *, trading_pair, amount):
         self.calls.append(("buy", trading_pair, amount))
         return {"client_order_id": "buy-1"}
 

@@ -1505,7 +1505,15 @@ class AccountsService:
                         price = Decimal(str(prices[trading_pair]))
                 except Exception as e:
                     logger.error(f"Error getting market price for {trading_pair}: {e}")
-            notional_size = price * quantized_amount if price else Decimal("0")
+            if price is None or price <= Decimal("0"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Market price is required to validate MARKET order notional for {trading_pair}. "
+                        "Use a LIMIT order or provide a connector/pair with available market price."
+                    ),
+                )
+            notional_size = price * quantized_amount
             
         if notional_size < trading_rule.min_notional_size:
             raise HTTPException(

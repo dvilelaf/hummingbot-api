@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -29,6 +30,12 @@ class GatewayClient:
         if len(parts) != 2:
             raise ValueError(f"Invalid network_id format. Expected 'chain-network', got '{network_id}'")
         return parts[0], parts[1]
+
+    @staticmethod
+    def _decimal_payload_value(value) -> str:
+        if isinstance(value, Decimal):
+            return format(value, "f")
+        return str(value)
 
     async def get_wallet_address_or_default(self, chain: str, wallet_address: Optional[str] = None) -> str:
         """Get wallet address - use provided or get default for chain"""
@@ -390,7 +397,7 @@ class GatewayClient:
             "network": network,
             "baseToken": base_asset,
             "quoteToken": quote_asset,
-            "amount": str(amount),
+            "amount": self._decimal_payload_value(amount),
             "side": side.upper()
         }
         if slippage_pct is not None:
@@ -417,7 +424,7 @@ class GatewayClient:
             "walletAddress": wallet_address,
             "baseToken": base_asset,
             "quoteToken": quote_asset,
-            "amount": str(amount),
+            "amount": self._decimal_payload_value(amount),
             "side": side.upper()
         }
         if slippage_pct is not None:
@@ -457,8 +464,8 @@ class GatewayClient:
             "walletAddress": wallet_address,
             "tokenA": token_a,
             "tokenB": token_b,
-            "amountA": str(amount_a),
-            "amountB": str(amount_b),
+            "amountA": self._decimal_payload_value(amount_a),
+            "amountB": self._decimal_payload_value(amount_b),
             "poolType": pool_type
         }
         if slippage_pct is not None:
@@ -483,7 +490,7 @@ class GatewayClient:
             "walletAddress": wallet_address,
             "tokenA": token_a,
             "tokenB": token_b,
-            "liquidity": str(liquidity),
+            "liquidity": self._decimal_payload_value(liquidity),
             "poolType": pool_type
         }
         if slippage_pct is not None:

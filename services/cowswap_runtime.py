@@ -145,12 +145,12 @@ async def place_cowswap_market_order(
 
     normalized_side = side.upper()
     if normalized_side == "SELL":
-        result = await runtime.submit_sell_order(
+        result = await runtime.sell(
             trading_pair=trading_pair,
             amount=amount,
         )
     elif normalized_side == "BUY":
-        result = await runtime.submit_buy_order(
+        result = await runtime.buy(
             trading_pair=trading_pair,
             amount=amount,
         )

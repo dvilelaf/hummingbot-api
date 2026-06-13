@@ -105,7 +105,7 @@ async def get_swap_quote(
             network=network,
             base_asset=base,
             quote_asset=quote,
-            amount=float(request.amount),
+            amount=request.amount,
             side=request.side,
             slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0,
             pool_address=None
@@ -188,7 +188,7 @@ async def execute_swap(
             wallet_address=wallet_address,
             base_asset=base,
             quote_asset=quote,
-            amount=float(request.amount),
+            amount=request.amount,
             side=request.side,
             slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0
         )

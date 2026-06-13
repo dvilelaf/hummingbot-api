@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 from pathlib import Path
+from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
@@ -59,6 +60,34 @@ def test_router_add_liquidity_posts_gateway_payload():
             },
         ),
     ]
+
+
+def test_router_add_liquidity_preserves_small_decimal_payload():
+    calls = []
+    client = GatewayClient(base_url="http://gateway.local")
+
+    async def fake_request(method, path, params=None, json=None):
+        calls.append((method, path, params, json))
+        return {"signature": "0xadd"}
+
+    client._request = fake_request
+
+    asyncio.run(
+        client.router_add_liquidity(
+            connector="aerodrome",
+            network="base",
+            wallet_address="0x1111111111111111111111111111111111111111",
+            token_a="WETH",
+            token_b="USDC",
+            amount_a=Decimal("0.000001"),
+            amount_b=Decimal("0.000001"),
+            pool_type="volatile",
+            slippage_pct=0.5,
+        ),
+    )
+
+    assert calls[0][3]["amountA"] == "0.000001"
+    assert calls[0][3]["amountB"] == "0.000001"
 
 
 def test_router_remove_liquidity_posts_gateway_payload():
