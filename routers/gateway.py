@@ -10,6 +10,7 @@ from models import (
     CreateWalletRequest,
     GatewayConfig,
     GatewayStatus,
+    GatewayTransactionPollRequest,
     SendTransactionRequest,
     ShowPrivateKeyRequest,
     UpdateApiKeysRequest,
@@ -1090,3 +1091,28 @@ async def send_transaction(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error sending transaction: {str(e)}")
+
+
+@router.post("/transactions/poll")
+async def poll_transaction(
+    request: GatewayTransactionPollRequest,
+    accounts_service: AccountsService = Depends(get_accounts_service),
+) -> Dict:
+    """Poll Gateway for transaction confirmation status."""
+    try:
+        if not await accounts_service.gateway_client.ping():
+            raise HTTPException(status_code=503, detail="Gateway service is not available")
+
+        result = await accounts_service.gateway_client.poll_transaction(
+            network_id=f"{request.chain}-{request.network}",
+            tx_hash=request.tx_hash,
+        )
+        if result is None:
+            raise HTTPException(status_code=502, detail="Gateway returned no transaction poll response")
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=f"Failed to poll transaction: {result.get('error')}")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error polling transaction: {str(e)}")

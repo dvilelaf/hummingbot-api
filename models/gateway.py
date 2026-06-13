@@ -50,6 +50,14 @@ class SendTransactionRequest(BaseModel):
     amount: str = Field(description="Amount to send (in native token units)")
 
 
+class GatewayTransactionPollRequest(BaseModel):
+    """Request to poll a Gateway transaction by chain/network and hash."""
+
+    chain: str = Field(description="Blockchain chain (e.g., 'solana', 'ethereum')")
+    network: str = Field(description="Network (e.g., 'mainnet-beta', 'base')")
+    tx_hash: str = Field(description="Transaction hash/signature to poll")
+
+
 class GatewayWalletCredential(BaseModel):
     """Credentials for adding an existing wallet to Gateway"""
     chain: str = Field(description="Blockchain chain (e.g., 'solana', 'ethereum')")
