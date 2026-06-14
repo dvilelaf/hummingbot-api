@@ -173,6 +173,7 @@ async def execute_swap(
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
         assert_live_gateway_mutation_allowed(
+            action="swap_execute",
             chain=chain,
             network=network,
             source="gateway_swap.execute_swap",

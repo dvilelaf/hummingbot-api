@@ -65,11 +65,13 @@ def test_gateway_mutation_gate_allows_test_networks_by_default(monkeypatch):
     gate = _live_gate_module()
 
     gate.assert_live_gateway_mutation_allowed(
+        action="swap_execute",
         chain="ethereum",
         network="sepolia",
         source="test",
     )
     gate.assert_live_gateway_mutation_allowed(
+        action="swap_execute",
         chain="solana",
         network="devnet",
         source="test",
@@ -82,6 +84,7 @@ def test_gateway_mutation_gate_blocks_mainnet_by_default(monkeypatch):
 
     try:
         gate.assert_live_gateway_mutation_allowed(
+            action="swap_execute",
             chain="ethereum",
             network="base",
             source="test",
@@ -94,11 +97,33 @@ def test_gateway_mutation_gate_blocks_mainnet_by_default(monkeypatch):
         raise AssertionError("expected HTTPException")
 
 
-def test_gateway_mutation_gate_allows_mainnet_when_explicitly_enabled(monkeypatch):
+def test_gateway_mutation_gate_blocks_mainnet_with_global_flag_only(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", "true")
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", raising=False)
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_gateway_mutation_allowed(
+            action="swap_execute",
+            chain="ethereum",
+            network="base",
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "live Gateway mutation disabled for action swap_execute" in str(exc.detail)
+        assert "TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+def test_gateway_mutation_gate_allows_mainnet_when_action_enabled(monkeypatch):
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", "true")
     gate = _live_gate_module()
 
     gate.assert_live_gateway_mutation_allowed(
+        action="swap_execute",
         chain="ethereum",
         network="base",
         source="test",
@@ -142,6 +167,7 @@ def test_gateway_swap_checks_live_gate_before_execute_swap():
     source = (ROOT / "routers" / "gateway_swap.py").read_text()
     execute_source = source[source.index("async def execute_swap") :]
 
+    assert 'action="swap_execute"' in execute_source
     assert execute_source.index("assert_live_gateway_mutation_allowed(") < execute_source.index(
         "accounts_service.gateway_client.execute_swap(",
     )
@@ -152,6 +178,8 @@ def test_gateway_lp_checks_live_gate_before_add_and_remove():
     add_source = source[source.index("async def add_router_liquidity") : source.index("async def remove_router_liquidity")]
     remove_source = source[source.index("async def remove_router_liquidity") :]
 
+    assert 'action="lp_add"' in add_source
+    assert 'action="lp_remove"' in remove_source
     assert add_source.index("assert_live_gateway_mutation_allowed(") < add_source.index(
         "accounts_service.gateway_client.router_add_liquidity(",
     )
@@ -164,6 +192,7 @@ def test_gateway_wallet_send_checks_live_gate_before_send_transaction():
     source = (ROOT / "routers" / "gateway.py").read_text()
     send_source = source[source.index("async def send_transaction") : source.index("@router.post(\"/transactions/poll\")")]
 
+    assert 'action="wallet_send"' in send_source
     assert send_source.index("assert_live_gateway_mutation_allowed(") < send_source.index(
         "accounts_service.gateway_client.send_transaction(",
     )
@@ -199,11 +228,20 @@ def test_gateway_clmm_checks_live_gate_before_mutations():
         ),
     )
 
+    expected_actions = {
+        "accounts_service.gateway_client.clmm_open_position(": 'action="clmm_open_position"',
+        "accounts_service.gateway_client.clmm_add_liquidity(": 'action="clmm_add_liquidity"',
+        "accounts_service.gateway_client.clmm_remove_liquidity(": 'action="clmm_remove_liquidity"',
+        "accounts_service.gateway_client.clmm_close_position(": 'action="clmm_close_position"',
+        "accounts_service.gateway_client.clmm_collect_fees(": 'action="clmm_collect_fees"',
+    }
+
     for start_marker, end_marker, mutation_call in mutation_calls:
         start = source.index(start_marker)
         end = source.index(end_marker) if end_marker is not None else len(source)
         mutation_source = source[start:end]
 
+        assert expected_actions[mutation_call] in mutation_source
         assert mutation_source.index("assert_live_gateway_mutation_allowed(") < mutation_source.index(
             mutation_call,
         )

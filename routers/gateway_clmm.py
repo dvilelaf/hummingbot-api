@@ -535,6 +535,7 @@ async def open_clmm_position(
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
         assert_live_gateway_mutation_allowed(
+            action="clmm_open_position",
             chain=chain,
             network=network,
             source="gateway_clmm.open_position",
@@ -709,6 +710,7 @@ async def add_liquidity_to_clmm_position(
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
         assert_live_gateway_mutation_allowed(
+            action="clmm_add_liquidity",
             chain=chain,
             network=network,
             source="gateway_clmm.add_liquidity",
@@ -807,6 +809,7 @@ async def remove_liquidity_from_clmm_position(
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
         assert_live_gateway_mutation_allowed(
+            action="clmm_remove_liquidity",
             chain=chain,
             network=network,
             source="gateway_clmm.remove_liquidity",
@@ -902,6 +905,7 @@ async def close_clmm_position(
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
         assert_live_gateway_mutation_allowed(
+            action="clmm_close_position",
             chain=chain,
             network=network,
             source="gateway_clmm.close_position",
@@ -1106,6 +1110,7 @@ async def collect_fees_from_clmm_position(
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
         assert_live_gateway_mutation_allowed(
+            action="clmm_collect_fees",
             chain=chain,
             network=network,
             source="gateway_clmm.collect_fees",
@@ -1486,4 +1491,3 @@ async def search_clmm_positions(
     except Exception as e:
         logger.error(f"Error searching CLMM positions: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error searching CLMM positions: {str(e)}")
-

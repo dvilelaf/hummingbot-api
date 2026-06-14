@@ -1073,6 +1073,7 @@ async def send_transaction(
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 
         assert_live_gateway_mutation_allowed(
+            action="wallet_send",
             chain=request.chain,
             network=request.network,
             source="gateway.wallets.send",

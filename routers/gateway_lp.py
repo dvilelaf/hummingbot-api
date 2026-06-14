@@ -53,6 +53,7 @@ async def add_router_liquidity(
 
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
         assert_live_gateway_mutation_allowed(
+            action="lp_add",
             chain=chain,
             network=network,
             source="gateway_lp.add_router_liquidity",
@@ -100,6 +101,7 @@ async def remove_router_liquidity(
 
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
         assert_live_gateway_mutation_allowed(
+            action="lp_remove",
             chain=chain,
             network=network,
             source="gateway_lp.remove_router_liquidity",

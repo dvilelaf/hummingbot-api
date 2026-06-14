@@ -32,6 +32,7 @@ def assert_live_order_submission_allowed(
 
 def assert_live_gateway_mutation_allowed(
     *,
+    action: str,
     chain: str,
     network: str,
     source: str,
@@ -39,13 +40,14 @@ def assert_live_gateway_mutation_allowed(
     """Fail closed before direct live Gateway signing or broadcast."""
     if _is_safe_gateway_network(network):
         return
-    if _env_bool(LIVE_GATEWAY_MUTATIONS_ENV):
+    action_env = _gateway_action_env(action)
+    if _env_bool(action_env):
         return
     raise HTTPException(
         status_code=503,
         detail=(
-            "live Gateway mutation disabled; "
-            f"set {LIVE_GATEWAY_MUTATIONS_ENV}=true only behind Marlin live gates "
+            f"live Gateway mutation disabled for action {action}; "
+            f"set {action_env}=true only behind Marlin live gates "
             f"(source={source}, network={chain}/{network})"
         ),
     )
@@ -64,3 +66,11 @@ def _is_safe_gateway_network(network: str) -> bool:
 
 def _env_bool(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _gateway_action_env(action: str) -> str:
+    normalized = "".join(
+        character if character.isalnum() else "_"
+        for character in action.strip().upper()
+    ).strip("_")
+    return f"TRADING_SAFETY_LIVE_GATEWAY_{normalized}_ENABLED"
