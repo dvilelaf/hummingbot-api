@@ -386,6 +386,11 @@ class AccountTradingInterface:
         if not connector:
             raise ValueError(f"Connector {connector_name} not loaded. Call ensure_connector first.")
 
+        assert_live_order_submission_allowed(
+            account_name=self._account_name,
+            connector_name=connector_name,
+            source="accounts_trading_interface.cancel",
+        )
         return connector.cancel(trading_pair=trading_pair, client_order_id=order_id)
 
     def get_active_orders(self, connector_name: str) -> List:
@@ -1700,6 +1705,11 @@ class AccountsService:
             raise HTTPException(status_code=500, detail=f"Order '{client_order_id}' is missing trading pair")
         
         try:
+            assert_live_order_submission_allowed(
+                account_name=account_name,
+                connector_name=connector_name,
+                source="accounts_service.cancel_order",
+            )
             result = connector.cancel(trading_pair=trading_pair, client_order_id=client_order_id)
             logger.info(f"Initiated cancellation for order {client_order_id} on {connector_name} (Account: {account_name})")
             return result

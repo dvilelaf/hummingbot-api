@@ -341,6 +341,11 @@ class AccountTradingInterface:
         if not connector:
             raise ValueError(f"Connector {connector_name} not loaded. Call ensure_connector first.")
 
+        assert_live_order_submission_allowed(
+            account_name=self._account_name,
+            connector_name=connector_name,
+            source="trading_service.cancel",
+        )
         return connector.cancel(trading_pair=trading_pair, client_order_id=order_id)
 
     def get_active_orders(self, connector_name: str) -> List:

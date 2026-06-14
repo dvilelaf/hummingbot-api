@@ -82,3 +82,31 @@ def test_trading_service_checks_live_gate_before_executor_order_submission():
     assert sell_source.index("assert_live_order_submission_allowed(") < sell_source.index(
         "connector.sell(",
     )
+
+
+def test_accounts_service_checks_live_gate_before_cancel_order_submission():
+    source = (ROOT / "services" / "accounts_service.py").read_text()
+    cancel_source = source[source.index("async def cancel_order") : source.index("async def set_leverage")]
+
+    assert cancel_source.index("assert_live_order_submission_allowed(") < cancel_source.index(
+        "connector.cancel(",
+    )
+
+
+def test_accounts_trading_interface_checks_live_gate_before_cancel_submission():
+    source = (ROOT / "services" / "accounts_service.py").read_text()
+    interface_source = source[source.index("class AccountTradingInterface") : source.index("class AccountsService")]
+    cancel_source = interface_source[interface_source.index("    def cancel(") : interface_source.index("    def get_active_orders(")]
+
+    assert cancel_source.index("assert_live_order_submission_allowed(") < cancel_source.index(
+        "connector.cancel(",
+    )
+
+
+def test_trading_service_checks_live_gate_before_executor_cancel_submission():
+    source = (ROOT / "services" / "trading_service.py").read_text()
+    cancel_source = source[source.index("    def cancel(") : source.index("    def get_active_orders(")]
+
+    assert cancel_source.index("assert_live_order_submission_allowed(") < cancel_source.index(
+        "connector.cancel(",
+    )
