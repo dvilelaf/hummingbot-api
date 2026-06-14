@@ -1486,6 +1486,16 @@ class AccountsService:
         if blocker:
             raise HTTPException(status_code=503, detail=blocker)
 
+        if connector_name == "xrpl" and order_type == OrderType.MARKET:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "XRPL MARKET orders are disabled because MARKET notional semantics are not "
+                    "safe enough for Marlin execution evidence; use a LIMIT order with explicit "
+                    "price and amount."
+                ),
+            )
+
         if connector_name == COWSWAP_CONNECTOR_NAME:
             if order_type != OrderType.MARKET:
                 raise HTTPException(status_code=400, detail="CowSwap only supports MARKET orders")

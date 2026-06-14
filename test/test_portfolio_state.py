@@ -246,3 +246,34 @@ class TestConnectorStartup:
             "master_account",
             "binance_perpetual_testnet",
         )
+
+
+class TestXrplTradingSafety:
+    """Tests for XRPL execution safety boundaries."""
+
+    @pytest.mark.asyncio
+    async def test_xrpl_market_orders_are_explicitly_blocked_before_connector_access(self):
+        """XRPL MARKET order notional semantics are blocked instead of guessed."""
+        from fastapi import HTTPException
+        from hummingbot.core.data_type.common import OrderType, TradeType
+        from services.accounts_service import AccountsService
+
+        service = AccountsService.__new__(AccountsService)
+        service.list_accounts = MagicMock(return_value=["master_account"])
+        service._connector_service = MagicMock()
+        service._connector_service.get_trading_connector = AsyncMock()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.place_trade(
+                account_name="master_account",
+                connector_name="xrpl",
+                trading_pair="XRP-USD",
+                trade_type=TradeType.BUY,
+                amount=Decimal("1"),
+                order_type=OrderType.MARKET,
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "XRPL MARKET orders are disabled" in str(exc_info.value.detail)
+        assert "LIMIT" in str(exc_info.value.detail)
+        service._connector_service.get_trading_connector.assert_not_awaited()
