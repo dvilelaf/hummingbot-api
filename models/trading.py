@@ -18,6 +18,10 @@ class TradeRequest(BaseModel):
     order_type: Literal["LIMIT", "MARKET", "LIMIT_MAKER"] = Field(default="LIMIT", description="Type of order")
     price: Optional[Decimal] = Field(default=None, description="Price for limit orders")
     position_action: Literal["OPEN", "CLOSE"] = Field(default="OPEN", description="Position action for perpetual contracts (OPEN/CLOSE)")
+    live_action_authorization: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Marlin live-action-authorization-v1 artifact for live order submission",
+    )
 
     @field_validator('trade_type')
     @classmethod
@@ -48,6 +52,15 @@ class TradeRequest(BaseModel):
         except KeyError:
             valid_actions = [a.name for a in PositionAction]
             raise ValueError(f"Invalid position_action '{v}'. Must be one of: {valid_actions}")
+
+
+class CancelOrderRequest(BaseModel):
+    """Optional body for live-safe order cancellation."""
+
+    live_action_authorization: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Marlin live-action-authorization-v1 artifact for live order cancellation",
+    )
 
 
 class TradeResponse(BaseModel):

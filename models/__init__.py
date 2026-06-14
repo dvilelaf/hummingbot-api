@@ -187,6 +187,7 @@ from .trading import (
     AccountBalance,
     ActiveOrderFilterRequest,
     ActiveOrdersResponse,
+    CancelOrderRequest,
     ConnectorBalance,
     FundingPaymentFilterRequest,
     OrderFilterRequest,
@@ -221,6 +222,7 @@ __all__ = [
     "V2ControllerDeployment",
     "V2ScriptDeployment",
     # Trading models
+    "CancelOrderRequest",
     "TradeRequest",
     "TradeResponse",
     "TokenInfo",

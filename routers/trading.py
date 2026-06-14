@@ -8,6 +8,7 @@ from starlette import status
 from deps import get_accounts_service, get_connector_service
 from models import (
     ActiveOrderFilterRequest,
+    CancelOrderRequest,
     FundingPaymentFilterRequest,
     OrderFilterRequest,
     PaginatedResponse,
@@ -59,6 +60,7 @@ async def place_trade(
             order_type=order_type_enum,
             price=trade_request.price,
             position_action=position_action_enum,
+            live_action_authorization=trade_request.live_action_authorization,
         )
 
         return TradeResponse(
@@ -83,6 +85,7 @@ async def cancel_order(
     account_name: str,
     connector_name: str,
     client_order_id: str,
+    cancel_request: CancelOrderRequest | None = None,
     accounts_service: AccountsService = Depends(get_accounts_service),
 ):
     """
@@ -102,8 +105,14 @@ async def cancel_order(
         HTTPException: 404 if account/connector not found, 500 for cancellation errors
     """
     try:
+        live_action_authorization = (
+            None if cancel_request is None else cancel_request.live_action_authorization
+        )
         cancelled_order_id = await accounts_service.cancel_order(
-            account_name=account_name, connector_name=connector_name, client_order_id=client_order_id
+            account_name=account_name,
+            connector_name=connector_name,
+            client_order_id=client_order_id,
+            live_action_authorization=live_action_authorization,
         )
         return {"message": f"Order cancellation initiated for {cancelled_order_id}"}
     except HTTPException:

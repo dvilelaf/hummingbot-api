@@ -235,6 +235,24 @@ def test_accounts_service_checks_live_gate_before_connector_order_submission():
 
     assert gate_index < buy_index
     assert gate_index < sell_index
+    assert "live_action_authorization=live_action_authorization" in place_trade[:buy_index]
+
+
+def test_trading_route_passes_authorization_to_place_trade():
+    source = (ROOT / "routers" / "trading.py").read_text()
+    place_route = source[source.index("async def place_trade") : source.index("@router.post(\"/{account_name}")]
+
+    assert "live_action_authorization=trade_request.live_action_authorization" in place_route
+
+
+def test_trading_route_passes_authorization_to_cancel_order():
+    source = (ROOT / "routers" / "trading.py").read_text()
+    cancel_route = source[source.index("async def cancel_order") : source.index("@router.post(\"/{account_name}/{connector_name}/orders/{client_order_id}/poll\")")]
+
+    assert "cancel_request: CancelOrderRequest" in cancel_route
+    assert "live_action_authorization = (" in cancel_route
+    assert "cancel_request.live_action_authorization" in cancel_route
+    assert "live_action_authorization=live_action_authorization" in cancel_route
 
 
 def test_trading_service_checks_live_gate_before_executor_order_submission():
@@ -257,6 +275,7 @@ def test_accounts_service_checks_live_gate_before_cancel_order_submission():
     assert cancel_source.index("assert_live_order_submission_allowed(") < cancel_source.index(
         "connector.cancel(",
     )
+    assert "live_action_authorization=live_action_authorization" in cancel_source
 
 
 def test_gateway_swap_checks_live_gate_before_execute_swap():

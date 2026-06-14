@@ -3,7 +3,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import HTTPException
 from hummingbot.client.config.config_crypt import ETHKeyFileSecretManger
@@ -1408,9 +1408,18 @@ class AccountsService:
                 "error": str(e)
             }
     
-    async def place_trade(self, account_name: str, connector_name: str, trading_pair: str,
-                         trade_type: TradeType, amount: Decimal, order_type: OrderType = OrderType.LIMIT,
-                         price: Optional[Decimal] = None, position_action: PositionAction = PositionAction.OPEN) -> str:
+    async def place_trade(
+        self,
+        account_name: str,
+        connector_name: str,
+        trading_pair: str,
+        trade_type: TradeType,
+        amount: Decimal,
+        order_type: OrderType = OrderType.LIMIT,
+        price: Optional[Decimal] = None,
+        position_action: PositionAction = PositionAction.OPEN,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
         Place a trade using the specified account and connector.
 
@@ -1453,6 +1462,12 @@ class AccountsService:
             if order_type != OrderType.MARKET:
                 raise HTTPException(status_code=400, detail="CowSwap only supports MARKET orders")
             try:
+                assert_live_order_submission_allowed(
+                    account_name=account_name,
+                    connector_name=connector_name,
+                    live_action_authorization=live_action_authorization,
+                    source="accounts_service.place_trade",
+                )
                 order_id = await place_cowswap_market_order(
                     runtime=self._cowswap_runtime,
                     trading_pair=trading_pair,
@@ -1551,6 +1566,7 @@ class AccountsService:
             assert_live_order_submission_allowed(
                 account_name=account_name,
                 connector_name=connector_name,
+                live_action_authorization=live_action_authorization,
                 source="accounts_service.place_trade",
             )
             if trade_type == TradeType.BUY:
@@ -1666,7 +1682,13 @@ class AccountsService:
         connector = await self.get_connector_instance(account_name, connector_name)
         return {order_id: order.to_json() for order_id, order in connector.in_flight_orders.items()}
     
-    async def cancel_order(self, account_name: str, connector_name: str, client_order_id: str) -> str:
+    async def cancel_order(
+        self,
+        account_name: str,
+        connector_name: str,
+        client_order_id: str,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
         Cancel an active order.
         
@@ -1683,6 +1705,12 @@ class AccountsService:
         """
         if connector_name == COWSWAP_CONNECTOR_NAME:
             try:
+                assert_live_order_submission_allowed(
+                    account_name=account_name,
+                    connector_name=connector_name,
+                    live_action_authorization=live_action_authorization,
+                    source="accounts_service.cancel_order",
+                )
                 return await cancel_cowswap_order(
                     runtime=self._cowswap_runtime,
                     client_order_id=client_order_id,
@@ -1708,6 +1736,7 @@ class AccountsService:
             assert_live_order_submission_allowed(
                 account_name=account_name,
                 connector_name=connector_name,
+                live_action_authorization=live_action_authorization,
                 source="accounts_service.cancel_order",
             )
             result = connector.cancel(trading_pair=trading_pair, client_order_id=client_order_id)
