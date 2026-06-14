@@ -24,6 +24,7 @@ from services.cowswap_runtime import (
 )
 from services.gateway_client import GatewayClient
 from services.gateway_transaction_poller import GatewayTransactionPoller
+from services.live_trading_gate import assert_live_order_submission_allowed
 from utils.file_system import fs_util
 
 # Create module-specific logger
@@ -311,6 +312,11 @@ class AccountTradingInterface:
         if not connector:
             raise ValueError(f"Connector {connector_name} not loaded. Call ensure_connector first.")
 
+        assert_live_order_submission_allowed(
+            account_name=self._account_name,
+            connector_name=connector_name,
+            source="accounts_trading_interface.buy",
+        )
         return connector.buy(
             trading_pair=trading_pair,
             amount=amount,
@@ -346,6 +352,11 @@ class AccountTradingInterface:
         if not connector:
             raise ValueError(f"Connector {connector_name} not loaded. Call ensure_connector first.")
 
+        assert_live_order_submission_allowed(
+            account_name=self._account_name,
+            connector_name=connector_name,
+            source="accounts_trading_interface.sell",
+        )
         return connector.sell(
             trading_pair=trading_pair,
             amount=amount,
@@ -1532,6 +1543,11 @@ class AccountsService:
         try:
             # Place the order using the connector with quantized values
             # (position_action will be ignored by non-perpetual connectors)
+            assert_live_order_submission_allowed(
+                account_name=account_name,
+                connector_name=connector_name,
+                source="accounts_service.place_trade",
+            )
             if trade_type == TradeType.BUY:
                 order_id = connector.buy(
                     trading_pair=trading_pair,

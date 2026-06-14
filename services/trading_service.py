@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.data_type.common import OrderType, PositionAction, TradeType
 
+from services.live_trading_gate import assert_live_order_submission_allowed
+
 if TYPE_CHECKING:
     from services.market_data_service import MarketDataService
     from services.unified_connector_service import UnifiedConnectorService
@@ -265,6 +267,11 @@ class AccountTradingInterface:
         if not connector:
             raise ValueError(f"Connector {connector_name} not loaded. Call ensure_connector first.")
 
+        assert_live_order_submission_allowed(
+            account_name=self._account_name,
+            connector_name=connector_name,
+            source="trading_service.buy",
+        )
         return connector.buy(
             trading_pair=trading_pair,
             amount=amount,
@@ -300,6 +307,11 @@ class AccountTradingInterface:
         if not connector:
             raise ValueError(f"Connector {connector_name} not loaded. Call ensure_connector first.")
 
+        assert_live_order_submission_allowed(
+            account_name=self._account_name,
+            connector_name=connector_name,
+            source="trading_service.sell",
+        )
         return connector.sell(
             trading_pair=trading_pair,
             amount=amount,
