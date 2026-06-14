@@ -62,6 +62,50 @@ def test_router_add_liquidity_posts_gateway_payload():
     ]
 
 
+def test_execute_swap_forwards_optional_pool_address():
+    calls = []
+    client = GatewayClient(base_url="http://gateway.local")
+
+    async def fake_request(method, path, params=None, json=None):
+        calls.append((method, path, params, json))
+        return {"signature": "5BdcSwapTx"}
+
+    client._request = fake_request
+
+    result = asyncio.run(
+        client.execute_swap(
+            connector="orca",
+            network="devnet",
+            wallet_address="Wallet111111111111111111111111111111111",
+            base_asset="devUSDC",
+            quote_asset="devUSDT",
+            amount=Decimal("0.1"),
+            side="SELL",
+            slippage_pct=1.0,
+            pool_address="63cMwvN8eoaD39os9bKP8brmA7Xtov9VxahnPufWCSdg",
+        ),
+    )
+
+    assert result == {"signature": "5BdcSwapTx"}
+    assert calls == [
+        (
+            "POST",
+            "connectors/orca/clmm/execute-swap",
+            None,
+            {
+                "network": "devnet",
+                "walletAddress": "Wallet111111111111111111111111111111111",
+                "baseToken": "devUSDC",
+                "quoteToken": "devUSDT",
+                "amount": "0.1",
+                "side": "SELL",
+                "slippagePct": 1.0,
+                "poolAddress": "63cMwvN8eoaD39os9bKP8brmA7Xtov9VxahnPufWCSdg",
+            },
+        ),
+    ]
+
+
 def test_router_add_liquidity_preserves_small_decimal_payload():
     calls = []
     client = GatewayClient(base_url="http://gateway.local")

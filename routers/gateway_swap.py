@@ -108,7 +108,7 @@ async def get_swap_quote(
             amount=request.amount,
             side=request.side,
             slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0,
-            pool_address=None
+            pool_address=request.pool_address,
         )
         _raise_if_invalid_quote(result)
 
@@ -190,7 +190,8 @@ async def execute_swap(
             quote_asset=quote,
             amount=request.amount,
             side=request.side,
-            slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0
+            slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0,
+            pool_address=request.pool_address,
         )
         if not result:
             raise HTTPException(status_code=500, detail="Gateway service is not able to execute swap")

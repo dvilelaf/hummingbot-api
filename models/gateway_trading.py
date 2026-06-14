@@ -21,6 +21,10 @@ class SwapQuoteRequest(BaseModel):
     side: str = Field(description="Trade side: 'BUY' or 'SELL'")
     amount: Decimal = Field(description="Amount to swap (in base token for SELL, quote token for BUY)")
     slippage_pct: Optional[Decimal] = Field(default=1.0, description="Maximum slippage percentage (default: 1.0)")
+    pool_address: Optional[str] = Field(
+        default=None,
+        description="Optional pool address for connectors that require explicit pool selection",
+    )
 
 
 class SwapQuoteResponse(BaseModel):
@@ -45,6 +49,10 @@ class SwapExecuteRequest(BaseModel):
     amount: Decimal = Field(description="Amount to swap")
     slippage_pct: Optional[Decimal] = Field(default=1.0, description="Maximum slippage percentage (default: 1.0)")
     wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+    pool_address: Optional[str] = Field(
+        default=None,
+        description="Optional pool address for connectors that require explicit pool selection",
+    )
 
 
 class SwapExecuteResponse(BaseModel):

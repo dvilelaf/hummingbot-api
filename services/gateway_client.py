@@ -13,6 +13,9 @@ class GatewayClient:
     Provides essential functionality for wallet management and balance queries.
     """
 
+    CLMM_SWAP_CONNECTORS = frozenset({"meteora", "orca", "pancakeswap-sol", "raydium"})
+    ROUTER_OR_CLMM_SWAP_CONNECTORS = frozenset({"pancakeswap", "uniswap"})
+
     def __init__(self, base_url: str = "http://localhost:15888"):
         self.base_url = base_url
         self._session: Optional[aiohttp.ClientSession] = None
@@ -416,6 +419,14 @@ class GatewayClient:
     # Swap Operations
     # ============================================
 
+    def _swap_route_type(self, connector: str, pool_address: Optional[str] = None) -> str:
+        connector_key = connector.lower()
+        if connector_key in self.CLMM_SWAP_CONNECTORS:
+            return "clmm"
+        if connector_key in self.ROUTER_OR_CLMM_SWAP_CONNECTORS and pool_address:
+            return "clmm"
+        return "router"
+
     async def quote_swap(
         self,
         connector: str,
@@ -425,7 +436,7 @@ class GatewayClient:
         amount: float,
         side: str,
         slippage_pct: Optional[float] = None,
-        pool_address: Optional[str] = None
+        pool_address: Optional[str] = None,
     ) -> Dict:
         """Get a quote for a swap"""
         payload = {
@@ -440,7 +451,8 @@ class GatewayClient:
         if pool_address:
             payload["poolAddress"] = pool_address
 
-        return await self._request("GET", f"connectors/{connector}/router/quote-swap", params=payload)
+        route_type = self._swap_route_type(connector, pool_address)
+        return await self._request("GET", f"connectors/{connector}/{route_type}/quote-swap", params=payload)
 
     async def execute_swap(
         self,
@@ -451,7 +463,8 @@ class GatewayClient:
         quote_asset: str,
         amount: float,
         side: str,
-        slippage_pct: Optional[float] = None
+        slippage_pct: Optional[float] = None,
+        pool_address: Optional[str] = None
     ) -> Dict:
         """Execute a swap"""
         payload = {
@@ -464,8 +477,11 @@ class GatewayClient:
         }
         if slippage_pct is not None:
             payload["slippagePct"] = slippage_pct
+        if pool_address:
+            payload["poolAddress"] = pool_address
 
-        return await self._request("POST", f"connectors/{connector}/router/execute-swap", json=payload)
+        route_type = self._swap_route_type(connector, pool_address)
+        return await self._request("POST", f"connectors/{connector}/{route_type}/execute-swap", json=payload)
 
     async def execute_quote(
         self,
