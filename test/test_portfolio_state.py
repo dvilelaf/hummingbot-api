@@ -224,3 +224,25 @@ class TestConnectorStartup:
             "master_account",
             "binance_perpetual_testnet",
         )
+
+    @pytest.mark.asyncio
+    async def test_account_state_connector_allowlist_skips_unlisted_credentials(self):
+        """Account-state background initialization should use the same connector scope."""
+        from services.accounts_service import AccountsService
+
+        service = AccountsService.__new__(AccountsService)
+        service.startup_connectors = {"binance_perpetual_testnet"}
+        service._connector_service = MagicMock()
+        service._connector_service.list_available_credentials.return_value = [
+            "binance_perpetual_testnet",
+            "xrpl",
+        ]
+        service._connector_service.is_trading_connector_initialized.return_value = False
+        service._connector_service.get_trading_connector = AsyncMock()
+
+        await service._ensure_account_connectors_initialized("master_account")
+
+        service._connector_service.get_trading_connector.assert_awaited_once_with(
+            "master_account",
+            "binance_perpetual_testnet",
+        )

@@ -489,7 +489,8 @@ class AccountsService:
     def __init__(self,
                  account_update_interval: int = 5,
                  default_quote: str = "USDT",
-                 gateway_url: str = "http://localhost:15888"):
+                 gateway_url: str = "http://localhost:15888",
+                 startup_connectors: Optional[Set[str]] = None):
         """
         Initialize the AccountsService.
 
@@ -503,6 +504,7 @@ class AccountsService:
         self.update_account_state_interval = account_update_interval * 60
         self.order_status_poll_interval = 60  # Poll order status every 1 minute
         self.default_quote = default_quote
+        self.startup_connectors = startup_connectors
         self._update_account_state_task: Optional[asyncio.Task] = None
         self._order_status_polling_task: Optional[asyncio.Task] = None
 
@@ -804,6 +806,13 @@ class AccountsService:
 
         # Initialize missing connectors
         for connector_name in self._connector_service.list_available_credentials(account_name):
+            if self.startup_connectors is not None and connector_name not in self.startup_connectors:
+                logger.debug(
+                    "Skipping account-state initialization for %s/%s; not in startup connector allowlist",
+                    account_name,
+                    connector_name,
+                )
+                continue
             try:
                 # Only initialize if connector doesn't exist
                 if not self._connector_service.is_trading_connector_initialized(account_name, connector_name):

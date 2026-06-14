@@ -213,10 +213,13 @@ async def lifespan(app: FastAPI):
     )
     logging.info("TradingService initialized")
 
+    startup_connectors = env_csv_set("HUMMINGBOT_STARTUP_CONNECTORS")
+
     # AccountsService - account management, balances, portfolio (simplified)
     accounts_service = AccountsService(
         account_update_interval=settings.app.account_update_interval,
-        gateway_url=settings.gateway.url
+        gateway_url=settings.gateway.url,
+        startup_connectors=startup_connectors,
     )
     # Inject services into AccountsService
     accounts_service._connector_service = connector_service
@@ -286,7 +289,6 @@ async def lifespan(app: FastAPI):
 
     # Initialize all trading connectors FIRST (before any service that might use them)
     # This ensures OrdersRecorder is properly attached before any concurrent access
-    startup_connectors = env_csv_set("HUMMINGBOT_STARTUP_CONNECTORS")
     if startup_connectors is None:
         logging.info("Initializing all trading connectors...")
     else:
