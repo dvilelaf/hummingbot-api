@@ -40,6 +40,7 @@ from utils.hummingbot_api_config_adapter import HummingbotAPIConfigAdapter
 from utils.security import BackendAPISecurity
 
 logger = logging.getLogger(__name__)
+EARLY_NETWORK_CONNECTORS = frozenset({"xrpl"})
 
 
 class UnifiedConnectorService:
@@ -586,6 +587,11 @@ class UnifiedConnectorService:
         """Create and fully initialize a trading connector."""
         # Authenticate and create connector
         connector = self._create_trading_connector(account_name, connector_name)
+        network_started = False
+
+        if self._requires_network_before_initial_queries(connector_name):
+            await self._start_connector_network(connector, connector_name=connector_name)
+            network_started = True
 
         # Initialize symbol map and trading rules
         await connector._initialize_trading_pair_symbol_map()
@@ -620,7 +626,8 @@ class UnifiedConnectorService:
         self._initialize_metrics(connector, account_name, connector_name, cache_key)
 
         # Start network tasks
-        await self._start_connector_network(connector)
+        if not network_started:
+            await self._start_connector_network(connector, connector_name=connector_name)
 
         # Only update order status for orders loaded from DB (balances, rules, positions
         # were already fetched above — no need to repeat via _update_connector_state)
@@ -718,10 +725,19 @@ class UnifiedConnectorService:
     # Network and State Management
     # =========================================================================
 
-    async def _start_connector_network(self, connector: ConnectorBase):
+    def _requires_network_before_initial_queries(self, connector_name: str) -> bool:
+        """Return true for connectors whose initial queries require a started network."""
+        return connector_name in EARLY_NETWORK_CONNECTORS
+
+    async def _start_connector_network(self, connector: ConnectorBase, connector_name: str | None = None):
         """Start connector network tasks."""
         try:
             await self._stop_connector_network(connector)
+
+            if connector_name in EARLY_NETWORK_CONNECTORS and hasattr(connector, 'start_network'):
+                await connector.start_network()
+                logger.debug("Started connector-owned network for %s", connector_name)
+                return
 
             # Gateway/AMM connectors use start_network() instead of individual polling tasks
             if hasattr(connector, '_trading_rules_polling_loop'):

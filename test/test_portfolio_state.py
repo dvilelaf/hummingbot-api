@@ -3,6 +3,7 @@ Tests for Portfolio State refresh behavior.
 
 Run with: pytest test/test_portfolio_state.py -v
 """
+import inspect
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -175,3 +176,29 @@ class TestGatewayRefreshSelection:
         await service.update_account_state(skip_gateway=False)
 
         service._update_gateway_balances.assert_awaited_once_with(chain_networks=None)
+
+
+class TestConnectorStartup:
+    """Tests for connector startup ordering."""
+
+    def test_xrpl_requires_network_before_initial_queries(self):
+        """XRPL must start its node pool before rules/balance queries."""
+        from services.unified_connector_service import UnifiedConnectorService
+
+        service = UnifiedConnectorService.__new__(UnifiedConnectorService)
+
+        assert service._requires_network_before_initial_queries("xrpl")
+        assert not service._requires_network_before_initial_queries("binance_perpetual_testnet")
+
+    def test_trading_connector_init_starts_early_network_before_balances(self):
+        """Early-network connectors should not query balances before network start."""
+        from services.unified_connector_service import UnifiedConnectorService
+
+        source = inspect.getsource(UnifiedConnectorService._create_and_initialize_trading_connector)
+
+        early_network_index = source.index("_requires_network_before_initial_queries")
+        balance_index = source.index("await connector._update_balances()")
+        final_start_index = source.rindex("_start_connector_network")
+
+        assert early_network_index < balance_index
+        assert balance_index < final_start_index
