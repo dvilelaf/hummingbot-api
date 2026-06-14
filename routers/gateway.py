@@ -17,6 +17,7 @@ from models import (
 )
 from services.accounts_service import AccountsService
 from services.gateway_service import GatewayService
+from services.live_trading_gate import assert_live_gateway_mutation_allowed
 
 router = APIRouter(tags=["Gateway"], prefix="/gateway")
 
@@ -1070,6 +1071,12 @@ async def send_transaction(
     try:
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
+
+        assert_live_gateway_mutation_allowed(
+            chain=request.chain,
+            network=request.network,
+            source="gateway.wallets.send",
+        )
 
         result = await accounts_service.gateway_client.send_transaction(
             chain=request.chain,

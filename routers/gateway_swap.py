@@ -18,6 +18,7 @@ from models import (
     SwapExecuteRequest,
     SwapExecuteResponse,
 )
+from services.live_trading_gate import assert_live_gateway_mutation_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +172,11 @@ async def execute_swap(
 
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
+        assert_live_gateway_mutation_allowed(
+            chain=chain,
+            network=network,
+            source="gateway_swap.execute_swap",
+        )
 
         # Get wallet address
         wallet_address = await accounts_service.gateway_client.get_wallet_address_or_default(

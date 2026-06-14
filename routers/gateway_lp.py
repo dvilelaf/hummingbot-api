@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from deps import get_accounts_service
 from models import RouterAddLiquidityRequest, RouterLiquidityResponse, RouterRemoveLiquidityRequest
 from services.accounts_service import AccountsService
+from services.live_trading_gate import assert_live_gateway_mutation_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,11 @@ async def add_router_liquidity(
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
+        assert_live_gateway_mutation_allowed(
+            chain=chain,
+            network=network,
+            source="gateway_lp.add_router_liquidity",
+        )
         wallet_address = await accounts_service.gateway_client.get_wallet_address_or_default(
             chain=chain,
             wallet_address=request.wallet_address,
@@ -93,6 +99,11 @@ async def remove_router_liquidity(
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
+        assert_live_gateway_mutation_allowed(
+            chain=chain,
+            network=network,
+            source="gateway_lp.remove_router_liquidity",
+        )
         wallet_address = await accounts_service.gateway_client.get_wallet_address_or_default(
             chain=chain,
             wallet_address=request.wallet_address,

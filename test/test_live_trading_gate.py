@@ -60,6 +60,51 @@ def test_live_order_gate_allows_non_paper_connector_when_explicitly_enabled(monk
     )
 
 
+def test_gateway_mutation_gate_allows_test_networks_by_default(monkeypatch):
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
+    gate = _live_gate_module()
+
+    gate.assert_live_gateway_mutation_allowed(
+        chain="ethereum",
+        network="sepolia",
+        source="test",
+    )
+    gate.assert_live_gateway_mutation_allowed(
+        chain="solana",
+        network="devnet",
+        source="test",
+    )
+
+
+def test_gateway_mutation_gate_blocks_mainnet_by_default(monkeypatch):
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_gateway_mutation_allowed(
+            chain="ethereum",
+            network="base",
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "live Gateway mutation disabled" in str(exc.detail)
+        assert "ethereum/base" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+def test_gateway_mutation_gate_allows_mainnet_when_explicitly_enabled(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", "true")
+    gate = _live_gate_module()
+
+    gate.assert_live_gateway_mutation_allowed(
+        chain="ethereum",
+        network="base",
+        source="test",
+    )
+
+
 def test_accounts_service_checks_live_gate_before_connector_order_submission():
     source = (ROOT / "services" / "accounts_service.py").read_text()
     place_trade = source[source.index("async def place_trade") :]
@@ -90,6 +135,37 @@ def test_accounts_service_checks_live_gate_before_cancel_order_submission():
 
     assert cancel_source.index("assert_live_order_submission_allowed(") < cancel_source.index(
         "connector.cancel(",
+    )
+
+
+def test_gateway_swap_checks_live_gate_before_execute_swap():
+    source = (ROOT / "routers" / "gateway_swap.py").read_text()
+    execute_source = source[source.index("async def execute_swap") :]
+
+    assert execute_source.index("assert_live_gateway_mutation_allowed(") < execute_source.index(
+        "accounts_service.gateway_client.execute_swap(",
+    )
+
+
+def test_gateway_lp_checks_live_gate_before_add_and_remove():
+    source = (ROOT / "routers" / "gateway_lp.py").read_text()
+    add_source = source[source.index("async def add_router_liquidity") : source.index("async def remove_router_liquidity")]
+    remove_source = source[source.index("async def remove_router_liquidity") :]
+
+    assert add_source.index("assert_live_gateway_mutation_allowed(") < add_source.index(
+        "accounts_service.gateway_client.router_add_liquidity(",
+    )
+    assert remove_source.index("assert_live_gateway_mutation_allowed(") < remove_source.index(
+        "accounts_service.gateway_client.router_remove_liquidity(",
+    )
+
+
+def test_gateway_wallet_send_checks_live_gate_before_send_transaction():
+    source = (ROOT / "routers" / "gateway.py").read_text()
+    send_source = source[source.index("async def send_transaction") : source.index("@router.post(\"/transactions/poll\")")]
+
+    assert send_source.index("assert_live_gateway_mutation_allowed(") < send_source.index(
+        "accounts_service.gateway_client.send_transaction(",
     )
 
 
