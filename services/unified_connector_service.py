@@ -841,7 +841,10 @@ class UnifiedConnectorService:
                 if isinstance(result, Exception):
                     logger.error(f"Error updating {key}: {result}")
 
-    async def initialize_all_trading_connectors(self):
+    async def initialize_all_trading_connectors(
+        self,
+        startup_connectors: Optional[set[str]] = None,
+    ):
         """
         Initialize all trading connectors for all accounts at startup.
 
@@ -859,6 +862,13 @@ class UnifiedConnectorService:
             connector_names = self.list_available_credentials(account_name)
 
             for connector_name in connector_names:
+                if startup_connectors is not None and connector_name not in startup_connectors:
+                    logger.info(
+                        "Skipping startup initialization for %s/%s; not in startup connector allowlist",
+                        account_name,
+                        connector_name,
+                    )
+                    continue
                 try:
                     logger.info(f"Initializing connector: {account_name}/{connector_name}")
                     await self.get_trading_connector(account_name, connector_name)

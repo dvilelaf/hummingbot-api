@@ -202,3 +202,25 @@ class TestConnectorStartup:
 
         assert early_network_index < balance_index
         assert balance_index < final_start_index
+
+    @pytest.mark.asyncio
+    async def test_startup_connector_allowlist_skips_unlisted_credentials(self, monkeypatch):
+        """Startup should initialize only explicitly allowed connectors when scoped."""
+        import services.unified_connector_service as module
+        from services.unified_connector_service import UnifiedConnectorService
+
+        service = UnifiedConnectorService.__new__(UnifiedConnectorService)
+        service.list_available_credentials = MagicMock(
+            return_value=["binance_perpetual_testnet", "xrpl"]
+        )
+        service.get_trading_connector = AsyncMock()
+        monkeypatch.setattr(module.fs_util, "list_folders", lambda path: ["master_account"])
+
+        await service.initialize_all_trading_connectors(
+            startup_connectors={"binance_perpetual_testnet"},
+        )
+
+        service.get_trading_connector.assert_awaited_once_with(
+            "master_account",
+            "binance_perpetual_testnet",
+        )

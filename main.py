@@ -88,6 +88,12 @@ def env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     return int(value) if value else default
 
+
+def env_csv_set(name: str) -> set[str] | None:
+    value = os.environ.get(name, "")
+    values = {item.strip() for item in value.split(",") if item.strip()}
+    return values or None
+
 # Set up logging configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -280,8 +286,14 @@ async def lifespan(app: FastAPI):
 
     # Initialize all trading connectors FIRST (before any service that might use them)
     # This ensures OrdersRecorder is properly attached before any concurrent access
-    logging.info("Initializing all trading connectors...")
-    await connector_service.initialize_all_trading_connectors()
+    startup_connectors = env_csv_set("HUMMINGBOT_STARTUP_CONNECTORS")
+    if startup_connectors is None:
+        logging.info("Initializing all trading connectors...")
+    else:
+        logging.info("Initializing startup connector allowlist: %s", sorted(startup_connectors))
+    await connector_service.initialize_all_trading_connectors(
+        startup_connectors=startup_connectors,
+    )
 
     # Reconcile persisted active orders against the exchange (e.g. after an API
     # restart/crash that lost in-memory references). Confirmed-closed orders are
