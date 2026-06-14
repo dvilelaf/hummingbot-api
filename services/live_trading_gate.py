@@ -1,4 +1,7 @@
 import os
+import hashlib
+import hmac
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -8,6 +11,7 @@ from fastapi import HTTPException
 LIVE_ORDER_SUBMISSION_ENV = "TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED"
 LIVE_ORDER_CANCEL_ENV = "TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED"
 LIVE_GATEWAY_MUTATIONS_ENV = "TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED"
+LIVE_ACTION_AUTH_SECRET_ENV = "MARLIN_LIVE_ACTION_AUTH_SECRET"
 LIVE_ACTION_AUTHORIZATION_VERSION = "live-action-authorization-v1"
 SAFE_CONNECTOR_SUFFIXES = ("_paper_trade", "_testnet", "_sandbox")
 SAFE_GATEWAY_NETWORK_MARKERS = ("testnet", "devnet", "sepolia", "goerli", "amoy", "fuji", "local")
@@ -157,6 +161,7 @@ def _assert_live_action_authorization(
         _raise_authorization_error("live action authorization is not approved", source=source)
     if authorization.get("blockers") != []:
         _raise_authorization_error("live action authorization has blockers", source=source)
+    _assert_authorization_signature(authorization, source=source)
     if authorization.get("api_live_flag") != expected_api_live_flag:
         _raise_authorization_error("live action authorization API flag mismatch", source=source)
     if authorization.get("action") != expected_action:
@@ -168,6 +173,21 @@ def _assert_live_action_authorization(
     expires_at = _parse_utc_datetime(authorization.get("expires_at_utc"))
     if expires_at <= datetime.now(UTC):
         _raise_authorization_error("live action authorization expired", source=source)
+
+
+def _assert_authorization_signature(authorization: dict[str, Any], *, source: str) -> None:
+    secret = os.getenv(LIVE_ACTION_AUTH_SECRET_ENV, "").strip()
+    if not secret:
+        _raise_authorization_error("live action authorization secret missing", source=source)
+    signature = authorization.get("signature")
+    if not isinstance(signature, str) or not signature.strip():
+        _raise_authorization_error("live action authorization signature missing", source=source)
+    payload = dict(authorization)
+    payload.pop("signature", None)
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        _raise_authorization_error("live action authorization signature mismatch", source=source)
 
 
 def _parse_utc_datetime(value: Any) -> datetime:

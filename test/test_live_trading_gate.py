@@ -1,4 +1,7 @@
+import hashlib
+import hmac
 import importlib.util
+import json
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -63,6 +66,7 @@ def test_live_order_gate_blocks_non_paper_connector_by_default(monkeypatch):
 
 def test_live_order_gate_allows_non_paper_connector_when_explicitly_enabled(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
     gate = _live_gate_module()
 
     gate.assert_live_order_submission_allowed(
@@ -80,6 +84,7 @@ def test_live_order_gate_allows_non_paper_connector_when_explicitly_enabled(monk
 
 def test_live_order_gate_requires_authorization_when_env_enabled(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
     gate = _live_gate_module()
 
     try:
@@ -95,8 +100,61 @@ def test_live_order_gate_requires_authorization_when_env_enabled(monkeypatch):
         raise AssertionError("expected HTTPException")
 
 
+def test_live_order_gate_rejects_unsigned_authorization_when_enabled(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
+    gate = _live_gate_module()
+    authorization = _approved_authorization(
+        action="order",
+        api_live_flag="TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED",
+        connector_id="binance",
+        network="mainnet",
+    )
+    authorization.pop("signature")
+
+    try:
+        gate.assert_live_order_submission_allowed(
+            account_name="master_account",
+            connector_name="binance",
+            live_action_authorization=authorization,
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "signature missing" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+def test_live_order_gate_rejects_tampered_authorization(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
+    gate = _live_gate_module()
+    authorization = _approved_authorization(
+        action="order",
+        api_live_flag="TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED",
+        connector_id="binance",
+        network="mainnet",
+    )
+    authorization["notional"] = "1000"
+
+    try:
+        gate.assert_live_order_submission_allowed(
+            account_name="master_account",
+            connector_name="binance",
+            live_action_authorization=authorization,
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "signature mismatch" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
 def test_live_order_cancel_gate_uses_separate_action_and_flag(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
     gate = _live_gate_module()
 
     gate.assert_live_order_cancel_allowed(
@@ -114,6 +172,7 @@ def test_live_order_cancel_gate_uses_separate_action_and_flag(monkeypatch):
 
 def test_live_order_cancel_gate_rejects_submit_authorization(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
     gate = _live_gate_module()
 
     try:
@@ -213,6 +272,7 @@ def test_gateway_mutation_gate_blocks_mainnet_with_global_flag_only(monkeypatch)
 def test_gateway_mutation_gate_allows_mainnet_when_action_enabled(monkeypatch):
     monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
     monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
     gate = _live_gate_module()
 
     gate.assert_live_gateway_mutation_allowed(
@@ -231,6 +291,7 @@ def test_gateway_mutation_gate_allows_mainnet_when_action_enabled(monkeypatch):
 
 def test_gateway_mutation_gate_requires_authorization_when_action_enabled(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
     gate = _live_gate_module()
 
     try:
@@ -249,6 +310,7 @@ def test_gateway_mutation_gate_requires_authorization_when_action_enabled(monkey
 
 def test_gateway_mutation_gate_rejects_wrong_authorization_action(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
     gate = _live_gate_module()
 
     try:
@@ -273,6 +335,7 @@ def test_gateway_mutation_gate_rejects_wrong_authorization_action(monkeypatch):
 
 def test_gateway_mutation_gate_rejects_expired_authorization(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
     gate = _live_gate_module()
 
     try:
@@ -513,7 +576,7 @@ def _approved_authorization(
     network,
     expires_at_utc="2099-01-01T00:00:00Z",
 ):
-    return {
+    authorization = {
         "action": action,
         "api_live_flag": api_live_flag,
         "blockers": [],
@@ -530,3 +593,12 @@ def _approved_authorization(
         "status": "approved",
         "version": "live-action-authorization-v1",
     }
+    authorization["signature"] = _signature(authorization)
+    return authorization
+
+
+def _signature(authorization):
+    payload = dict(authorization)
+    payload.pop("signature", None)
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hmac.new(b"test-secret", body, hashlib.sha256).hexdigest()
