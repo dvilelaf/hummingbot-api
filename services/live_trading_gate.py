@@ -8,7 +8,7 @@ from fastapi import HTTPException
 LIVE_ORDER_SUBMISSION_ENV = "TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED"
 LIVE_GATEWAY_MUTATIONS_ENV = "TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED"
 LIVE_ACTION_AUTHORIZATION_VERSION = "live-action-authorization-v1"
-PAPER_CONNECTOR_SUFFIX = "_paper_trade"
+SAFE_CONNECTOR_SUFFIXES = ("_paper_trade", "_testnet", "_sandbox")
 SAFE_GATEWAY_NETWORK_MARKERS = ("testnet", "devnet", "sepolia", "goerli", "amoy", "fuji", "local")
 GATEWAY_ACTION_AUTHORIZATION_ACTIONS = {
     "swap_execute": "gateway_swap",
@@ -31,7 +31,7 @@ def assert_live_order_submission_allowed(
     source: str,
 ) -> None:
     """Fail closed before direct live connector order submission."""
-    if _is_paper_connector(connector_name):
+    if _is_safe_connector(connector_name):
         return
     if _env_bool(LIVE_ORDER_SUBMISSION_ENV):
         _assert_live_action_authorization(
@@ -83,8 +83,8 @@ def assert_live_gateway_mutation_allowed(
     )
 
 
-def _is_paper_connector(connector_name: str) -> bool:
-    return connector_name.endswith(PAPER_CONNECTOR_SUFFIX)
+def _is_safe_connector(connector_name: str) -> bool:
+    return connector_name.endswith(SAFE_CONNECTOR_SUFFIXES)
 
 
 def _is_safe_gateway_network(network: str) -> bool:

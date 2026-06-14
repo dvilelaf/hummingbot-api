@@ -31,6 +31,18 @@ def test_live_order_gate_allows_paper_connector_by_default(monkeypatch):
     )
 
 
+def test_live_order_gate_allows_testnet_and_sandbox_connectors_by_default(monkeypatch):
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED", raising=False)
+    gate = _live_gate_module()
+
+    for connector_name in ("binance_perpetual_testnet", "coinbase_sandbox"):
+        gate.assert_live_order_submission_allowed(
+            account_name="master_account",
+            connector_name=connector_name,
+            source="test",
+        )
+
+
 def test_live_order_gate_blocks_non_paper_connector_by_default(monkeypatch):
     monkeypatch.delenv("TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED", raising=False)
     gate = _live_gate_module()
