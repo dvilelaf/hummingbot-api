@@ -1503,6 +1503,8 @@ class AccountsService:
                 assert_live_order_submission_allowed(
                     account_name=account_name,
                     connector_name=connector_name,
+                    expected_instrument=trading_pair,
+                    expected_notional=amount,
                     live_action_authorization=live_action_authorization,
                     source="accounts_service.place_trade",
                 )
@@ -1604,6 +1606,8 @@ class AccountsService:
             assert_live_order_submission_allowed(
                 account_name=account_name,
                 connector_name=connector_name,
+                expected_instrument=trading_pair,
+                expected_notional=notional_size,
                 live_action_authorization=live_action_authorization,
                 source="accounts_service.place_trade",
             )

@@ -1075,6 +1075,7 @@ async def send_transaction(
         assert_live_gateway_mutation_allowed(
             action="wallet_send",
             chain=request.chain,
+            expected_notional=request.amount,
             live_action_authorization=request.live_action_authorization,
             network=request.network,
             source="gateway.wallets.send",

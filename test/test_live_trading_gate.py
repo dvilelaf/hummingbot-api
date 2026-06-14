@@ -152,6 +152,34 @@ def test_live_order_gate_rejects_tampered_authorization(monkeypatch):
         raise AssertionError("expected HTTPException")
 
 
+def test_live_order_gate_rejects_authorization_notional_mismatch(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_order_submission_allowed(
+            account_name="master_account",
+            connector_name="binance",
+            expected_instrument="BTC-USDT",
+            expected_notional="2",
+            live_action_authorization=_approved_authorization(
+                action="order",
+                api_live_flag="TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED",
+                connector_id="binance",
+                instrument="BTC-USDT",
+                network="mainnet",
+                notional="1",
+            ),
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "notional mismatch" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
 def test_live_order_cancel_gate_uses_separate_action_and_flag(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED", "true")
     monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
@@ -359,6 +387,36 @@ def test_gateway_mutation_gate_rejects_expired_authorization(monkeypatch):
         raise AssertionError("expected HTTPException")
 
 
+def test_gateway_mutation_gate_rejects_connector_and_slippage_mismatch(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_gateway_mutation_allowed(
+            action="swap_execute",
+            chain="ethereum",
+            expected_connector_id="aerodrome",
+            expected_instrument="WETH-USDC",
+            expected_slippage_bps="50",
+            live_action_authorization=_approved_authorization(
+                action="gateway_swap",
+                api_live_flag="TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED",
+                connector_id="jupiter",
+                instrument="WETH-USDC",
+                network="base",
+                slippage_bps="25",
+            ),
+            network="base",
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "connector mismatch" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
 def test_accounts_service_checks_live_gate_before_connector_order_submission():
     source = (ROOT / "services" / "accounts_service.py").read_text()
     place_trade = source[source.index("async def place_trade") :]
@@ -369,6 +427,8 @@ def test_accounts_service_checks_live_gate_before_connector_order_submission():
     assert gate_index < buy_index
     assert gate_index < sell_index
     assert "live_action_authorization=live_action_authorization" in place_trade[:buy_index]
+    assert "expected_instrument=trading_pair" in place_trade[:buy_index]
+    assert "expected_notional=notional_size" in place_trade[:buy_index]
 
 
 def test_trading_route_passes_authorization_to_place_trade():
@@ -416,6 +476,10 @@ def test_gateway_swap_checks_live_gate_before_execute_swap():
     execute_source = source[source.index("async def execute_swap") :]
 
     assert 'action="swap_execute"' in execute_source
+    assert "expected_connector_id=request.connector" in execute_source
+    assert "expected_instrument=request.trading_pair" in execute_source
+    assert "expected_notional=request.amount" in execute_source
+    assert "expected_slippage_bps=slippage_bps" in execute_source
     assert "live_action_authorization=request.live_action_authorization" in execute_source
     assert execute_source.index("assert_live_gateway_mutation_allowed(") < execute_source.index(
         "accounts_service.gateway_client.execute_swap(",
@@ -432,6 +496,12 @@ def test_gateway_lp_checks_live_gate_before_add_and_remove():
 
     assert 'action="lp_add"' in add_source
     assert 'action="lp_remove"' in remove_source
+    assert "expected_connector_id=request.connector" in add_source
+    assert "expected_connector_id=request.connector" in remove_source
+    assert "expected_instrument=f\"{request.token_a}-{request.token_b}\"" in add_source
+    assert "expected_instrument=f\"{request.token_a}-{request.token_b}\"" in remove_source
+    assert "expected_slippage_bps=slippage_bps" in add_source
+    assert "expected_slippage_bps=slippage_bps" in remove_source
     assert "live_action_authorization=request.live_action_authorization" in add_source
     assert "live_action_authorization=request.live_action_authorization" in remove_source
     assert add_source.index("assert_live_gateway_mutation_allowed(") < add_source.index(
@@ -447,6 +517,7 @@ def test_gateway_wallet_send_checks_live_gate_before_send_transaction():
     send_source = source[source.index("async def send_transaction") : source.index("@router.post(\"/transactions/poll\")")]
 
     assert 'action="wallet_send"' in send_source
+    assert "expected_notional=request.amount" in send_source
     assert "live_action_authorization=request.live_action_authorization" in send_source
     assert send_source.index("assert_live_gateway_mutation_allowed(") < send_source.index(
         "accounts_service.gateway_client.send_transaction(",
@@ -573,7 +644,11 @@ def _approved_authorization(
     action,
     api_live_flag,
     connector_id,
+    gas="0.001",
+    instrument=None,
     network,
+    notional="1",
+    slippage_bps="25",
     expires_at_utc="2099-01-01T00:00:00Z",
 ):
     authorization = {
@@ -583,13 +658,14 @@ def _approved_authorization(
         "connector_id": connector_id,
         "edge_sha256": "e" * 64,
         "expires_at_utc": expires_at_utc,
-        "gas": "0.001",
+        "gas": gas,
         "gateway_live_flags": [],
         "generated_at_utc": "2026-06-14T10:00:00Z",
+        "instrument": instrument,
         "live_gate_sha256": "g" * 64,
         "network": network,
-        "notional": "1",
-        "slippage_bps": "25",
+        "notional": notional,
+        "slippage_bps": slippage_bps,
         "status": "approved",
         "version": "live-action-authorization-v1",
     }

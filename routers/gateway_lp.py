@@ -1,5 +1,6 @@
 """Gateway router liquidity routes."""
 import logging
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -52,9 +53,18 @@ async def add_router_liquidity(
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
+        slippage_bps = (
+            request.slippage_pct * Decimal("100")
+            if request.slippage_pct is not None
+            else None
+        )
         assert_live_gateway_mutation_allowed(
             action="lp_add",
             chain=chain,
+            expected_connector_id=request.connector,
+            expected_instrument=f"{request.token_a}-{request.token_b}",
+            expected_notional=request.amount_a + request.amount_b,
+            expected_slippage_bps=slippage_bps,
             live_action_authorization=request.live_action_authorization,
             network=network,
             source="gateway_lp.add_router_liquidity",
@@ -102,9 +112,18 @@ async def remove_router_liquidity(
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
+        slippage_bps = (
+            request.slippage_pct * Decimal("100")
+            if request.slippage_pct is not None
+            else None
+        )
         assert_live_gateway_mutation_allowed(
             action="lp_remove",
             chain=chain,
+            expected_connector_id=request.connector,
+            expected_instrument=f"{request.token_a}-{request.token_b}",
+            expected_notional=request.liquidity,
+            expected_slippage_bps=slippage_bps,
             live_action_authorization=request.live_action_authorization,
             network=network,
             source="gateway_lp.remove_router_liquidity",

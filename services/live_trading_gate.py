@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from fastapi import HTTPException
@@ -32,6 +33,8 @@ def assert_live_order_submission_allowed(
     *,
     account_name: str,
     connector_name: str,
+    expected_instrument: Any | None = None,
+    expected_notional: Any | None = None,
     live_action_authorization: dict[str, Any] | None = None,
     source: str,
 ) -> None:
@@ -44,6 +47,8 @@ def assert_live_order_submission_allowed(
             expected_action="order",
             expected_api_live_flag=LIVE_ORDER_SUBMISSION_ENV,
             expected_connector_id=connector_name,
+            expected_instrument=expected_instrument,
+            expected_notional=expected_notional,
             source=source,
         )
         return
@@ -90,6 +95,11 @@ def assert_live_gateway_mutation_allowed(
     *,
     action: str,
     chain: str,
+    expected_connector_id: Any | None = None,
+    expected_gas: Any | None = None,
+    expected_instrument: Any | None = None,
+    expected_notional: Any | None = None,
+    expected_slippage_bps: Any | None = None,
     live_action_authorization: dict[str, Any] | None = None,
     network: str,
     source: str,
@@ -103,7 +113,12 @@ def assert_live_gateway_mutation_allowed(
             live_action_authorization,
             expected_action=_gateway_authorization_action(action),
             expected_api_live_flag=action_env,
+            expected_connector_id=expected_connector_id,
+            expected_gas=expected_gas,
+            expected_instrument=expected_instrument,
             expected_network=network,
+            expected_notional=expected_notional,
+            expected_slippage_bps=expected_slippage_bps,
             source=source,
         )
         return
@@ -151,7 +166,11 @@ def _assert_live_action_authorization(
     expected_api_live_flag: str,
     source: str,
     expected_connector_id: str | None = None,
+    expected_gas: Any | None = None,
+    expected_instrument: Any | None = None,
     expected_network: str | None = None,
+    expected_notional: Any | None = None,
+    expected_slippage_bps: Any | None = None,
 ) -> None:
     if authorization is None:
         _raise_authorization_error("live action authorization missing", source=source)
@@ -170,6 +189,30 @@ def _assert_live_action_authorization(
         _raise_authorization_error("live action authorization connector mismatch", source=source)
     if expected_network is not None and authorization.get("network") != expected_network:
         _raise_authorization_error("live action authorization network mismatch", source=source)
+    _assert_authorization_string_matches(
+        authorization,
+        "instrument",
+        expected_instrument,
+        source=source,
+    )
+    _assert_authorization_decimal_matches(
+        authorization,
+        "notional",
+        expected_notional,
+        source=source,
+    )
+    _assert_authorization_decimal_matches(
+        authorization,
+        "gas",
+        expected_gas,
+        source=source,
+    )
+    _assert_authorization_decimal_matches(
+        authorization,
+        "slippage_bps",
+        expected_slippage_bps,
+        source=source,
+    )
     expires_at = _parse_utc_datetime(authorization.get("expires_at_utc"))
     if expires_at <= datetime.now(UTC):
         _raise_authorization_error("live action authorization expired", source=source)
@@ -201,6 +244,38 @@ def _parse_utc_datetime(value: Any) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _assert_authorization_string_matches(
+    authorization: dict[str, Any],
+    field: str,
+    expected: Any | None,
+    *,
+    source: str,
+) -> None:
+    if expected is None:
+        return
+    if str(authorization.get(field, "")).strip() != str(expected).strip():
+        _raise_authorization_error(f"live action authorization {field} mismatch", source=source)
+
+
+def _assert_authorization_decimal_matches(
+    authorization: dict[str, Any],
+    field: str,
+    expected: Any | None,
+    *,
+    source: str,
+) -> None:
+    if expected is None:
+        return
+    actual = authorization.get(field)
+    try:
+        actual_decimal = Decimal(str(actual))
+        expected_decimal = Decimal(str(expected))
+    except (InvalidOperation, ValueError):
+        _raise_authorization_error(f"live action authorization {field} mismatch", source=source)
+    if actual_decimal != expected_decimal:
+        _raise_authorization_error(f"live action authorization {field} mismatch", source=source)
 
 
 def _raise_authorization_error(reason: str, *, source: str) -> None:

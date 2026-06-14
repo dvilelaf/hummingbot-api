@@ -172,9 +172,18 @@ async def execute_swap(
 
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
+        slippage_bps = (
+            request.slippage_pct * Decimal("100")
+            if request.slippage_pct is not None
+            else None
+        )
         assert_live_gateway_mutation_allowed(
             action="swap_execute",
             chain=chain,
+            expected_connector_id=request.connector,
+            expected_instrument=request.trading_pair,
+            expected_notional=request.amount,
+            expected_slippage_bps=slippage_bps,
             live_action_authorization=request.live_action_authorization,
             network=network,
             source="gateway_swap.execute_swap",
