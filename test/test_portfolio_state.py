@@ -95,3 +95,83 @@ class TestBalanceRefresh:
         assert len(result) == 1
         assert result[0]["token"] == "USDT"
         assert result[0]["units"] == 500.0
+
+
+class TestGatewayRefreshSelection:
+    """Tests for Gateway balance refresh selection."""
+
+    def test_gateway_filter_keeps_gateway_chain_networks(self):
+        """Gateway filters keep only chain-network connector names."""
+        from services.accounts_service import _gateway_chain_network_filters
+
+        assert _gateway_chain_network_filters(["binance_paper_trade", "ethereum-base"]) == (
+            "ethereum-base",
+        )
+
+    def test_gateway_filter_skips_cex_only_connector_names(self):
+        """CEX-only connector filters should not trigger Gateway refresh."""
+        from services.accounts_service import _gateway_chain_network_filters
+
+        assert _gateway_chain_network_filters(["binance_perpetual_testnet"]) == ()
+
+    @pytest.mark.asyncio
+    async def test_update_account_state_skips_gateway_for_cex_only_filter(self):
+        """CEX-only portfolio refresh should not call Gateway balances."""
+        from services.accounts_service import AccountsService
+
+        service = AccountsService.__new__(AccountsService)
+        service.accounts_state = {}
+        service._connector_service = MagicMock()
+        connector = MagicMock()
+        service._connector_service.get_all_trading_connectors.return_value = {
+            "master_account": {"binance_perpetual_testnet": connector}
+        }
+        service._get_connector_tokens_info = AsyncMock(return_value=[])
+        service._update_gateway_balances = AsyncMock()
+
+        await service.update_account_state(
+            skip_gateway=False,
+            account_names=["master_account"],
+            connector_names=["binance_perpetual_testnet"],
+        )
+
+        service._get_connector_tokens_info.assert_awaited_once_with(
+            connector,
+            "binance_perpetual_testnet",
+        )
+        service._update_gateway_balances.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_account_state_refreshes_gateway_for_gateway_filter(self):
+        """Gateway chain-network filters should call Gateway balances."""
+        from services.accounts_service import AccountsService
+
+        service = AccountsService.__new__(AccountsService)
+        service.accounts_state = {}
+        service._connector_service = MagicMock()
+        service._connector_service.get_all_trading_connectors.return_value = {}
+        service._update_gateway_balances = AsyncMock()
+
+        await service.update_account_state(
+            skip_gateway=False,
+            connector_names=["ethereum-base"],
+        )
+
+        service._update_gateway_balances.assert_awaited_once_with(
+            chain_networks=("ethereum-base",),
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_account_state_preserves_unfiltered_gateway_refresh(self):
+        """Unfiltered portfolio refresh preserves existing Gateway behavior."""
+        from services.accounts_service import AccountsService
+
+        service = AccountsService.__new__(AccountsService)
+        service.accounts_state = {}
+        service._connector_service = MagicMock()
+        service._connector_service.get_all_trading_connectors.return_value = {}
+        service._update_gateway_balances = AsyncMock()
+
+        await service.update_account_state(skip_gateway=False)
+
+        service._update_gateway_balances.assert_awaited_once_with(chain_networks=None)

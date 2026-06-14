@@ -29,6 +29,18 @@ from utils.file_system import fs_util
 
 # Create module-specific logger
 logger = logging.getLogger(__name__)
+GATEWAY_CHAIN_PREFIXES = ("ethereum-", "solana-")
+
+
+def _gateway_chain_network_filters(connector_names: Optional[List[str]]) -> Optional[tuple[str, ...]]:
+    """Return Gateway chain-network filters, or empty tuple for CEX-only filters."""
+    if connector_names is None:
+        return None
+    return tuple(
+        connector_name
+        for connector_name in connector_names
+        if connector_name.startswith(GATEWAY_CHAIN_PREFIXES)
+    )
 
 
 class AccountTradingInterface:
@@ -670,12 +682,13 @@ class AccountsService:
                         tasks.append(self._refresh_and_get_tokens_info(connector, connector_name, account_name))
                         task_meta.append((account_name, connector_name))
 
-                has_connector_tasks = len(tasks) > 0
-                tasks.append(self._update_gateway_balances())
+                refresh_gateway = settings.gateway.background_refresh_enabled
+                if refresh_gateway:
+                    tasks.append(self._update_gateway_balances())
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                # Process connector results (last result is always gateway)
-                connector_results = results[:-1] if has_connector_tasks else []
+                # Process connector results (last result is Gateway only when enabled)
+                connector_results = results[:-1] if refresh_gateway else results
                 for (account_name, connector_name), result in zip(task_meta, connector_results):
                     if isinstance(result, Exception):
                         logger.error(f"Error updating {connector_name} in {account_name}: {result}")
@@ -683,9 +696,10 @@ class AccountsService:
                     else:
                         self.accounts_state[account_name][connector_name] = result
 
-                gw_result = results[-1]
-                if isinstance(gw_result, Exception):
-                    logger.error(f"Error updating gateway balances: {gw_result}")
+                if refresh_gateway:
+                    gw_result = results[-1]
+                    if isinstance(gw_result, Exception):
+                        logger.error(f"Error updating gateway balances: {gw_result}")
 
                 await self.dump_account_state()
             except Exception as e:
@@ -833,14 +847,16 @@ class AccountsService:
                 tasks.append(self._get_connector_tokens_info(connector, connector_name))
                 task_meta.append((account_name, connector_name))
 
-        # Execute connectors + gateway in parallel (unless skip_gateway is True)
-        if skip_gateway:
+        gateway_filters = _gateway_chain_network_filters(connector_names)
+
+        # Execute connectors + Gateway in parallel when Gateway is explicitly requested.
+        if skip_gateway or gateway_filters == ():
             results = await asyncio.gather(*tasks, return_exceptions=True)
         else:
             # Pass connector_names filter to gateway for chain-network filtering
             results = await asyncio.gather(
                 *tasks,
-                self._update_gateway_balances(chain_networks=connector_names),
+                self._update_gateway_balances(chain_networks=gateway_filters),
                 return_exceptions=True
             )
             # Remove gateway result from processing (it handles its own state internally)

@@ -89,6 +89,10 @@ class GatewaySettings(BaseSettings):
         default="http://localhost:15888",
         description="Gateway service URL (use 'http://gateway:15888' when running in Docker)"
     )
+    background_refresh_enabled: bool = Field(
+        default=False,
+        description="Refresh Gateway wallet balances in the account-state background loop"
+    )
 
     model_config = SettingsConfigDict(env_prefix="GATEWAY_", extra="ignore")
 
