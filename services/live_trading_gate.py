@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 
 LIVE_ORDER_SUBMISSION_ENV = "TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED"
+LIVE_ORDER_CANCEL_ENV = "TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED"
 LIVE_GATEWAY_MUTATIONS_ENV = "TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED"
 LIVE_ACTION_AUTHORIZATION_VERSION = "live-action-authorization-v1"
 SAFE_CONNECTOR_SUFFIXES = ("_paper_trade", "_testnet", "_sandbox")
@@ -47,6 +48,35 @@ def assert_live_order_submission_allowed(
         detail=(
             "live order submission disabled; "
             f"set {LIVE_ORDER_SUBMISSION_ENV}=true only behind Marlin live gates "
+            f"(source={source}, account={account_name}, connector={connector_name})"
+        ),
+    )
+
+
+def assert_live_order_cancel_allowed(
+    *,
+    account_name: str,
+    connector_name: str,
+    live_action_authorization: dict[str, Any] | None = None,
+    source: str,
+) -> None:
+    """Fail closed before direct live connector order cancellation."""
+    if _is_safe_connector(connector_name):
+        return
+    if _env_bool(LIVE_ORDER_CANCEL_ENV):
+        _assert_live_action_authorization(
+            live_action_authorization,
+            expected_action="order_cancel",
+            expected_api_live_flag=LIVE_ORDER_CANCEL_ENV,
+            expected_connector_id=connector_name,
+            source=source,
+        )
+        return
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "live order cancellation disabled; "
+            f"set {LIVE_ORDER_CANCEL_ENV}=true only behind Marlin live gates "
             f"(source={source}, account={account_name}, connector={connector_name})"
         ),
     )

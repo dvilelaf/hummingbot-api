@@ -95,6 +95,64 @@ def test_live_order_gate_requires_authorization_when_env_enabled(monkeypatch):
         raise AssertionError("expected HTTPException")
 
 
+def test_live_order_cancel_gate_uses_separate_action_and_flag(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED", "true")
+    gate = _live_gate_module()
+
+    gate.assert_live_order_cancel_allowed(
+        account_name="master_account",
+        connector_name="binance",
+        live_action_authorization=_approved_authorization(
+            action="order_cancel",
+            api_live_flag="TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED",
+            connector_id="binance",
+            network="mainnet",
+        ),
+        source="test",
+    )
+
+
+def test_live_order_cancel_gate_rejects_submit_authorization(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED", "true")
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_order_cancel_allowed(
+            account_name="master_account",
+            connector_name="binance",
+            live_action_authorization=_approved_authorization(
+                action="order",
+                api_live_flag="TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED",
+                connector_id="binance",
+                network="mainnet",
+            ),
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "API flag mismatch" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+def test_live_order_cancel_gate_blocks_non_paper_connector_by_default(monkeypatch):
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED", raising=False)
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_order_cancel_allowed(
+            account_name="master_account",
+            connector_name="binance",
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "live order cancellation disabled" in str(exc.detail)
+        assert "TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
 def test_gateway_mutation_gate_allows_test_networks_by_default(monkeypatch):
     monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
     gate = _live_gate_module()
@@ -284,7 +342,7 @@ def test_accounts_service_checks_live_gate_before_cancel_order_submission():
     source = (ROOT / "services" / "accounts_service.py").read_text()
     cancel_source = source[source.index("async def cancel_order") : source.index("async def set_leverage")]
 
-    assert cancel_source.index("assert_live_order_submission_allowed(") < cancel_source.index(
+    assert cancel_source.index("assert_live_order_cancel_allowed(") < cancel_source.index(
         "connector.cancel(",
     )
     assert "live_action_authorization=live_action_authorization" in cancel_source
@@ -433,7 +491,7 @@ def test_accounts_trading_interface_checks_live_gate_before_cancel_submission():
     interface_source = source[source.index("class AccountTradingInterface") : source.index("class AccountsService")]
     cancel_source = interface_source[interface_source.index("    def cancel(") : interface_source.index("    def get_active_orders(")]
 
-    assert cancel_source.index("assert_live_order_submission_allowed(") < cancel_source.index(
+    assert cancel_source.index("assert_live_order_cancel_allowed(") < cancel_source.index(
         "connector.cancel(",
     )
 
@@ -442,7 +500,7 @@ def test_trading_service_checks_live_gate_before_executor_cancel_submission():
     source = (ROOT / "services" / "trading_service.py").read_text()
     cancel_source = source[source.index("    def cancel(") : source.index("    def get_active_orders(")]
 
-    assert cancel_source.index("assert_live_order_submission_allowed(") < cancel_source.index(
+    assert cancel_source.index("assert_live_order_cancel_allowed(") < cancel_source.index(
         "connector.cancel(",
     )
 

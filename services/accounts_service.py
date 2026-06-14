@@ -24,7 +24,10 @@ from services.cowswap_runtime import (
 )
 from services.gateway_client import GatewayClient
 from services.gateway_transaction_poller import GatewayTransactionPoller
-from services.live_trading_gate import assert_live_order_submission_allowed
+from services.live_trading_gate import (
+    assert_live_order_cancel_allowed,
+    assert_live_order_submission_allowed,
+)
 from utils.file_system import fs_util
 
 # Create module-specific logger
@@ -398,7 +401,7 @@ class AccountTradingInterface:
         if not connector:
             raise ValueError(f"Connector {connector_name} not loaded. Call ensure_connector first.")
 
-        assert_live_order_submission_allowed(
+        assert_live_order_cancel_allowed(
             account_name=self._account_name,
             connector_name=connector_name,
             source="accounts_trading_interface.cancel",
@@ -1730,7 +1733,7 @@ class AccountsService:
         """
         if connector_name == COWSWAP_CONNECTOR_NAME:
             try:
-                assert_live_order_submission_allowed(
+                assert_live_order_cancel_allowed(
                     account_name=account_name,
                     connector_name=connector_name,
                     live_action_authorization=live_action_authorization,
@@ -1758,7 +1761,7 @@ class AccountsService:
             raise HTTPException(status_code=500, detail=f"Order '{client_order_id}' is missing trading pair")
         
         try:
-            assert_live_order_submission_allowed(
+            assert_live_order_cancel_allowed(
                 account_name=account_name,
                 connector_name=connector_name,
                 live_action_authorization=live_action_authorization,
