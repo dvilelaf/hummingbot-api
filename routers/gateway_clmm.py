@@ -29,6 +29,7 @@ from models import (
     TimeBasedMetrics,
 )
 from services.accounts_service import AccountsService
+from services.live_trading_gate import assert_live_gateway_mutation_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -533,6 +534,11 @@ async def open_clmm_position(
 
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
+        assert_live_gateway_mutation_allowed(
+            chain=chain,
+            network=network,
+            source="gateway_clmm.open_position",
+        )
 
         # Get wallet address
         wallet_address = await accounts_service.gateway_client.get_wallet_address_or_default(
@@ -702,6 +708,11 @@ async def add_liquidity_to_clmm_position(
 
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
+        assert_live_gateway_mutation_allowed(
+            chain=chain,
+            network=network,
+            source="gateway_clmm.add_liquidity",
+        )
 
         # Get wallet address
         wallet_address = await accounts_service.gateway_client.get_wallet_address_or_default(
@@ -795,6 +806,11 @@ async def remove_liquidity_from_clmm_position(
 
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
+        assert_live_gateway_mutation_allowed(
+            chain=chain,
+            network=network,
+            source="gateway_clmm.remove_liquidity",
+        )
 
         # Get wallet address
         wallet_address = await accounts_service.gateway_client.get_wallet_address_or_default(
@@ -885,6 +901,11 @@ async def close_clmm_position(
 
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
+        assert_live_gateway_mutation_allowed(
+            chain=chain,
+            network=network,
+            source="gateway_clmm.close_position",
+        )
 
         # Get pool_address and wallet_address from database
         pool_address = None
@@ -1084,6 +1105,11 @@ async def collect_fees_from_clmm_position(
 
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
+        assert_live_gateway_mutation_allowed(
+            chain=chain,
+            network=network,
+            source="gateway_clmm.collect_fees",
+        )
 
         # Get pool_address and wallet_address from database
         pool_address = None
@@ -1460,5 +1486,4 @@ async def search_clmm_positions(
     except Exception as e:
         logger.error(f"Error searching CLMM positions: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error searching CLMM positions: {str(e)}")
-
 

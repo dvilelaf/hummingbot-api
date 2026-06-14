@@ -169,6 +169,46 @@ def test_gateway_wallet_send_checks_live_gate_before_send_transaction():
     )
 
 
+def test_gateway_clmm_checks_live_gate_before_mutations():
+    source = (ROOT / "routers" / "gateway_clmm.py").read_text()
+    mutation_calls = (
+        (
+            "async def open_clmm_position",
+            "async def add_liquidity_to_clmm_position",
+            "accounts_service.gateway_client.clmm_open_position(",
+        ),
+        (
+            "async def add_liquidity_to_clmm_position",
+            "async def remove_liquidity_from_clmm_position",
+            "accounts_service.gateway_client.clmm_add_liquidity(",
+        ),
+        (
+            "async def remove_liquidity_from_clmm_position",
+            "async def close_clmm_position",
+            "accounts_service.gateway_client.clmm_remove_liquidity(",
+        ),
+        (
+            "async def close_clmm_position",
+            "async def collect_fees_from_clmm_position",
+            "accounts_service.gateway_client.clmm_close_position(",
+        ),
+        (
+            "async def collect_fees_from_clmm_position",
+            None,
+            "accounts_service.gateway_client.clmm_collect_fees(",
+        ),
+    )
+
+    for start_marker, end_marker, mutation_call in mutation_calls:
+        start = source.index(start_marker)
+        end = source.index(end_marker) if end_marker is not None else len(source)
+        mutation_source = source[start:end]
+
+        assert mutation_source.index("assert_live_gateway_mutation_allowed(") < mutation_source.index(
+            mutation_call,
+        )
+
+
 def test_accounts_trading_interface_checks_live_gate_before_cancel_submission():
     source = (ROOT / "services" / "accounts_service.py").read_text()
     interface_source = source[source.index("class AccountTradingInterface") : source.index("class AccountsService")]
