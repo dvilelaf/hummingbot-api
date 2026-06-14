@@ -55,6 +55,7 @@ async def add_router_liquidity(
         assert_live_gateway_mutation_allowed(
             action="lp_add",
             chain=chain,
+            live_action_authorization=request.live_action_authorization,
             network=network,
             source="gateway_lp.add_router_liquidity",
         )
@@ -72,6 +73,7 @@ async def add_router_liquidity(
             amount_b=request.amount_b,
             pool_type=request.pool_type,
             slippage_pct=float(request.slippage_pct) if request.slippage_pct is not None else None,
+            live_action_authorization=request.live_action_authorization,
         )
         if not result:
             raise HTTPException(status_code=500, detail="Gateway service is not able to add liquidity")
@@ -103,6 +105,7 @@ async def remove_router_liquidity(
         assert_live_gateway_mutation_allowed(
             action="lp_remove",
             chain=chain,
+            live_action_authorization=request.live_action_authorization,
             network=network,
             source="gateway_lp.remove_router_liquidity",
         )
@@ -119,6 +122,7 @@ async def remove_router_liquidity(
             liquidity=request.liquidity,
             pool_type=request.pool_type,
             slippage_pct=float(request.slippage_pct) if request.slippage_pct is not None else None,
+            live_action_authorization=request.live_action_authorization,
         )
         if not result:
             raise HTTPException(status_code=500, detail="Gateway service is not able to remove liquidity")

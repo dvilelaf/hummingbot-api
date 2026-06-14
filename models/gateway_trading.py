@@ -53,6 +53,10 @@ class SwapExecuteRequest(BaseModel):
         default=None,
         description="Optional pool address for connectors that require explicit pool selection",
     )
+    live_action_authorization: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Marlin live-action-authorization-v1 artifact for live swap execution",
+    )
 
 
 class SwapExecuteResponse(BaseModel):
@@ -79,6 +83,10 @@ class RouterAddLiquidityRequest(BaseModel):
     pool_type: str = Field(default="volatile", description="Pool type, e.g. 'stable' or 'volatile'")
     slippage_pct: Optional[Decimal] = Field(default=1.0, description="Maximum slippage percentage")
     wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+    live_action_authorization: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Marlin live-action-authorization-v1 artifact for live LP add execution",
+    )
 
 
 class RouterRemoveLiquidityRequest(BaseModel):
@@ -91,6 +99,10 @@ class RouterRemoveLiquidityRequest(BaseModel):
     pool_type: str = Field(default="volatile", description="Pool type, e.g. 'stable' or 'volatile'")
     slippage_pct: Optional[Decimal] = Field(default=1.0, description="Maximum slippage percentage")
     wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+    live_action_authorization: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Marlin live-action-authorization-v1 artifact for live LP remove execution",
+    )
 
 
 class RouterLiquidityResponse(BaseModel):
@@ -121,6 +133,10 @@ class CLMMOpenPositionRequest(BaseModel):
 
     # Connector-specific parameters (e.g., strategyType for Meteora)
     extra_params: Optional[Dict[str, Any]] = Field(default=None, description="Additional connector-specific parameters")
+    live_action_authorization: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Marlin live-action-authorization-v1 artifact for live CLMM open execution",
+    )
 
 
 class CLMMOpenPositionResponse(BaseModel):
@@ -143,6 +159,10 @@ class CLMMAddLiquidityRequest(BaseModel):
     quote_token_amount: Optional[Decimal] = Field(default=None, description="Amount of quote token to add")
     slippage_pct: Optional[Decimal] = Field(default=1.0, description="Maximum slippage percentage (default: 1.0)")
     wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+    live_action_authorization: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Marlin live-action-authorization-v1 artifact for live CLMM add-liquidity execution",
+    )
 
 
 class CLMMRemoveLiquidityRequest(BaseModel):
@@ -152,6 +172,10 @@ class CLMMRemoveLiquidityRequest(BaseModel):
     position_address: str = Field(description="Position address to remove liquidity from")
     percentage: Decimal = Field(description="Percentage of liquidity to remove (0-100)")
     wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+    live_action_authorization: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Marlin live-action-authorization-v1 artifact for live CLMM remove-liquidity execution",
+    )
 
 
 class CLMMClosePositionRequest(BaseModel):
@@ -160,6 +184,10 @@ class CLMMClosePositionRequest(BaseModel):
     network: str = Field(description="Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta')")
     position_address: str = Field(description="Position address to close")
     wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+    live_action_authorization: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Marlin live-action-authorization-v1 artifact for live CLMM close execution",
+    )
 
 
 class CLMMCollectFeesRequest(BaseModel):
@@ -168,6 +196,10 @@ class CLMMCollectFeesRequest(BaseModel):
     network: str = Field(description="Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta')")
     position_address: str = Field(description="Position address to collect fees from")
     wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+    live_action_authorization: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Marlin live-action-authorization-v1 artifact for live CLMM fee collection",
+    )
 
 
 class CLMMCollectFeesResponse(BaseModel):

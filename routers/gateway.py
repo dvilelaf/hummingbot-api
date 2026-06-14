@@ -1075,6 +1075,7 @@ async def send_transaction(
         assert_live_gateway_mutation_allowed(
             action="wallet_send",
             chain=request.chain,
+            live_action_authorization=request.live_action_authorization,
             network=request.network,
             source="gateway.wallets.send",
         )
@@ -1084,7 +1085,8 @@ async def send_transaction(
             network=request.network,
             address=request.address,
             to_address=request.to_address,
-            amount=request.amount
+            amount=request.amount,
+            live_action_authorization=request.live_action_authorization,
         )
 
         if result is None:

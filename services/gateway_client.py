@@ -1,6 +1,6 @@
 import logging
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 
@@ -212,16 +212,20 @@ class GatewayClient:
         network: str,
         address: str,
         to_address: str,
-        amount: str
+        amount: str,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Send a native token transaction"""
-        return await self._request("POST", "wallet/send", json={
+        payload = {
             "chain": chain,
             "network": network,
             "address": address,
             "toAddress": to_address,
-            "amount": amount
-        })
+            "amount": amount,
+        }
+        if live_action_authorization is not None:
+            payload["liveActionAuthorization"] = live_action_authorization
+        return await self._request("POST", "wallet/send", json=payload)
 
     async def remove_wallet(self, chain: str, address: str) -> Dict:
         """Remove a wallet from Gateway"""
@@ -464,7 +468,8 @@ class GatewayClient:
         amount: float,
         side: str,
         slippage_pct: Optional[float] = None,
-        pool_address: Optional[str] = None
+        pool_address: Optional[str] = None,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Execute a swap"""
         payload = {
@@ -479,6 +484,8 @@ class GatewayClient:
             payload["slippagePct"] = slippage_pct
         if pool_address:
             payload["poolAddress"] = pool_address
+        if live_action_authorization is not None:
+            payload["liveActionAuthorization"] = live_action_authorization
 
         route_type = self._swap_route_type(connector, pool_address)
         return await self._request("POST", f"connectors/{connector}/{route_type}/execute-swap", json=payload)
@@ -507,7 +514,8 @@ class GatewayClient:
         amount_a: float,
         amount_b: float,
         pool_type: str,
-        slippage_pct: Optional[float] = None
+        slippage_pct: Optional[float] = None,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Add liquidity through a Gateway router connector"""
         payload = {
@@ -521,6 +529,8 @@ class GatewayClient:
         }
         if slippage_pct is not None:
             payload["slippagePct"] = slippage_pct
+        if live_action_authorization is not None:
+            payload["liveActionAuthorization"] = live_action_authorization
 
         return await self._request("POST", f"connectors/{connector}/router/add-liquidity", json=payload)
 
@@ -533,7 +543,8 @@ class GatewayClient:
         token_b: str,
         liquidity: float,
         pool_type: str,
-        slippage_pct: Optional[float] = None
+        slippage_pct: Optional[float] = None,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Remove liquidity through a Gateway router connector"""
         payload = {
@@ -546,6 +557,8 @@ class GatewayClient:
         }
         if slippage_pct is not None:
             payload["slippagePct"] = slippage_pct
+        if live_action_authorization is not None:
+            payload["liveActionAuthorization"] = live_action_authorization
 
         return await self._request("POST", f"connectors/{connector}/router/remove-liquidity", json=payload)
 
@@ -564,7 +577,8 @@ class GatewayClient:
         base_token_amount: Optional[float] = None,
         quote_token_amount: Optional[float] = None,
         slippage_pct: Optional[float] = None,
-        extra_params: Optional[Dict] = None
+        extra_params: Optional[Dict] = None,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Open a NEW CLMM position with initial liquidity"""
         payload = {
@@ -584,6 +598,8 @@ class GatewayClient:
         # Add any connector-specific parameters
         if extra_params:
             payload.update(extra_params)
+        if live_action_authorization is not None:
+            payload["liveActionAuthorization"] = live_action_authorization
 
         return await self._request("POST", f"connectors/{connector}/clmm/open-position", json=payload)
 
@@ -595,7 +611,8 @@ class GatewayClient:
         position_address: str,
         base_token_amount: Optional[float] = None,
         quote_token_amount: Optional[float] = None,
-        slippage_pct: Optional[float] = None
+        slippage_pct: Optional[float] = None,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Add more liquidity to an existing CLMM position"""
         payload = {
@@ -610,6 +627,8 @@ class GatewayClient:
             payload["quoteTokenAmount"] = str(quote_token_amount)
         if slippage_pct is not None:
             payload["slippagePct"] = slippage_pct
+        if live_action_authorization is not None:
+            payload["liveActionAuthorization"] = live_action_authorization
 
         return await self._request("POST", "clmm/liquidity/add", json=payload)
 
@@ -618,14 +637,18 @@ class GatewayClient:
         connector: str,
         network: str,
         wallet_address: str,
-        position_address: str
+        position_address: str,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Close a CLMM position completely"""
-        return await self._request("POST", f"connectors/{connector}/clmm/close-position", json={
+        payload = {
             "network": network,
             "walletAddress": wallet_address,
-            "positionAddress": position_address
-        })
+            "positionAddress": position_address,
+        }
+        if live_action_authorization is not None:
+            payload["liveActionAuthorization"] = live_action_authorization
+        return await self._request("POST", f"connectors/{connector}/clmm/close-position", json=payload)
 
     async def clmm_remove_liquidity(
         self,
@@ -633,16 +656,20 @@ class GatewayClient:
         network: str,
         wallet_address: str,
         position_address: str,
-        percentage: float
+        percentage: float,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Remove liquidity from a CLMM position (partial)"""
-        return await self._request("POST", "clmm/liquidity/remove", json={
+        payload = {
             "connector": connector,
             "network": network,
             "address": wallet_address,
             "positionAddress": position_address,
-            "percentage": percentage
-        })
+            "percentage": percentage,
+        }
+        if live_action_authorization is not None:
+            payload["liveActionAuthorization"] = live_action_authorization
+        return await self._request("POST", "clmm/liquidity/remove", json=payload)
 
     async def clmm_position_info(
         self,
@@ -715,14 +742,18 @@ class GatewayClient:
         connector: str,
         network: str,
         wallet_address: str,
-        position_address: str
+        position_address: str,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Collect accumulated fees from a CLMM position"""
-        return await self._request("POST", f"connectors/{connector}/clmm/collect-fees", json={
+        payload = {
             "network": network,
             "address": wallet_address,
-            "positionAddress": position_address
-        })
+            "positionAddress": position_address,
+        }
+        if live_action_authorization is not None:
+            payload["liveActionAuthorization"] = live_action_authorization
+        return await self._request("POST", f"connectors/{connector}/clmm/collect-fees", json=payload)
 
     async def clmm_pool_info(
         self,

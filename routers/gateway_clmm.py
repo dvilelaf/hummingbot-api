@@ -537,6 +537,7 @@ async def open_clmm_position(
         assert_live_gateway_mutation_allowed(
             action="clmm_open_position",
             chain=chain,
+            live_action_authorization=request.live_action_authorization,
             network=network,
             source="gateway_clmm.open_position",
         )
@@ -579,7 +580,8 @@ async def open_clmm_position(
             base_token_amount=float(request.base_token_amount) if request.base_token_amount else None,
             quote_token_amount=float(request.quote_token_amount) if request.quote_token_amount else None,
             slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0,
-            extra_params=request.extra_params
+            extra_params=request.extra_params,
+            live_action_authorization=request.live_action_authorization,
         )
         if not result:
             raise HTTPException(status_code=404, detail=f"Failed to open CLMM position: {trading_pair}")
@@ -712,6 +714,7 @@ async def add_liquidity_to_clmm_position(
         assert_live_gateway_mutation_allowed(
             action="clmm_add_liquidity",
             chain=chain,
+            live_action_authorization=request.live_action_authorization,
             network=network,
             source="gateway_clmm.add_liquidity",
         )
@@ -730,7 +733,8 @@ async def add_liquidity_to_clmm_position(
             position_address=request.position_address,
             base_token_amount=float(request.base_token_amount) if request.base_token_amount else None,
             quote_token_amount=float(request.quote_token_amount) if request.quote_token_amount else None,
-            slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0
+            slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0,
+            live_action_authorization=request.live_action_authorization,
         )
 
         transaction_hash = result.get("signature") or result.get("txHash") or result.get("hash")
@@ -811,6 +815,7 @@ async def remove_liquidity_from_clmm_position(
         assert_live_gateway_mutation_allowed(
             action="clmm_remove_liquidity",
             chain=chain,
+            live_action_authorization=request.live_action_authorization,
             network=network,
             source="gateway_clmm.remove_liquidity",
         )
@@ -827,7 +832,8 @@ async def remove_liquidity_from_clmm_position(
             network=network,
             wallet_address=wallet_address,
             position_address=request.position_address,
-            percentage=float(request.percentage)
+            percentage=float(request.percentage),
+            live_action_authorization=request.live_action_authorization,
         )
 
         transaction_hash = result.get("signature") or result.get("txHash") or result.get("hash")
@@ -907,6 +913,7 @@ async def close_clmm_position(
         assert_live_gateway_mutation_allowed(
             action="clmm_close_position",
             chain=chain,
+            live_action_authorization=request.live_action_authorization,
             network=network,
             source="gateway_clmm.close_position",
         )
@@ -968,7 +975,8 @@ async def close_clmm_position(
             connector=request.connector,
             network=network,
             wallet_address=wallet_address,
-            position_address=request.position_address
+            position_address=request.position_address,
+            live_action_authorization=request.live_action_authorization,
         )
 
         transaction_hash = result.get("signature") or result.get("txHash") or result.get("hash")
@@ -1112,6 +1120,7 @@ async def collect_fees_from_clmm_position(
         assert_live_gateway_mutation_allowed(
             action="clmm_collect_fees",
             chain=chain,
+            live_action_authorization=request.live_action_authorization,
             network=network,
             source="gateway_clmm.collect_fees",
         )
@@ -1171,7 +1180,8 @@ async def collect_fees_from_clmm_position(
             connector=request.connector,
             network=network,
             wallet_address=wallet_address,
-            position_address=request.position_address
+            position_address=request.position_address,
+            live_action_authorization=request.live_action_authorization,
         )
 
         if not result:

@@ -175,6 +175,7 @@ async def execute_swap(
         assert_live_gateway_mutation_allowed(
             action="swap_execute",
             chain=chain,
+            live_action_authorization=request.live_action_authorization,
             network=network,
             source="gateway_swap.execute_swap",
         )
@@ -199,6 +200,7 @@ async def execute_swap(
             side=request.side,
             slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0,
             pool_address=request.pool_address,
+            live_action_authorization=request.live_action_authorization,
         )
         if not result:
             raise HTTPException(status_code=500, detail="Gateway service is not able to execute swap")
