@@ -56,8 +56,31 @@ def test_live_order_gate_allows_non_paper_connector_when_explicitly_enabled(monk
     gate.assert_live_order_submission_allowed(
         account_name="master_account",
         connector_name="binance",
+        live_action_authorization=_approved_authorization(
+            action="order",
+            api_live_flag="TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED",
+            connector_id="binance",
+            network="mainnet",
+        ),
         source="test",
     )
+
+
+def test_live_order_gate_requires_authorization_when_env_enabled(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED", "true")
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_order_submission_allowed(
+            account_name="master_account",
+            connector_name="binance",
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "live action authorization missing" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
 
 
 def test_gateway_mutation_gate_allows_test_networks_by_default(monkeypatch):
@@ -125,9 +148,82 @@ def test_gateway_mutation_gate_allows_mainnet_when_action_enabled(monkeypatch):
     gate.assert_live_gateway_mutation_allowed(
         action="swap_execute",
         chain="ethereum",
+        live_action_authorization=_approved_authorization(
+            action="gateway_swap",
+            api_live_flag="TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED",
+            connector_id="gateway",
+            network="base",
+        ),
         network="base",
         source="test",
     )
+
+
+def test_gateway_mutation_gate_requires_authorization_when_action_enabled(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", "true")
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_gateway_mutation_allowed(
+            action="swap_execute",
+            chain="ethereum",
+            network="base",
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "live action authorization missing" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+def test_gateway_mutation_gate_rejects_wrong_authorization_action(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", "true")
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_gateway_mutation_allowed(
+            action="swap_execute",
+            chain="ethereum",
+            live_action_authorization=_approved_authorization(
+                action="wallet_send",
+                api_live_flag="TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED",
+                connector_id="gateway",
+                network="base",
+            ),
+            network="base",
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "action mismatch" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+def test_gateway_mutation_gate_rejects_expired_authorization(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", "true")
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_gateway_mutation_allowed(
+            action="swap_execute",
+            chain="ethereum",
+            live_action_authorization=_approved_authorization(
+                action="gateway_swap",
+                api_live_flag="TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED",
+                connector_id="gateway",
+                expires_at_utc="2020-01-01T00:00:00Z",
+                network="base",
+            ),
+            network="base",
+            source="test",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "expired" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
 
 
 def test_accounts_service_checks_live_gate_before_connector_order_submission():
@@ -264,3 +360,30 @@ def test_trading_service_checks_live_gate_before_executor_cancel_submission():
     assert cancel_source.index("assert_live_order_submission_allowed(") < cancel_source.index(
         "connector.cancel(",
     )
+
+
+def _approved_authorization(
+    *,
+    action,
+    api_live_flag,
+    connector_id,
+    network,
+    expires_at_utc="2099-01-01T00:00:00Z",
+):
+    return {
+        "action": action,
+        "api_live_flag": api_live_flag,
+        "blockers": [],
+        "connector_id": connector_id,
+        "edge_sha256": "e" * 64,
+        "expires_at_utc": expires_at_utc,
+        "gas": "0.001",
+        "gateway_live_flags": [],
+        "generated_at_utc": "2026-06-14T10:00:00Z",
+        "live_gate_sha256": "g" * 64,
+        "network": network,
+        "notional": "1",
+        "slippage_bps": "25",
+        "status": "approved",
+        "version": "live-action-authorization-v1",
+    }
