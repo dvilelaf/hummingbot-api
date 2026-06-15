@@ -93,6 +93,8 @@ from .gateway import (
 
 # Gateway Trading models (Swap + CLMM only, AMM removed)
 from .gateway_trading import (  # Swap models; CLMM models; Pool info models; Pool listing models
+    BridgeExecuteRequest,
+    BridgeExecuteResponse,
     CLMMAddLiquidityRequest,
     CLMMClosePositionRequest,
     CLMMCollectFeesRequest,
@@ -313,6 +315,8 @@ __all__ = [
     "ConnectorOrderTypesResponse",
     "ConnectorListResponse",
     # Gateway Trading models
+    "BridgeExecuteRequest",
+    "BridgeExecuteResponse",
     "SwapQuoteRequest",
     "SwapQuoteResponse",
     "SwapExecuteRequest",

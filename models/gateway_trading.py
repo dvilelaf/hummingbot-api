@@ -112,6 +112,37 @@ class RouterLiquidityResponse(BaseModel):
 
 
 # ============================================
+# Bridge Models
+# ============================================
+
+class BridgeExecuteRequest(BaseModel):
+    """Request to execute a Marlin-approved bridge transaction through Gateway"""
+    provider: str = Field(description="Bridge provider id, e.g. 'lifi' or 'across'")
+    provider_route_id: str = Field(description="Provider route id approved by Marlin")
+    quote_id: str = Field(description="Provider quote id approved by Marlin")
+    route_payload_hash: str = Field(description="Hash of the provider route payload approved by Marlin")
+    source_chain: str = Field(default="ethereum", description="Source chain, currently forwarded to Gateway")
+    source_chain_id: str = Field(description="Source chain id approved by Marlin")
+    network: str = Field(description="Network ID in 'chain-network' format")
+    wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+    tx_target: str = Field(description="Transaction target approved by Marlin")
+    tx_value: str = Field(default="0", description="Native value approved by Marlin")
+    tx_calldata: str = Field(description="Transaction calldata approved by Marlin")
+    tx_calldata_hash: str = Field(description="Hash of tx_calldata approved by Marlin")
+    gas_limit: Optional[int] = Field(default=None, description="Optional gas limit for EVM bridge tx")
+    authorization_nonce: str = Field(description="Authorization nonce approved by Marlin")
+    live_action_authorization: Dict[str, Any] = Field(
+        description="Marlin live-action-authorization-v1 artifact for bridge execution",
+    )
+
+
+class BridgeExecuteResponse(BaseModel):
+    """Response after submitting a bridge transaction"""
+    transaction_hash: str = Field(description="Transaction hash")
+    status: str = Field(default="submitted", description="Transaction status")
+
+
+# ============================================
 # CLMM Liquidity Models (Meteora, Raydium, Uniswap V3)
 # ============================================
 

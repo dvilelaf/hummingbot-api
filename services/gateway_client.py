@@ -490,6 +490,44 @@ class GatewayClient:
         route_type = self._swap_route_type(connector, pool_address)
         return await self._request("POST", f"connectors/{connector}/{route_type}/execute-swap", json=payload)
 
+    async def execute_bridge(
+        self,
+        provider: str,
+        provider_route_id: str,
+        quote_id: str,
+        route_payload_hash: str,
+        source_chain: str,
+        source_chain_id: str,
+        network: str,
+        wallet_address: str,
+        tx_target: str,
+        tx_value: str,
+        tx_calldata: str,
+        tx_calldata_hash: str,
+        gas_limit: Optional[int] = None,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
+    ) -> Dict:
+        """Execute a Marlin-approved bridge transaction through Gateway."""
+        payload = {
+            "provider": provider,
+            "providerRouteId": provider_route_id,
+            "quoteId": quote_id,
+            "routePayloadHash": route_payload_hash,
+            "sourceChain": source_chain,
+            "sourceChainId": source_chain_id,
+            "network": network,
+            "walletAddress": wallet_address,
+            "txTarget": tx_target,
+            "txValue": tx_value,
+            "txCalldata": tx_calldata,
+            "txCalldataHash": tx_calldata_hash,
+        }
+        if gas_limit is not None:
+            payload["gasLimit"] = gas_limit
+        if live_action_authorization is not None:
+            payload["liveActionAuthorization"] = live_action_authorization
+        return await self._request("POST", "bridge/execute", json=payload)
+
     async def execute_quote(
         self,
         connector: str,

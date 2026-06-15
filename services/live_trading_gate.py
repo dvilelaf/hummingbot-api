@@ -12,6 +12,8 @@ from fastapi import HTTPException
 LIVE_ORDER_SUBMISSION_ENV = "TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED"
 LIVE_ORDER_CANCEL_ENV = "TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED"
 LIVE_GATEWAY_MUTATIONS_ENV = "TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED"
+LIVE_GATEWAY_BRIDGE_EXECUTE_ENV = "TRADING_SAFETY_LIVE_GATEWAY_BRIDGE_EXECUTE_ENABLED"
+BRIDGE_PROVIDER_ALLOWLIST_ENV = "TRADING_SAFETY_BRIDGE_PROVIDER_ALLOWLIST"
 LIVE_ACTION_AUTH_SECRET_ENV = "MARLIN_LIVE_ACTION_AUTH_SECRET"
 LIVE_ACTION_AUTHORIZATION_VERSION = "live-action-authorization-v1"
 SAFE_CONNECTOR_SUFFIXES = ("_paper_trade", "_testnet", "_sandbox")
@@ -27,6 +29,13 @@ GATEWAY_ACTION_AUTHORIZATION_ACTIONS = {
     "clmm_close_position": "lp_remove",
     "clmm_collect_fees": "lp_remove",
 }
+BRIDGE_GATEWAY_FLAGS = (
+    "GATEWAY_LIVE_BRIDGE_EXECUTE_ENABLED",
+    "GATEWAY_LIVE_ETHEREUM_TRANSACTION_ENABLED",
+    "GATEWAY_LIVE_SOLANA_RAW_TRANSACTION_ENABLED",
+    "GATEWAY_LIVE_SOLANA_TRANSACTION_ENABLED",
+)
+_used_bridge_authorization_nonces: set[str] = set()
 
 
 def assert_live_order_submission_allowed(
@@ -132,6 +141,106 @@ def assert_live_gateway_mutation_allowed(
     )
 
 
+def assert_live_bridge_execution_allowed(
+    *,
+    expected_authorization_nonce: Any,
+    expected_calldata_hash: Any,
+    expected_provider: Any,
+    expected_provider_route_id: Any,
+    expected_quote_id: Any,
+    expected_route_payload_hash: Any,
+    expected_source_chain_id: Any,
+    expected_target: Any,
+    expected_value: Any,
+    live_action_authorization: dict[str, Any] | None,
+    source: str,
+) -> None:
+    """Fail closed before forwarding a Marlin-approved bridge execution to Gateway."""
+    if not _env_bool(LIVE_GATEWAY_BRIDGE_EXECUTE_ENV):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "live Gateway bridge execution disabled; "
+                f"set {LIVE_GATEWAY_BRIDGE_EXECUTE_ENV}=true only behind Marlin live gates "
+                f"(source={source})"
+            ),
+        )
+    _assert_bridge_provider_allowed(expected_provider, source=source)
+    _assert_live_action_authorization(
+        live_action_authorization,
+        expected_action="bridge",
+        expected_api_live_flag=LIVE_GATEWAY_BRIDGE_EXECUTE_ENV,
+        source=source,
+    )
+    _assert_bridge_gateway_flags(live_action_authorization, source=source)
+    _assert_bridge_field_matches(
+        live_action_authorization,
+        "bridge_authorization_nonce",
+        expected_authorization_nonce,
+        "bridge authorization_nonce",
+        source=source,
+    )
+    _assert_bridge_field_matches(
+        live_action_authorization,
+        "bridge_provider",
+        expected_provider,
+        "bridge provider",
+        source=source,
+    )
+    _assert_bridge_field_matches(
+        live_action_authorization,
+        "bridge_provider_route_id",
+        expected_provider_route_id,
+        "bridge provider_route_id",
+        source=source,
+    )
+    _assert_bridge_field_matches(
+        live_action_authorization,
+        "bridge_quote_id",
+        expected_quote_id,
+        "bridge quote_id",
+        source=source,
+    )
+    _assert_bridge_field_matches(
+        live_action_authorization,
+        "bridge_route_payload_hash",
+        expected_route_payload_hash,
+        "bridge route_payload_hash",
+        source=source,
+    )
+    _assert_bridge_field_matches(
+        live_action_authorization,
+        "bridge_source_chain_id",
+        expected_source_chain_id,
+        "bridge source_chain_id",
+        source=source,
+    )
+    _assert_bridge_field_matches(
+        live_action_authorization,
+        "bridge_tx_calldata_hash",
+        expected_calldata_hash,
+        "bridge tx_calldata_hash",
+        source=source,
+    )
+    _assert_bridge_field_matches(
+        live_action_authorization,
+        "bridge_tx_target",
+        expected_target,
+        "bridge tx_target",
+        source=source,
+    )
+    _assert_authorization_decimal_matches(
+        live_action_authorization or {},
+        "bridge_tx_value",
+        expected_value,
+        source=source,
+    )
+    nonce = str(expected_authorization_nonce).strip()
+    if nonce in _used_bridge_authorization_nonces:
+        _raise_authorization_error("bridge authorization nonce replay", source=source)
+    _used_bridge_authorization_nonces.add(nonce)
+
+
 def _is_safe_connector(connector_name: str) -> bool:
     return connector_name.endswith(SAFE_CONNECTOR_SUFFIXES)
 
@@ -145,6 +254,34 @@ def _is_safe_gateway_network(network: str) -> bool:
 
 def _env_bool(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _assert_bridge_provider_allowed(provider: Any, *, source: str) -> None:
+    allowed = {
+        item.strip()
+        for item in os.getenv(BRIDGE_PROVIDER_ALLOWLIST_ENV, "").split(",")
+        if item.strip()
+    }
+    if str(provider).strip() not in allowed:
+        _raise_authorization_error("bridge provider not allowlisted", source=source)
+
+
+def _assert_bridge_gateway_flags(authorization: dict[str, Any] | None, *, source: str) -> None:
+    flags = (authorization or {}).get("gateway_live_flags")
+    if not isinstance(flags, list) or set(map(str, flags)) != set(BRIDGE_GATEWAY_FLAGS):
+        _raise_authorization_error("live action authorization Gateway flag mismatch", source=source)
+
+
+def _assert_bridge_field_matches(
+    authorization: dict[str, Any] | None,
+    field: str,
+    expected: Any,
+    label: str,
+    *,
+    source: str,
+) -> None:
+    if str((authorization or {}).get(field, "")).strip() != str(expected).strip():
+        _raise_authorization_error(f"{label} mismatch", source=source)
 
 
 def _gateway_action_env(action: str) -> str:

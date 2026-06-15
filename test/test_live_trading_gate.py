@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
 from fastapi import HTTPException
 
 
@@ -524,6 +525,80 @@ def test_gateway_wallet_send_checks_live_gate_before_send_transaction():
     )
 
 
+def test_bridge_execution_gate_rejects_provider_route_mismatch(monkeypatch):
+    gate = _live_gate_module()
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_BRIDGE_EXECUTE_ENABLED", "true")
+    monkeypatch.setenv("TRADING_SAFETY_BRIDGE_PROVIDER_ALLOWLIST", "lifi,across")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
+
+    with pytest.raises(HTTPException) as exc:
+        gate.assert_live_bridge_execution_allowed(
+            expected_authorization_nonce="bridge-auth-001",
+            expected_calldata_hash="sha256:calldata",
+            expected_provider="lifi",
+            expected_provider_route_id="route-tampered",
+            expected_quote_id="quote-123",
+            expected_route_payload_hash="sha256:route",
+            expected_source_chain_id="1",
+            expected_target="0x1111111111111111111111111111111111111111",
+            expected_value="0",
+            live_action_authorization=_approved_bridge_authorization(),
+            source="gateway_bridge.execute_bridge",
+        )
+
+    assert "bridge provider_route_id mismatch" in str(exc.value.detail)
+
+
+def test_bridge_execution_gate_rejects_nonce_replay(monkeypatch):
+    gate = _live_gate_module()
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_BRIDGE_EXECUTE_ENABLED", "true")
+    monkeypatch.setenv("TRADING_SAFETY_BRIDGE_PROVIDER_ALLOWLIST", "lifi")
+    monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
+
+    kwargs = {
+        "expected_authorization_nonce": "bridge-auth-001",
+        "expected_calldata_hash": "sha256:calldata",
+        "expected_provider": "lifi",
+        "expected_provider_route_id": "route-123",
+        "expected_quote_id": "quote-123",
+        "expected_route_payload_hash": "sha256:route",
+        "expected_source_chain_id": "1",
+        "expected_target": "0x1111111111111111111111111111111111111111",
+        "expected_value": "0",
+        "live_action_authorization": _approved_bridge_authorization(),
+        "source": "gateway_bridge.execute_bridge",
+    }
+
+    gate.assert_live_bridge_execution_allowed(**kwargs)
+    with pytest.raises(HTTPException) as exc:
+        gate.assert_live_bridge_execution_allowed(**kwargs)
+
+    assert "bridge authorization nonce replay" in str(exc.value.detail)
+
+
+def test_gateway_bridge_router_checks_live_gate_before_gateway_execution():
+    source = (ROOT / "routers" / "gateway_bridge.py").read_text()
+    execute_source = source[source.index("async def execute_bridge") :]
+
+    assert "assert_live_bridge_execution_allowed(" in execute_source
+    assert "expected_provider=request.provider" in execute_source
+    assert "expected_provider_route_id=request.provider_route_id" in execute_source
+    assert "expected_quote_id=request.quote_id" in execute_source
+    assert "expected_target=request.tx_target" in execute_source
+    assert "expected_value=request.tx_value" in execute_source
+    assert "expected_calldata_hash=request.tx_calldata_hash" in execute_source
+    assert execute_source.index("assert_live_bridge_execution_allowed(") < execute_source.index(
+        "accounts_service.gateway_client.execute_bridge(",
+    )
+
+
+def test_gateway_bridge_router_is_registered_in_main():
+    main_source = (ROOT / "main.py").read_text()
+
+    assert "gateway_bridge" in main_source
+    assert "app.include_router(gateway_bridge.router" in main_source
+
+
 def test_gateway_clmm_checks_live_gate_before_mutations():
     source = (ROOT / "routers" / "gateway_clmm.py").read_text()
     mutation_calls = (
@@ -606,6 +681,7 @@ def test_gateway_client_forwards_live_action_authorization_to_gateway():
         "execute_swap",
         "router_add_liquidity",
         "router_remove_liquidity",
+        "execute_bridge",
         "clmm_open_position",
         "clmm_add_liquidity",
         "clmm_remove_liquidity",
@@ -666,6 +742,43 @@ def _approved_authorization(
         "network": network,
         "notional": notional,
         "slippage_bps": slippage_bps,
+        "status": "approved",
+        "version": "live-action-authorization-v1",
+    }
+    authorization["signature"] = _signature(authorization)
+    return authorization
+
+
+def _approved_bridge_authorization():
+    authorization = {
+        "action": "bridge",
+        "api_live_flag": "TRADING_SAFETY_LIVE_GATEWAY_BRIDGE_EXECUTE_ENABLED",
+        "blockers": [],
+        "bridge_authorization_nonce": "bridge-auth-001",
+        "bridge_provider": "lifi",
+        "bridge_provider_route_id": "route-123",
+        "bridge_quote_id": "quote-123",
+        "bridge_route_payload_hash": "sha256:route",
+        "bridge_source_chain_id": "1",
+        "bridge_tx_calldata_hash": "sha256:calldata",
+        "bridge_tx_target": "0x1111111111111111111111111111111111111111",
+        "bridge_tx_value": "0",
+        "connector_id": "gateway-bridge",
+        "edge_sha256": "e" * 64,
+        "expires_at_utc": "2099-01-01T00:00:00Z",
+        "gas": "0.001",
+        "gateway_live_flags": [
+            "GATEWAY_LIVE_BRIDGE_EXECUTE_ENABLED",
+            "GATEWAY_LIVE_ETHEREUM_TRANSACTION_ENABLED",
+            "GATEWAY_LIVE_SOLANA_RAW_TRANSACTION_ENABLED",
+            "GATEWAY_LIVE_SOLANA_TRANSACTION_ENABLED",
+        ],
+        "generated_at_utc": "2026-06-14T10:00:00Z",
+        "instrument": "ethereum:USDC->base:USDC",
+        "live_gate_sha256": "g" * 64,
+        "network": "ethereum-mainnet",
+        "notional": "100",
+        "slippage_bps": "25",
         "status": "approved",
         "version": "live-action-authorization-v1",
     }

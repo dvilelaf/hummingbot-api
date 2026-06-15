@@ -52,6 +52,7 @@ from routers import (  # noqa: E402
     docker,
     executors,
     gateway,
+    gateway_bridge,
     gateway_clmm,
     gateway_lp,
     gateway_swap,
@@ -435,6 +436,7 @@ app.include_router(connectors.router, dependencies=[Depends(auth_user)])
 app.include_router(portfolio.router, dependencies=[Depends(auth_user)])
 app.include_router(trading.router, dependencies=[Depends(auth_user)])
 app.include_router(gateway_swap.router, dependencies=[Depends(auth_user)])
+app.include_router(gateway_bridge.router, dependencies=[Depends(auth_user)])
 app.include_router(gateway_clmm.router, dependencies=[Depends(auth_user)])
 app.include_router(gateway_lp.router, dependencies=[Depends(auth_user)])
 app.include_router(bot_orchestration.router, dependencies=[Depends(auth_user)])
