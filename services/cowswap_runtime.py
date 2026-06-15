@@ -373,7 +373,12 @@ async def cancel_cowswap_order(*, runtime: Any | None, client_order_id: str) -> 
     """Cancel a CowSwap order through the initialized runtime adapter."""
     if runtime is None:
         raise CowSwapRuntimeUnavailableError("CowSwap runtime is not initialized")
-    result = await runtime.cancel(client_order_id)
+    try:
+        result = await runtime.cancel(client_order_id)
+    except Exception as exc:
+        if _is_terminal_cowswap_cancel_response(exc):
+            return client_order_id
+        raise
     cancelled_id = _extract_client_order_id(result) or client_order_id
     return cancelled_id
 
@@ -463,6 +468,11 @@ def _extract_client_order_id(result: Any) -> str | None:
     else:
         value = getattr(result, "client_order_id", None)
     return str(value) if value else None
+
+
+def _is_terminal_cowswap_cancel_response(exc: Exception) -> bool:
+    text = str(exc)
+    return "OrderFullyExecuted" in text or "Order is fully executed" in text
 
 
 def _runtime_in_flight_orders(runtime: Any | None) -> list[dict[str, Any]]:

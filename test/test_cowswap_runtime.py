@@ -291,6 +291,22 @@ def test_cancel_cowswap_order_delegates_to_runtime_adapter():
     assert runtime.calls == [("cancel", "cow-1")]
 
 
+def test_cancel_cowswap_order_treats_fully_executed_response_as_terminal():
+    class FullyExecutedRuntime(FakeCowSwapRuntime):
+        async def cancel(self, client_order_id):
+            self.calls.append(("cancel", client_order_id))
+            raise RuntimeError(
+                'HTTP error 400: {"errorType":"OrderFullyExecuted","description":"Order is fully executed"}',
+            )
+
+    runtime = FullyExecutedRuntime()
+
+    cancelled = asyncio.run(cancel_cowswap_order(runtime=runtime, client_order_id="cow-1"))
+
+    assert cancelled == "cow-1"
+    assert runtime.calls == [("cancel", "cow-1")]
+
+
 def test_poll_cowswap_order_serializes_order_evidence():
     runtime = FakeCowSwapRuntime()
 
