@@ -252,28 +252,45 @@ class TestXrplTradingSafety:
     """Tests for XRPL execution safety boundaries."""
 
     @pytest.mark.asyncio
-    async def test_xrpl_market_orders_are_explicitly_blocked_before_connector_access(self):
-        """XRPL MARKET order notional semantics are blocked instead of guessed."""
-        from fastapi import HTTPException
+    async def test_xrpl_market_orders_delegate_to_connector_when_supported(self, monkeypatch):
+        """XRPL MARKET orders are handled by the Hummingbot connector, not blocked in API."""
         from hummingbot.core.data_type.common import OrderType, TradeType
+        import services.accounts_service as accounts_module
         from services.accounts_service import AccountsService
+
+        class TradingRule:
+            min_order_size = Decimal("0.000001")
+            min_notional_size = Decimal("0.000001")
 
         service = AccountsService.__new__(AccountsService)
         service.list_accounts = MagicMock(return_value=["master_account"])
         service._connector_service = MagicMock()
-        service._connector_service.get_trading_connector = AsyncMock()
+        connector = MagicMock()
+        connector.trading_rules = {"XRP-USD": TradingRule()}
+        connector.supported_order_types.return_value = [OrderType.LIMIT, OrderType.MARKET]
+        connector.quantize_order_amount.return_value = Decimal("1")
+        connector.buy.return_value = "xrpl-market-order"
+        service._connector_service.get_trading_connector = AsyncMock(return_value=connector)
+        service._ensure_trading_pair_rules_loaded = AsyncMock()
+        service._market_data_service = MagicMock()
+        service._market_data_service.get_prices = AsyncMock(return_value={"XRP-USD": "0.5"})
+        monkeypatch.setattr(accounts_module, "assert_live_order_submission_allowed", lambda **_: None)
 
-        with pytest.raises(HTTPException) as exc_info:
-            await service.place_trade(
-                account_name="master_account",
-                connector_name="xrpl",
-                trading_pair="XRP-USD",
-                trade_type=TradeType.BUY,
-                amount=Decimal("1"),
-                order_type=OrderType.MARKET,
-            )
+        order_id = await service.place_trade(
+            account_name="master_account",
+            connector_name="xrpl",
+            trading_pair="XRP-USD",
+            trade_type=TradeType.BUY,
+            amount=Decimal("1"),
+            order_type=OrderType.MARKET,
+        )
 
-        assert exc_info.value.status_code == 400
-        assert "XRPL MARKET orders are disabled" in str(exc_info.value.detail)
-        assert "LIMIT" in str(exc_info.value.detail)
-        service._connector_service.get_trading_connector.assert_not_awaited()
+        assert order_id == "xrpl-market-order"
+        service._connector_service.get_trading_connector.assert_awaited_once_with("master_account", "xrpl")
+        connector.buy.assert_called_once_with(
+            trading_pair="XRP-USD",
+            amount=Decimal("1"),
+            order_type=OrderType.MARKET,
+            price=Decimal("0.5"),
+            position_action=PositionAction.OPEN,
+        )
