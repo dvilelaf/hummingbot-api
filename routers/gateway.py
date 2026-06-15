@@ -16,6 +16,7 @@ from models import (
     UpdateApiKeysRequest,
 )
 from services.accounts_service import AccountsService
+from services.gateway_poll import gateway_poll_error_detail
 from services.gateway_service import GatewayService
 from services.live_trading_gate import assert_live_gateway_mutation_allowed
 
@@ -1120,8 +1121,9 @@ async def poll_transaction(
         )
         if result is None:
             raise HTTPException(status_code=502, detail="Gateway returned no transaction poll response")
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=f"Failed to poll transaction: {result.get('error')}")
+        error_detail = gateway_poll_error_detail(result)
+        if error_detail is not None:
+            raise HTTPException(status_code=400, detail=f"Failed to poll transaction: {error_detail}")
         return result
     except HTTPException:
         raise
