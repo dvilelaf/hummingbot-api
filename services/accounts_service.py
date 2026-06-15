@@ -809,6 +809,9 @@ class AccountsService:
 
         # Initialize missing connectors
         for connector_name in self._connector_service.list_available_credentials(account_name):
+            if connector_name == COWSWAP_CONNECTOR_NAME:
+                self._mark_cowswap_account_configured(account_name)
+                continue
             if self.startup_connectors is not None and connector_name not in self.startup_connectors:
                 logger.debug(
                     "Skipping account-state initialization for %s/%s; not in startup connector allowlist",
@@ -858,6 +861,11 @@ class AccountsService:
 
                 tasks.append(self._get_connector_tokens_info(connector, connector_name))
                 task_meta.append((account_name, connector_name))
+
+        self._mark_filtered_cowswap_accounts_configured(
+            account_names=account_names,
+            connector_names=connector_names,
+        )
 
         gateway_filters = _gateway_chain_network_filters(connector_names)
 
@@ -1022,6 +1030,10 @@ class AccountsService:
             raise HTTPException(status_code=500, detail="Connector service not initialized")
 
         try:
+            if connector_name == COWSWAP_CONNECTOR_NAME:
+                self._add_cowswap_credentials(account_name, credentials)
+                return
+
             # Update the connector keys (this saves the credentials to file and validates them)
             await self._connector_service.update_connector_keys(account_name, connector_name, credentials)
 
@@ -1030,6 +1042,52 @@ class AccountsService:
             logger.error(f"Error adding connector credentials for account {account_name}: {e}")
             await self.delete_credentials(account_name, connector_name)
             raise e
+
+    def _add_cowswap_credentials(self, account_name: str, credentials: dict):
+        """Register CowSwap as an account connector without using Hummingbot core settings."""
+        config_map = cowswap_connector_config_map()
+        if config_map is None:
+            raise HTTPException(status_code=404, detail=f"Connector '{COWSWAP_CONNECTOR_NAME}' not found")
+
+        unknown_fields = sorted(set(credentials) - set(config_map))
+        if unknown_fields:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown CowSwap credential fields: {', '.join(unknown_fields)}",
+            )
+
+        fs_util.dump_dict_to_yaml(
+            f"credentials/{account_name}/connectors/{COWSWAP_CONNECTOR_NAME}.yml",
+            {"connector": COWSWAP_CONNECTOR_NAME, **credentials},
+        )
+        self._mark_cowswap_account_configured(account_name)
+
+    def _mark_filtered_cowswap_accounts_configured(
+        self,
+        *,
+        account_names: Optional[List[str]],
+        connector_names: Optional[List[str]],
+    ):
+        if connector_names is not None and COWSWAP_CONNECTOR_NAME not in connector_names:
+            return
+
+        try:
+            accounts = account_names if account_names is not None else self.list_accounts()
+        except FileNotFoundError:
+            return
+
+        for account_name in accounts:
+            if self._has_cowswap_credentials(account_name):
+                self._mark_cowswap_account_configured(account_name)
+
+    def _mark_cowswap_account_configured(self, account_name: str):
+        self.accounts_state.setdefault(account_name, {}).setdefault(COWSWAP_CONNECTOR_NAME, [])
+
+    @staticmethod
+    def _has_cowswap_credentials(account_name: str) -> bool:
+        return fs_util.path_exists(
+            f"credentials/{account_name}/connectors/{COWSWAP_CONNECTOR_NAME}.yml",
+        )
 
     @staticmethod
     def list_accounts():

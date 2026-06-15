@@ -14,6 +14,8 @@ from config import settings
 from utils.file_system import fs_util
 from utils.hummingbot_api_config_adapter import HummingbotAPIConfigAdapter
 
+COWSWAP_CONNECTOR_NAME = "cowswap"
+
 
 class BackendAPISecurity(Security):
     @classmethod
@@ -31,10 +33,13 @@ class BackendAPISecurity(Security):
     def decrypt_all(cls, account_name: str = "master_account"):
         cls._secure_configs.clear()
         cls._decryption_done.clear()
-        encrypted_files = [file for file in fs_util.list_files(directory=f"credentials/{account_name}/connectors") if
-                           file.endswith(".yml")]
+        encrypted_files = [
+            file for file in fs_util.list_files(directory=f"credentials/{account_name}/connectors") if file.endswith(".yml")
+        ]
         for file in encrypted_files:
             path = Path(fs_util.base_path + f"/credentials/{account_name}/connectors/" + file)
+            if connector_name_from_file(path) == COWSWAP_CONNECTOR_NAME:
+                continue
             cls.decrypt_connector_config(path)
         cls._decryption_done.set()
 
