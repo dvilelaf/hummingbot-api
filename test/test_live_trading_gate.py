@@ -457,6 +457,7 @@ def test_trading_route_passes_authorization_to_cancel_order():
     assert "cancel_request: CancelOrderRequest" in cancel_route
     assert "live_action_authorization = (" in cancel_route
     assert "cancel_request.live_action_authorization" in cancel_route
+    assert "safe_testnet=False if cancel_request is None else cancel_request.safe_testnet" in cancel_route
     assert "live_action_authorization=live_action_authorization" in cancel_route
 
 

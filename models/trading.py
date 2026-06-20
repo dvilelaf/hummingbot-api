@@ -61,6 +61,10 @@ class TradeRequest(BaseModel):
 class CancelOrderRequest(BaseModel):
     """Optional body for live-safe order cancellation."""
 
+    safe_testnet: bool = Field(
+        default=False,
+        description="Allow explicitly configured testnet connectors without live authorization",
+    )
     live_action_authorization: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Marlin live-action-authorization-v1 artifact for live order cancellation",

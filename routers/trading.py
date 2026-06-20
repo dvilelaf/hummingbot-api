@@ -113,6 +113,7 @@ async def cancel_order(
             account_name=account_name,
             connector_name=connector_name,
             client_order_id=client_order_id,
+            safe_testnet=False if cancel_request is None else cancel_request.safe_testnet,
             live_action_authorization=live_action_authorization,
         )
         return {"message": f"Order cancellation initiated for {cancelled_order_id}"}

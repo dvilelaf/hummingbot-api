@@ -1781,6 +1781,7 @@ class AccountsService:
         account_name: str,
         connector_name: str,
         client_order_id: str,
+        safe_testnet: bool = False,
         live_action_authorization: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
@@ -1799,12 +1800,13 @@ class AccountsService:
         """
         if connector_name == COWSWAP_CONNECTOR_NAME:
             try:
-                assert_live_order_cancel_allowed(
-                    account_name=account_name,
-                    connector_name=connector_name,
-                    live_action_authorization=live_action_authorization,
-                    source="accounts_service.cancel_order",
-                )
+                if not _cowswap_safe_testnet_order_allowed(safe_testnet=safe_testnet):
+                    assert_live_order_cancel_allowed(
+                        account_name=account_name,
+                        connector_name=connector_name,
+                        live_action_authorization=live_action_authorization,
+                        source="accounts_service.cancel_order",
+                    )
                 return await cancel_cowswap_order(
                     runtime=self._cowswap_runtime,
                     client_order_id=client_order_id,
