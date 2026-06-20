@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -33,6 +34,7 @@ from utils.file_system import fs_util
 # Create module-specific logger
 logger = logging.getLogger(__name__)
 GATEWAY_CHAIN_PREFIXES = ("ethereum-", "solana-")
+COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}
 
 
 def _gateway_chain_network_filters(connector_names: Optional[List[str]]) -> Optional[tuple[str, ...]]:
@@ -1504,6 +1506,7 @@ class AccountsService:
         order_type: OrderType = OrderType.LIMIT,
         price: Optional[Decimal] = None,
         position_action: PositionAction = PositionAction.OPEN,
+        safe_testnet: bool = False,
         live_action_authorization: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
@@ -1548,14 +1551,15 @@ class AccountsService:
             if order_type != OrderType.MARKET:
                 raise HTTPException(status_code=400, detail="CowSwap only supports MARKET orders")
             try:
-                assert_live_order_submission_allowed(
-                    account_name=account_name,
-                    connector_name=connector_name,
-                    expected_instrument=trading_pair,
-                    expected_notional=amount,
-                    live_action_authorization=live_action_authorization,
-                    source="accounts_service.place_trade",
-                )
+                if not _cowswap_safe_testnet_order_allowed(safe_testnet=safe_testnet):
+                    assert_live_order_submission_allowed(
+                        account_name=account_name,
+                        connector_name=connector_name,
+                        expected_instrument=trading_pair,
+                        expected_notional=amount,
+                        live_action_authorization=live_action_authorization,
+                        source="accounts_service.place_trade",
+                    )
                 order_id = await place_cowswap_market_order(
                     runtime=self._cowswap_runtime,
                     trading_pair=trading_pair,
@@ -2573,3 +2577,11 @@ class AccountsService:
         if token.startswith("W") and token[1:] in self.potential_wrapped_tokens:
             return token[1:]
         return token
+
+
+def _cowswap_safe_testnet_order_allowed(*, safe_testnet: bool) -> bool:
+    """Allow CowSwap orders without live gate only on explicit safe testnets."""
+    if not safe_testnet:
+        return False
+    network = os.environ.get("COWSWAP_NETWORK") or os.environ.get("COWSWAP_CHAIN_NAME") or ""
+    return network.lower() in COWSWAP_SAFE_TEST_NETWORKS

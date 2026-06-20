@@ -60,6 +60,7 @@ async def place_trade(
             order_type=order_type_enum,
             price=trade_request.price,
             position_action=position_action_enum,
+            safe_testnet=trade_request.safe_testnet,
             live_action_authorization=trade_request.live_action_authorization,
         )
 

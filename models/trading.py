@@ -18,6 +18,10 @@ class TradeRequest(BaseModel):
     order_type: Literal["LIMIT", "MARKET", "LIMIT_MAKER"] = Field(default="LIMIT", description="Type of order")
     price: Optional[Decimal] = Field(default=None, description="Price for limit orders")
     position_action: Literal["OPEN", "CLOSE"] = Field(default="OPEN", description="Position action for perpetual contracts (OPEN/CLOSE)")
+    safe_testnet: bool = Field(
+        default=False,
+        description="Allow explicitly configured testnet connectors without live authorization",
+    )
     live_action_authorization: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Marlin live-action-authorization-v1 artifact for live order submission",

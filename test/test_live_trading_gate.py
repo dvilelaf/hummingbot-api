@@ -437,6 +437,17 @@ def test_trading_route_passes_authorization_to_place_trade():
     place_route = source[source.index("async def place_trade") : source.index("@router.post(\"/{account_name}")]
 
     assert "live_action_authorization=trade_request.live_action_authorization" in place_route
+    assert "safe_testnet=trade_request.safe_testnet" in place_route
+
+
+def test_cowswap_safe_testnet_gate_is_limited_to_explicit_safe_network():
+    source = (ROOT / "services" / "accounts_service.py").read_text()
+    helper = source[source.index("def _cowswap_safe_testnet_order_allowed") :]
+
+    assert 'COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}' in source
+    assert "if not safe_testnet:" in helper
+    assert 'os.environ.get("COWSWAP_NETWORK")' in helper
+    assert "network.lower() in COWSWAP_SAFE_TEST_NETWORKS" in helper
 
 
 def test_trading_route_passes_authorization_to_cancel_order():
