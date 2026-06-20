@@ -450,6 +450,17 @@ def test_cowswap_safe_testnet_gate_is_limited_to_explicit_safe_network():
     assert "network.lower() in COWSWAP_SAFE_TEST_NETWORKS" in helper
 
 
+def test_safe_testnet_gate_is_limited_to_explicit_testnet_connectors():
+    source = (ROOT / "services" / "accounts_service.py").read_text()
+    helper = source[source.index("def _safe_testnet_order_allowed") :]
+
+    assert 'SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_testnet"}' in source
+    assert "if not safe_testnet:" in helper
+    assert 'connector_name == "xrpl"' in helper
+    assert 'os.environ.get("HUMMINGBOT_WSS_NODE_URL")' in helper
+    assert '"altnet" in f"{node_url} {node_urls}".lower()' in helper
+
+
 def test_trading_route_passes_authorization_to_cancel_order():
     source = (ROOT / "routers" / "trading.py").read_text()
     cancel_route = source[source.index("async def cancel_order") : source.index("@router.post(\"/{account_name}/{connector_name}/orders/{client_order_id}/poll\")")]
@@ -478,6 +489,7 @@ def test_accounts_service_checks_live_gate_before_cancel_order_submission():
     source = (ROOT / "services" / "accounts_service.py").read_text()
     cancel_source = source[source.index("async def cancel_order") : source.index("async def set_leverage")]
 
+    assert "_safe_testnet_order_allowed(" in cancel_source
     assert cancel_source.index("assert_live_order_cancel_allowed(") < cancel_source.index(
         "connector.cancel(",
     )

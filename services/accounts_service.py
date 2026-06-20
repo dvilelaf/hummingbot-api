@@ -35,6 +35,7 @@ from utils.file_system import fs_util
 logger = logging.getLogger(__name__)
 GATEWAY_CHAIN_PREFIXES = ("ethereum-", "solana-")
 COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}
+SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_testnet"}
 
 
 def _gateway_chain_network_filters(connector_names: Optional[List[str]]) -> Optional[tuple[str, ...]]:
@@ -1655,14 +1656,18 @@ class AccountsService:
         try:
             # Place the order using the connector with quantized values
             # (position_action will be ignored by non-perpetual connectors)
-            assert_live_order_submission_allowed(
-                account_name=account_name,
+            if not _safe_testnet_order_allowed(
                 connector_name=connector_name,
-                expected_instrument=trading_pair,
-                expected_notional=notional_size,
-                live_action_authorization=live_action_authorization,
-                source="accounts_service.place_trade",
-            )
+                safe_testnet=safe_testnet,
+            ):
+                assert_live_order_submission_allowed(
+                    account_name=account_name,
+                    connector_name=connector_name,
+                    expected_instrument=trading_pair,
+                    expected_notional=notional_size,
+                    live_action_authorization=live_action_authorization,
+                    source="accounts_service.place_trade",
+                )
             if trade_type == TradeType.BUY:
                 order_id = connector.buy(
                     trading_pair=trading_pair,
@@ -1829,12 +1834,16 @@ class AccountsService:
             raise HTTPException(status_code=500, detail=f"Order '{client_order_id}' is missing trading pair")
         
         try:
-            assert_live_order_cancel_allowed(
-                account_name=account_name,
+            if not _safe_testnet_order_allowed(
                 connector_name=connector_name,
-                live_action_authorization=live_action_authorization,
-                source="accounts_service.cancel_order",
-            )
+                safe_testnet=safe_testnet,
+            ):
+                assert_live_order_cancel_allowed(
+                    account_name=account_name,
+                    connector_name=connector_name,
+                    live_action_authorization=live_action_authorization,
+                    source="accounts_service.cancel_order",
+                )
             result = connector.cancel(trading_pair=trading_pair, client_order_id=client_order_id)
             logger.info(f"Initiated cancellation for order {client_order_id} on {connector_name} (Account: {account_name})")
             return result
@@ -2587,3 +2596,16 @@ def _cowswap_safe_testnet_order_allowed(*, safe_testnet: bool) -> bool:
         return False
     network = os.environ.get("COWSWAP_NETWORK") or os.environ.get("COWSWAP_CHAIN_NAME") or ""
     return network.lower() in COWSWAP_SAFE_TEST_NETWORKS
+
+
+def _safe_testnet_order_allowed(*, connector_name: str, safe_testnet: bool) -> bool:
+    """Allow order mutations without live gate only on explicit non-production testnets."""
+    if not safe_testnet:
+        return False
+    if connector_name in SAFE_TESTNET_ORDER_CONNECTORS:
+        return True
+    if connector_name == "xrpl":
+        node_url = os.environ.get("HUMMINGBOT_WSS_NODE_URL") or ""
+        node_urls = os.environ.get("HUMMINGBOT_WSS_NODE_URLS") or ""
+        return "altnet" in f"{node_url} {node_urls}".lower()
+    return False
