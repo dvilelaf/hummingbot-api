@@ -1,10 +1,12 @@
 import asyncio
+import json
 import logging
 import os
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set
+from urllib import request as urllib_request
 
 from fastapi import HTTPException
 from hummingbot.client.config.config_crypt import ETHKeyFileSecretManger
@@ -36,6 +38,7 @@ logger = logging.getLogger(__name__)
 GATEWAY_CHAIN_PREFIXES = ("ethereum-", "solana-")
 COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}
 SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_testnet"}
+HYPERLIQUID_TESTNET_INFO_URL = "https://api.hyperliquid-testnet.xyz/info"
 
 
 def _gateway_chain_network_filters(connector_names: Optional[List[str]]) -> Optional[tuple[str, ...]]:
@@ -47,6 +50,61 @@ def _gateway_chain_network_filters(connector_names: Optional[List[str]]) -> Opti
         for connector_name in connector_names
         if connector_name.startswith(GATEWAY_CHAIN_PREFIXES)
     )
+
+
+async def _fetch_hyperliquid_testnet_clearinghouse_state(address: str) -> dict[str, Any]:
+    """Fetch public testnet margin state for a Hyperliquid user address."""
+    payload = json.dumps({"type": "clearinghouseState", "user": address}).encode()
+    req = urllib_request.Request(
+        HYPERLIQUID_TESTNET_INFO_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+
+    def _read() -> dict[str, Any]:
+        with urllib_request.urlopen(req, timeout=10) as response:
+            return json.loads(response.read().decode())
+
+    return await asyncio.to_thread(_read)
+
+
+def _hyperliquid_testnet_address(connector: Any) -> Optional[str]:
+    env_address = os.getenv("HUMMINGBOT_HYPERLIQUID_TESTNET_ADDRESS")
+    if env_address:
+        return env_address
+    for attr_name in (
+        "hyperliquid_testnet_address",
+        "hyperliquid_address",
+        "account_address",
+        "_account_address",
+        "wallet_address",
+        "_wallet_address",
+    ):
+        value = getattr(connector, attr_name, None)
+        if isinstance(value, str) and value.startswith("0x"):
+            return value
+    return None
+
+
+async def _hyperliquid_testnet_collateral_token_info(connector: Any) -> Optional[dict[str, float | str]]:
+    address = _hyperliquid_testnet_address(connector)
+    if not address:
+        return None
+    try:
+        state = await _fetch_hyperliquid_testnet_clearinghouse_state(address)
+    except Exception as exc:
+        logger.warning("Failed to fetch Hyperliquid testnet collateral state: %s", exc)
+        return None
+    amount = Decimal(str(state.get("withdrawable") or state.get("marginSummary", {}).get("accountValue") or "0"))
+    if amount <= 0:
+        return None
+    return {
+        "token": "USDC",
+        "units": float(amount),
+        "price": 1.0,
+        "value": float(amount),
+        "available_units": float(amount),
+    }
 
 
 class AccountTradingInterface:
@@ -483,6 +541,7 @@ class AccountsService:
     """
     default_quotes = {
         "hyperliquid": "USDC",
+        "hyperliquid_testnet": "USDC",
         "hyperliquid_perpetual": "USD",
         "xrpl": "RLUSD",
         "kraken": "USD",
@@ -913,6 +972,10 @@ class AccountsService:
 
         balances = [{"token": key, "units": value} for key, value in connector.get_all_balances().items() if
                     value != Decimal("0") and key not in settings.banned_tokens]
+        if not balances and connector_name == "hyperliquid_testnet":
+            collateral_info = await _hyperliquid_testnet_collateral_token_info(connector)
+            if collateral_info is not None:
+                return [collateral_info]
 
         tokens_info = []
         missing_pairs = []  # trading pairs the oracle can't price

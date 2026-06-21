@@ -97,6 +97,44 @@ class TestBalanceRefresh:
         assert result[0]["token"] == "USDT"
         assert result[0]["units"] == 500.0
 
+    @pytest.mark.asyncio
+    async def test_hyperliquid_testnet_uses_public_collateral_when_balances_are_empty(
+        self, accounts_service, mock_connector, monkeypatch
+    ):
+        """Hyperliquid testnet margin collateral is usable quote balance."""
+        import services.accounts_service as accounts_module
+
+        mock_connector.get_all_balances.return_value = {}
+        mock_connector.get_available_balance.return_value = Decimal("0")
+        monkeypatch.setenv(
+            "HUMMINGBOT_HYPERLIQUID_TESTNET_ADDRESS",
+            "0x043F9e880763576c15eBCB7d4f0D7453F2Db1708",
+        )
+        monkeypatch.setattr(
+            accounts_module,
+            "_fetch_hyperliquid_testnet_clearinghouse_state",
+            AsyncMock(
+                return_value={
+                    "withdrawable": "999.0",
+                    "marginSummary": {"accountValue": "999.0"},
+                }
+            ),
+        )
+
+        result = await accounts_service._get_connector_tokens_info(
+            mock_connector, "hyperliquid_testnet"
+        )
+
+        assert result == [
+            {
+                "token": "USDC",
+                "units": 999.0,
+                "price": 1.0,
+                "value": 999.0,
+                "available_units": 999.0,
+            }
+        ]
+
 
 class TestGatewayRefreshSelection:
     """Tests for Gateway balance refresh selection."""
@@ -254,7 +292,7 @@ class TestXrplTradingSafety:
     @pytest.mark.asyncio
     async def test_xrpl_market_orders_delegate_to_connector_when_supported(self, monkeypatch):
         """XRPL MARKET orders are handled by the Hummingbot connector, not blocked in API."""
-        from hummingbot.core.data_type.common import OrderType, TradeType
+        from hummingbot.core.data_type.common import OrderType, PositionAction, TradeType
         import services.accounts_service as accounts_module
         from services.accounts_service import AccountsService
 
