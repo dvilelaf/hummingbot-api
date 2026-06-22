@@ -95,6 +95,13 @@ def env_csv_set(name: str) -> set[str] | None:
     values = {item.strip() for item in value.split(",") if item.strip()}
     return values or None
 
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
 # Set up logging configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -267,17 +274,24 @@ async def lifespan(app: FastAPI):
     # 5. Other Services
     # =========================================================================
 
-    bots_orchestrator = BotsOrchestrator(
-        broker_host=settings.broker.host,
-        broker_port=settings.broker.port,
-        broker_username=settings.broker.username,
-        broker_password=settings.broker.password,
-        performance_dump_interval=settings.broker.performance_dump_interval
-    )
+    docker_control_disabled = env_bool("HUMMINGBOT_API_DISABLE_DOCKER_CONTROL")
+    if docker_control_disabled:
+        logging.info("Docker control services disabled by HUMMINGBOT_API_DISABLE_DOCKER_CONTROL")
+        bots_orchestrator = None
+        docker_service = None
+        gateway_service = None
+    else:
+        bots_orchestrator = BotsOrchestrator(
+            broker_host=settings.broker.host,
+            broker_port=settings.broker.port,
+            broker_username=settings.broker.username,
+            broker_password=settings.broker.password,
+            performance_dump_interval=settings.broker.performance_dump_interval
+        )
+        docker_service = DockerService()
+        gateway_service = GatewayService()
 
     backtesting_service = BacktestingService()
-    docker_service = DockerService()
-    gateway_service = GatewayService()
     bot_archiver = BotArchiver(
         settings.aws.api_key,
         settings.aws.secret_key,
@@ -304,7 +318,8 @@ async def lifespan(app: FastAPI):
     # Runs after connectors reload their persisted in-flight orders.
     await connector_service.reconcile_active_orders()
 
-    bots_orchestrator.start()
+    if bots_orchestrator is not None:
+        bots_orchestrator.start()
     market_data_service.start()
     await market_data_service.warmup_rate_oracle()
     executor_service.start()
@@ -347,12 +362,14 @@ async def lifespan(app: FastAPI):
 
     websocket_manager.shutdown()
     await executor_ws_manager.shutdown()
-    bots_orchestrator.stop()
+    if bots_orchestrator is not None:
+        bots_orchestrator.stop()
     await accounts_service.stop()
     await executor_service.stop()
     market_data_service.stop()
     await connector_service.stop_all()
-    docker_service.cleanup()
+    if docker_service is not None:
+        docker_service.cleanup()
     await db_manager.close()
 
     logging.info("All services stopped")
