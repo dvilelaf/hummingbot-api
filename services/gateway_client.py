@@ -1,6 +1,9 @@
 import logging
+import os
+import ssl
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -56,8 +59,34 @@ class GatewayClient:
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session"""
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            connector = self._create_ssl_connector()
+            if connector is not None:
+                self._session = aiohttp.ClientSession(connector=connector)
+            else:
+                self._session = aiohttp.ClientSession()
         return self._session
+
+    def _create_ssl_connector(self) -> Optional[aiohttp.TCPConnector]:
+        """Create a TLS client-certificate connector when Gateway HTTPS cert env is complete."""
+        if urlparse(self.base_url).scheme != "https":
+            return None
+
+        ca_cert_file = os.getenv("GATEWAY_CA_CERT_FILE")
+        client_cert_file = os.getenv("GATEWAY_CLIENT_CERT_FILE")
+        client_key_file = os.getenv("GATEWAY_CLIENT_KEY_FILE")
+        if not (ca_cert_file and client_cert_file and client_key_file):
+            return None
+
+        ssl_context = ssl.create_default_context(cafile=ca_cert_file)
+        ssl_context.load_cert_chain(certfile=client_cert_file, keyfile=client_key_file)
+        if os.getenv("GATEWAY_TLS_SKIP_HOSTNAME_VERIFY", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            ssl_context.check_hostname = False
+        return aiohttp.TCPConnector(ssl=ssl_context)
 
     async def close(self):
         """Close the aiohttp session"""
