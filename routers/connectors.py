@@ -49,7 +49,7 @@ def _gateway_connector_supports_swap(payload: dict[str, Any]) -> bool:
         values = tuple(str(item) for item in raw_types)
     else:
         values = ()
-    return "swap" in {value.lower() for value in values}
+    return bool({"amm", "clmm", "router", "swap"} & {value.lower() for value in values})
 
 
 async def _gateway_connector_configs(accounts_service: AccountsService) -> tuple[dict[str, Any], ...]:
