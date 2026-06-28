@@ -37,7 +37,7 @@ from utils.file_system import fs_util
 logger = logging.getLogger(__name__)
 GATEWAY_CHAIN_PREFIXES = ("ethereum-", "solana-")
 COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}
-SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_testnet"}
+SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_perpetual_testnet", "hyperliquid_testnet"}
 HYPERLIQUID_TESTNET_INFO_URL = "https://api.hyperliquid-testnet.xyz/info"
 
 

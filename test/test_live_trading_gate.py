@@ -454,7 +454,7 @@ def test_safe_testnet_gate_is_limited_to_explicit_testnet_connectors():
     source = (ROOT / "services" / "accounts_service.py").read_text()
     helper = source[source.index("def _safe_testnet_order_allowed") :]
 
-    assert 'SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_testnet"}' in source
+    assert 'SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_perpetual_testnet", "hyperliquid_testnet"}' in source
     assert "if not safe_testnet:" in helper
     assert 'connector_name == "xrpl"' in helper
     assert 'os.environ.get("HUMMINGBOT_WSS_NODE_URL")' in helper

@@ -1008,6 +1008,8 @@ class UnifiedConnectorService:
                     try:
                         order_update = await connector._request_order_status(order)
                         new_state = order_update.new_state
+                        if new_state in terminal_states:
+                            await self._refresh_tracked_order_fills(connector, order)
                     except Exception as exc:
                         if connector._is_order_not_found_during_status_update_error(exc):
                             # The exchange does not know this order -> it is gone.
@@ -1026,6 +1028,7 @@ class UnifiedConnectorService:
                     try:
                         async with self.db_manager.get_session_context() as session:
                             order_repo = OrderRepository(session)
+                            await self._persist_tracked_order_fill(order_repo, order)
                             await order_repo.update_order_status(
                                 client_order_id=client_order_id,
                                 status=db_status,
@@ -1050,6 +1053,53 @@ class UnifiedConnectorService:
             f"{summary['unverified']} unverified"
         )
         return summary
+
+    async def _refresh_tracked_order_fills(self, connector: ConnectorBase, order: InFlightOrder) -> None:
+        """Ask a connector to hydrate fills for a tracked order before terminal reconciliation."""
+        try:
+            if hasattr(connector, "_all_trade_updates_for_order"):
+                trade_updates = await connector._all_trade_updates_for_order(order)
+                for trade_update in trade_updates or []:
+                    connector._order_tracker.process_trade_update(trade_update)
+            if hasattr(connector, "_update_trade_history"):
+                await connector._update_trade_history()
+        except Exception as exc:
+            logger.warning(
+                f"Could not refresh fills for order {order.client_order_id}: {exc}",
+            )
+
+    @staticmethod
+    async def _persist_tracked_order_fill(order_repo, order: InFlightOrder) -> None:
+        """Persist fill totals already hydrated on an InFlightOrder without double-counting."""
+        executed_amount = Decimal(str(getattr(order, "executed_amount_base", 0) or 0))
+        if executed_amount <= 0:
+            return
+
+        db_order = await order_repo.get_order_by_client_id(order.client_order_id)
+        if db_order is None:
+            return
+
+        previous_filled = Decimal(str(db_order.filled_amount or 0))
+        fill_delta = executed_amount - previous_filled
+        if fill_delta <= 0:
+            return
+
+        average_price = (
+            getattr(order, "average_executed_price", None)
+            or getattr(order, "last_executed_price", None)
+            or getattr(order, "price", None)
+            or Decimal("0")
+        )
+        fee_paid = getattr(order, "cumulative_fee_paid_quote", None)
+        fee_currency = getattr(order, "quote_asset", None)
+        await order_repo.update_order_fill(
+            client_order_id=order.client_order_id,
+            filled_amount=fill_delta,
+            average_fill_price=Decimal(str(average_price)),
+            fee_paid=Decimal(str(fee_paid)) if fee_paid else None,
+            fee_currency=fee_currency,
+            exchange_order_id=order.exchange_order_id,
+        )
 
     async def sync_all_orders_to_database(self):
         """

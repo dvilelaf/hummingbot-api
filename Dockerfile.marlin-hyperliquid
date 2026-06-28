@@ -1,0 +1,15 @@
+FROM dvilela/hummingbot-api-marlin@sha256:dbbe4f5b23a27a1b665399cf9147f607bf170a501ba6e65cef6b5defeed36570
+
+WORKDIR /hummingbot-api
+
+COPY main.py config.py deps.py ./
+COPY models ./models
+COPY routers ./routers
+COPY services ./services
+COPY utils ./utils
+COPY database ./database
+COPY bots/controllers ./bots/controllers
+COPY bots/scripts ./bots/scripts
+COPY docker/hyperliquid-runtime-patch.py /tmp/hyperliquid-runtime-patch.py
+
+RUN python /tmp/hyperliquid-runtime-patch.py && rm /tmp/hyperliquid-runtime-patch.py
