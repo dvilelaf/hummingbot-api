@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from hummingbot.client.settings import AllConnectorSettings
@@ -17,8 +17,61 @@ from services.market_data_service import MarketDataService
 router = APIRouter(tags=["Connectors"], prefix="/connectors")
 
 
+def _gateway_connector_items(payload: object) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        values = payload
+    elif isinstance(payload, dict):
+        raw = payload.get("connectors", payload.get("configs", ()))
+        values = raw if isinstance(raw, list) else ()
+    else:
+        values = ()
+    return [item for item in values if isinstance(item, dict)]
+
+
+def _gateway_connector_name(payload: dict[str, Any]) -> str | None:
+    value = payload.get("name", payload.get("connector", payload.get("connectorName")))
+    return str(value) if value else None
+
+
+def _gateway_connector_supports_swap(payload: dict[str, Any]) -> bool:
+    raw_types = (
+        payload.get("tradingTypes")
+        or payload.get("trading_types")
+        or payload.get("tradingType")
+        or payload.get("trading_type")
+        or payload.get("supportedActions")
+        or payload.get("supported_actions")
+        or ()
+    )
+    if isinstance(raw_types, str):
+        values = (raw_types,)
+    elif isinstance(raw_types, list):
+        values = tuple(str(item) for item in raw_types)
+    else:
+        values = ()
+    return "swap" in {value.lower() for value in values}
+
+
+async def _gateway_connector_configs(accounts_service: AccountsService) -> tuple[dict[str, Any], ...]:
+    if not await accounts_service.gateway_client.ping():
+        return ()
+    payload = await accounts_service.gateway_client._request("GET", "config/connectors")
+    return tuple(_gateway_connector_items(payload))
+
+
+async def _gateway_swap_connector(
+    accounts_service: AccountsService,
+    connector_name: str,
+) -> bool | None:
+    for payload in await _gateway_connector_configs(accounts_service):
+        if _gateway_connector_name(payload) != connector_name:
+            continue
+        return _gateway_connector_supports_swap(payload)
+    return None
+
+
 @router.get("/", response_model=List[str])
-async def available_connectors():
+async def available_connectors(accounts_service: AccountsService = Depends(get_accounts_service)):
     """
     Get a list of all available connectors.
 
@@ -30,6 +83,13 @@ async def available_connectors():
     connectors = [c for c in all_connectors if '/' not in c]
     if cowswap_connector_metadata() is not None and COWSWAP_CONNECTOR_NAME not in connectors:
         connectors.append(COWSWAP_CONNECTOR_NAME)
+    try:
+        for payload in await _gateway_connector_configs(accounts_service):
+            name = _gateway_connector_name(payload)
+            if name and name not in connectors:
+                connectors.append(name)
+    except Exception:
+        pass
     return connectors
 
 
@@ -101,6 +161,11 @@ async def get_trading_rules(
                 for pair in pairs
             }
 
+        accounts_service: AccountsService = request.app.state.accounts_service
+        if await _gateway_swap_connector(accounts_service, connector_name) is True:
+            pairs = trading_pairs or []
+            return {pair: {"not_applicable": True} for pair in pairs}
+
         market_data_service: MarketDataService = request.app.state.market_data_service
 
         # Get trading rules (filtered by trading pairs if provided)
@@ -158,6 +223,14 @@ async def get_supported_order_types(request: Request, connector_name: str):
             if order_types is None:
                 raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found")
             return {"connector": connector_name, "supported_order_types": order_types}
+
+        accounts_service: AccountsService = request.app.state.accounts_service
+        if await _gateway_swap_connector(accounts_service, connector_name) is True:
+            return {
+                "connector": connector_name,
+                "supported_actions": ["swap"],
+                "supported_order_types": [],
+            }
 
         market_data_service: MarketDataService = request.app.state.market_data_service
 

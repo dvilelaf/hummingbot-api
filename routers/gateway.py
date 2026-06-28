@@ -98,9 +98,20 @@ def normalize_gateway_response(data: Dict) -> Dict:
 # ============================================
 
 @router.get("/status", response_model=GatewayStatus)
-async def get_gateway_status(gateway_service: GatewayService = Depends(get_gateway_service)):
-    """Get Gateway container status."""
-    return gateway_service.get_status()
+async def get_gateway_status(
+    gateway_service: GatewayService = Depends(get_gateway_service),
+    accounts_service: AccountsService = Depends(get_accounts_service),
+):
+    """Get Gateway status for Docker-managed or externally managed Gateway."""
+    if gateway_service is not None:
+        return gateway_service.get_status()
+    return GatewayStatus(
+        running=await accounts_service.gateway_client.ping(),
+        container_id=None,
+        image=None,
+        created_at=None,
+        port=None,
+    )
 
 
 @router.post("/start")
