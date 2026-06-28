@@ -1625,6 +1625,7 @@ class AccountsService:
                         source="accounts_service.place_trade",
                     )
                 order_id = await place_cowswap_market_order(
+                    live_action_authorization=live_action_authorization,
                     runtime=self._cowswap_runtime,
                     trading_pair=trading_pair,
                     side=trade_type.name,
@@ -1876,6 +1877,7 @@ class AccountsService:
                         source="accounts_service.cancel_order",
                     )
                 return await cancel_cowswap_order(
+                    live_action_authorization=live_action_authorization,
                     runtime=self._cowswap_runtime,
                     client_order_id=client_order_id,
                 )

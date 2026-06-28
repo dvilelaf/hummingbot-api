@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import ssl
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
@@ -66,6 +68,10 @@ class GatewayCowSigner:
         self.network = network
         self.owner_address = owner_address
         self.config = config
+        self.live_action_authorization: Mapping[str, Any] | None = None
+
+    def set_live_action_authorization(self, authorization: Mapping[str, Any] | None) -> None:
+        self.live_action_authorization = authorization
 
     def sign_order_payload(self, order: dict[str, object]) -> dict[str, object]:
         from hummingbot_cowswap.cowpy import ensure_cowpy_submodule_imports
@@ -114,17 +120,20 @@ class GatewayCowSigner:
         }
 
     def _sign_typed_data(self, *, domain: Mapping[str, Any], types: Mapping[str, Any], value: Mapping[str, Any]) -> str:
+        payload: dict[str, Any] = {
+            "chain": "ethereum",
+            "network": self.network,
+            "address": self.owner_address,
+            "domain": dict(domain),
+            "types": dict(types),
+            "value": dict(value),
+        }
+        if self.live_action_authorization is not None:
+            payload["liveActionAuthorization"] = dict(self.live_action_authorization)
         response = _gateway_post(
             self.gateway_url,
             "wallet/sign-typed-data",
-            {
-                "chain": "ethereum",
-                "network": self.network,
-                "address": self.owner_address,
-                "domain": dict(domain),
-                "types": dict(types),
-                "value": dict(value),
-            },
+            payload,
         )
         signature = response.get("signature")
         if not signature:
@@ -338,6 +347,7 @@ def cowswap_order_submission_blocker(
 
 async def place_cowswap_market_order(
     *,
+    live_action_authorization: Mapping[str, Any] | None = None,
     runtime: Any | None,
     trading_pair: str,
     side: str,
@@ -347,19 +357,28 @@ async def place_cowswap_market_order(
     if runtime is None:
         raise CowSwapRuntimeUnavailableError("CowSwap runtime is not initialized")
 
-    normalized_side = side.upper()
-    if normalized_side == "SELL":
-        result = await runtime.sell(
-            trading_pair=trading_pair,
-            amount=amount,
-        )
-    elif normalized_side == "BUY":
-        result = await runtime.buy(
-            trading_pair=trading_pair,
-            amount=amount,
-        )
-    else:
-        raise ValueError("CowSwap side must be BUY or SELL")
+    connector = getattr(runtime, "_connector", None)
+    signer_provider = getattr(runtime, "signer", None) or getattr(connector, "signer", None)
+    set_authorization = getattr(signer_provider, "set_live_action_authorization", None)
+    if callable(set_authorization):
+        set_authorization(live_action_authorization)
+    try:
+        normalized_side = side.upper()
+        if normalized_side == "SELL":
+            result = await runtime.sell(
+                trading_pair=trading_pair,
+                amount=amount,
+            )
+        elif normalized_side == "BUY":
+            result = await runtime.buy(
+                trading_pair=trading_pair,
+                amount=amount,
+            )
+        else:
+            raise ValueError("CowSwap side must be BUY or SELL")
+    finally:
+        if callable(set_authorization):
+            set_authorization(None)
 
     client_order_id = _extract_client_order_id(result)
     if not client_order_id:
@@ -369,16 +388,29 @@ async def place_cowswap_market_order(
     return client_order_id
 
 
-async def cancel_cowswap_order(*, runtime: Any | None, client_order_id: str) -> str:
+async def cancel_cowswap_order(
+    *,
+    live_action_authorization: Mapping[str, Any] | None = None,
+    runtime: Any | None,
+    client_order_id: str,
+) -> str:
     """Cancel a CowSwap order through the initialized runtime adapter."""
     if runtime is None:
         raise CowSwapRuntimeUnavailableError("CowSwap runtime is not initialized")
+    connector = getattr(runtime, "_connector", None)
+    signer_provider = getattr(runtime, "signer", None) or getattr(connector, "signer", None)
+    set_authorization = getattr(signer_provider, "set_live_action_authorization", None)
+    if callable(set_authorization):
+        set_authorization(live_action_authorization)
     try:
         result = await runtime.cancel(client_order_id)
     except Exception as exc:
         if _is_terminal_cowswap_cancel_response(exc):
             return client_order_id
         raise
+    finally:
+        if callable(set_authorization):
+            set_authorization(None)
     cancelled_id = _extract_client_order_id(result) or client_order_id
     return cancelled_id
 
@@ -573,6 +605,19 @@ def _signing_domain_dict(config: Any) -> dict[str, Any]:
     }
 
 
+def _gateway_ssl_context() -> ssl.SSLContext | None:
+    ca_cert = os.getenv("GATEWAY_CA_CERT_FILE", "").strip()
+    client_cert = os.getenv("GATEWAY_CLIENT_CERT_FILE", "").strip()
+    client_key = os.getenv("GATEWAY_CLIENT_KEY_FILE", "").strip()
+    if os.getenv("GATEWAY_TLS_SKIP_HOSTNAME_VERIFY", "").strip().lower() in {"1", "true", "yes", "on"}:
+        context = ssl._create_unverified_context()
+    else:
+        context = ssl.create_default_context(cafile=ca_cert or None)
+    if client_cert and client_key:
+        context.load_cert_chain(certfile=client_cert, keyfile=client_key)
+    return context
+
+
 def _gateway_post(gateway_url: str, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     request = urllib.request.Request(
         f"{gateway_url.rstrip('/')}/{path}",
@@ -581,7 +626,8 @@ def _gateway_post(gateway_url: str, path: str, payload: Mapping[str, Any]) -> di
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        context = _gateway_ssl_context() if gateway_url.rstrip("/").startswith("https://") else None
+        with urllib.request.urlopen(request, timeout=15, context=context) as response:
             data = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")

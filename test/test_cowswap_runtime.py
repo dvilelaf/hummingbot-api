@@ -196,6 +196,11 @@ def test_cowswap_runtime_status_names_missing_dependencies():
 class FakeCowSwapRuntime:
     def __init__(self):
         self.calls = []
+        self.signer_authorizations = []
+        self._connector = SimpleNamespace(signer=self)
+
+    def set_live_action_authorization(self, authorization):
+        self.signer_authorizations.append(authorization)
 
     async def sell(self, *, trading_pair, amount):
         self.calls.append(("sell", trading_pair, amount))
@@ -289,6 +294,23 @@ def test_cancel_cowswap_order_delegates_to_runtime_adapter():
 
     assert cancelled == "cow-1"
     assert runtime.calls == [("cancel", "cow-1")]
+
+
+def test_cancel_cowswap_order_passes_live_authorization_to_signer():
+    runtime = FakeCowSwapRuntime()
+    authorization = {"status": "approved", "action": "order_cancel"}
+
+    cancelled = asyncio.run(
+        cancel_cowswap_order(
+            live_action_authorization=authorization,
+            runtime=runtime,
+            client_order_id="cow-1",
+        ),
+    )
+
+    assert cancelled == "cow-1"
+    assert runtime.calls == [("cancel", "cow-1")]
+    assert runtime.signer_authorizations == [authorization, None]
 
 
 def test_cancel_cowswap_order_treats_fully_executed_response_as_terminal():

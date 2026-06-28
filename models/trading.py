@@ -15,7 +15,7 @@ class TradeRequest(BaseModel):
     trading_pair: str = Field(description="Trading pair (e.g., BTC-USDT)")
     trade_type: Literal["BUY", "SELL"] = Field(description="Whether to buy or sell")
     amount: Decimal = Field(description="Amount to trade", gt=0)
-    order_type: Literal["LIMIT", "MARKET", "LIMIT_MAKER"] = Field(default="LIMIT", description="Type of order")
+    order_type: Literal["LIMIT", "MARKET", "LIMIT_MAKER", "AMM_SWAP"] = Field(default="LIMIT", description="Type of order")
     price: Optional[Decimal] = Field(default=None, description="Price for limit orders")
     position_action: Literal["OPEN", "CLOSE"] = Field(default="OPEN", description="Position action for perpetual contracts (OPEN/CLOSE)")
     safe_testnet: bool = Field(
