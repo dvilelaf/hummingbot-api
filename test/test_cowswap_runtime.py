@@ -20,6 +20,7 @@ cowswap_token_map_from_json = cowswap_runtime.cowswap_token_map_from_json
 get_cowswap_runtime_status = cowswap_runtime.get_cowswap_runtime_status
 poll_cowswap_order = cowswap_runtime.poll_cowswap_order
 place_cowswap_market_order = cowswap_runtime.place_cowswap_market_order
+build_cowswap_runtime = cowswap_runtime.build_cowswap_runtime
 CowSwapRuntimeDependencies = cowswap_runtime.CowSwapRuntimeDependencies
 CowSwapRuntimeUnavailableError = cowswap_runtime.CowSwapRuntimeUnavailableError
 
@@ -455,3 +456,129 @@ def test_accounts_service_uses_runtime_delegate_only_after_cowswap_dependency_ga
     assert "_cowswap_runtime_dependencies" in cowswap_branch_source
     assert "order_type != OrderType.MARKET" in cowswap_branch_source
     assert runtime_delegate_index < connector_lookup_index
+
+
+_score_counter = 0
+
+
+def _counted_ctor(returned, name):
+    global _score_counter
+    _score_counter += 1
+
+    def ctor(*args, **kwargs):
+        result = returned(*args, **kwargs) if callable(returned) else returned
+        return result
+
+    return ctor
+
+
+def _build_runtime_importer():
+    def models_ctor(**kwargs):
+        return SimpleNamespace(**kwargs)
+
+    connector_instance = SimpleNamespace()
+    adapter_instance = SimpleNamespace()
+
+    def connector_ctor(*args, **kwargs):
+        return connector_instance
+
+    def adapter_ctor(*args, **kwargs):
+        return adapter_instance
+
+    order_store_path = None
+
+    def json_store_ctor(path):
+        nonlocal order_store_path
+        order_store_path = Path(path)
+        return SimpleNamespace(path=order_store_path)
+
+    modules = {
+        "hummingbot_cowswap.models": SimpleNamespace(
+            CoWConfig=models_ctor,
+            CoWToken=models_ctor,
+        ),
+        "hummingbot_cowswap.connector": SimpleNamespace(
+            CoWConnector=connector_ctor,
+        ),
+        "hummingbot_cowswap.hummingbot_adapter": SimpleNamespace(
+            HummingbotCoWAdapter=adapter_ctor,
+        ),
+        "hummingbot_cowswap.persistence": SimpleNamespace(
+            JsonOrderStore=json_store_ctor,
+        ),
+    }
+
+    def importer(name):
+        if name in modules:
+            return modules[name]
+        raise ModuleNotFoundError(name)
+
+    return importer, connector_instance, adapter_instance
+
+
+def test_build_cowswap_runtime_with_mocked_imports(tmp_path):
+    importer, _, _ = _build_runtime_importer()
+    data_dir = tmp_path / "data"
+
+    runtime, dependencies = build_cowswap_runtime(
+        gateway_url="http://localhost:15888",
+        owner_address="0x00000000000000000000000000000000000000ab",
+        data_dir=data_dir,
+        chain_id=8453,
+        chain_name="base",
+        network="base",
+        env="staging",
+        app_data="0x" + "00" * 32,
+        slippage_bps=50,
+        import_module=importer,
+    )
+
+    assert runtime is not None
+    assert dependencies.signer_provider is not None
+    assert dependencies.evm_reader is not None
+    assert dependencies.token_map is not None
+    assert dependencies.order_store is not None
+    assert dependencies.owner_address == "0x00000000000000000000000000000000000000ab"
+    assert (data_dir / "cowswap-orders.json").parent.exists()
+
+
+def test_cowswap_default_dependencies_are_specific_not_unwired():
+    deps = CowSwapRuntimeDependencies()
+    metadata = {
+        "connector": COWSWAP_CONNECTOR_NAME,
+        "config_map": {"uses_raw_private_key": False},
+        "order_types": ["MARKET"],
+    }
+
+    status = get_cowswap_runtime_status(
+        import_module=metadata_importer(metadata),
+        runtime_dependencies=deps,
+    )
+
+    assert status.runtime_available is False
+    assert any("secure EIP-712 signer" in b for b in status.blockers)
+    assert any("EVM balance/allowance reader" in b for b in status.blockers)
+    assert any("configured token map" in b for b in status.blockers)
+    assert any("CoW runtime order store" in b for b in status.blockers)
+    assert any("owner address" in b for b in status.blockers)
+
+
+def test_cowswap_partial_dependencies_report_missing_components():
+    deps = CowSwapRuntimeDependencies(
+        owner_address="0x00000000000000000000000000000000000000ac",
+    )
+    metadata = {
+        "connector": COWSWAP_CONNECTOR_NAME,
+        "config_map": {"uses_raw_private_key": False},
+        "order_types": ["MARKET"],
+    }
+
+    status = get_cowswap_runtime_status(
+        import_module=metadata_importer(metadata),
+        runtime_dependencies=deps,
+    )
+
+    assert status.runtime_available is False
+    assert any("secure EIP-712 signer" in b for b in status.blockers)
+    assert not any("owner address" in b for b in status.blockers)
+    assert not any("order submission is disabled" in b for b in status.blockers)

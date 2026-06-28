@@ -66,7 +66,12 @@ from routers import (  # noqa: E402
 )
 from services.accounts_service import AccountsService  # noqa: E402
 from services.backtesting_service import BacktestingService  # noqa: E402
-from services.cowswap_runtime import build_cowswap_runtime, cowswap_token_map_from_json  # noqa: E402
+from services.cowswap_runtime import (  # noqa: E402
+    CowSwapRuntimeDependencies,
+    build_cowswap_runtime,
+    cowswap_token_map_from_json,
+    get_cowswap_runtime_status,
+)
 from services.bots_orchestrator import BotsOrchestrator  # noqa: E402
 from services.docker_service import DockerService  # noqa: E402
 from services.executor_service import ExecutorService  # noqa: E402
@@ -233,28 +238,53 @@ async def lifespan(app: FastAPI):
     accounts_service._connector_service = connector_service
     accounts_service._market_data_service = market_data_service
     accounts_service._trading_service = trading_service
-    try:
-        cowswap_owner = os.environ.get("COWSWAP_OWNER_ADDRESS") or await accounts_service.gateway_client.get_wallet_address_or_default("ethereum")
-        cowswap_runtime, cowswap_dependencies = build_cowswap_runtime(
-            gateway_url=settings.gateway.url,
-            owner_address=cowswap_owner,
-            receiver_address=os.environ.get("COWSWAP_RECEIVER_ADDRESS") or cowswap_owner,
-            data_dir=Path(os.environ.get("BOTS_PATH", "/hummingbot-api/bots")) / "data",
-            chain_id=env_int("COWSWAP_CHAIN_ID", 8453),
-            chain_name=env_text("COWSWAP_CHAIN_NAME", "base"),
-            network=env_text("COWSWAP_NETWORK", "base"),
-            env=env_text("COWSWAP_ENV", "staging"),
-            app_data=env_text("COWSWAP_APP_DATA", "0x" + "00" * 32),
-            slippage_bps=env_int("COWSWAP_SLIPPAGE_BPS", 50),
-            token_map=cowswap_token_map_from_json(os.environ.get("COWSWAP_TOKEN_MAP_JSON")),
+    cowswap_status = get_cowswap_runtime_status()
+    if cowswap_status.registration_available:
+        cowswap_owner = os.environ.get("COWSWAP_OWNER_ADDRESS")
+        if not cowswap_owner:
+            try:
+                cowswap_owner = await accounts_service.gateway_client.get_wallet_address_or_default("ethereum")
+            except Exception as exc:
+                logging.warning(f"CowSwap owner address not available from Gateway: {exc}")
+
+        if cowswap_owner:
+            try:
+                cowswap_runtime, cowswap_dependencies = build_cowswap_runtime(
+                    gateway_url=settings.gateway.url,
+                    owner_address=cowswap_owner,
+                    receiver_address=os.environ.get("COWSWAP_RECEIVER_ADDRESS") or cowswap_owner,
+                    data_dir=Path(os.environ.get("BOTS_PATH", "/hummingbot-api/bots")) / "data",
+                    chain_id=env_int("COWSWAP_CHAIN_ID", 8453),
+                    chain_name=env_text("COWSWAP_CHAIN_NAME", "base"),
+                    network=env_text("COWSWAP_NETWORK", "base"),
+                    env=env_text("COWSWAP_ENV", "staging"),
+                    app_data=env_text("COWSWAP_APP_DATA", "0x" + "00" * 32),
+                    slippage_bps=env_int("COWSWAP_SLIPPAGE_BPS", 50),
+                    token_map=cowswap_token_map_from_json(os.environ.get("COWSWAP_TOKEN_MAP_JSON")),
+                )
+                accounts_service.configure_cowswap_runtime(
+                    runtime=cowswap_runtime,
+                    runtime_dependencies=cowswap_dependencies,
+                )
+                logging.info("CowSwap runtime initialized with Gateway-managed signer")
+            except Exception as exc:
+                logging.warning(f"CowSwap runtime build failed: {exc}")
+                accounts_service.configure_cowswap_runtime(
+                    runtime_dependencies=CowSwapRuntimeDependencies(),
+                )
+        else:
+            logging.warning(
+                "CowSwap owner address not configured; "
+                "set COWSWAP_OWNER_ADDRESS or configure an Ethereum wallet in Gateway"
+            )
+            accounts_service.configure_cowswap_runtime(
+                runtime_dependencies=CowSwapRuntimeDependencies(),
+            )
+    else:
+        logging.info(
+            "CowSwap package not installed or blocked; runtime unavailable"
+            + (f": {'; '.join(cowswap_status.blockers)}" if cowswap_status.blockers else ""),
         )
-        accounts_service.configure_cowswap_runtime(
-            runtime=cowswap_runtime,
-            runtime_dependencies=cowswap_dependencies,
-        )
-        logging.info("CowSwap runtime initialized with Gateway-managed signer")
-    except Exception as exc:
-        logging.warning(f"CowSwap runtime not initialized: {exc}")
     logging.info("AccountsService initialized")
 
     # =========================================================================

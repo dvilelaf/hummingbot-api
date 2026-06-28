@@ -604,7 +604,7 @@ class AccountsService:
     def configure_cowswap_runtime(
         self,
         *,
-        runtime,
+        runtime=None,
         runtime_dependencies: CowSwapRuntimeDependencies | None,
     ):
         """Inject an initialized CowSwap runtime bridge and its readiness dependencies."""
