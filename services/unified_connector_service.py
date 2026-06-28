@@ -11,10 +11,13 @@ Key features:
 - get_best_connector_for_market(): prefers trading connector (has order book tracker)
 """
 import asyncio
+import json
 import logging
 import time
+import urllib.request
+from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from hummingbot.client.config.config_crypt import ETHKeyFileSecretManger
 from hummingbot.client.config.config_helpers import ClientConfigAdapter, api_keys_from_connector_config_map, get_connector_class
@@ -994,6 +997,7 @@ class UnifiedConnectorService:
         }
 
         from database import OrderRepository
+        from database.repositories.trade_repository import TradeRepository
 
         for account_name, connectors in self._trading_connectors.items():
             for connector_name, connector in connectors.items():
@@ -1005,11 +1009,13 @@ class UnifiedConnectorService:
                 for order in tracked_orders:
                     client_order_id = order.client_order_id
                     note = None
+                    external_fills: List[Dict[str, Any]] = []
                     try:
                         order_update = await connector._request_order_status(order)
                         new_state = order_update.new_state
                         if new_state in terminal_states:
                             await self._refresh_tracked_order_fills(connector, order)
+                            external_fills = await self._fetch_hyperliquid_order_fills(connector, order)
                     except Exception as exc:
                         if connector._is_order_not_found_during_status_update_error(exc):
                             # The exchange does not know this order -> it is gone.
@@ -1028,7 +1034,14 @@ class UnifiedConnectorService:
                     try:
                         async with self.db_manager.get_session_context() as session:
                             order_repo = OrderRepository(session)
+                            trade_repo = TradeRepository(session)
                             await self._persist_tracked_order_fill(order_repo, order)
+                            await self._persist_external_order_fills(
+                                order_repo=order_repo,
+                                trade_repo=trade_repo,
+                                order=order,
+                                fills=external_fills,
+                            )
                             await order_repo.update_order_status(
                                 client_order_id=client_order_id,
                                 status=db_status,
@@ -1069,6 +1082,46 @@ class UnifiedConnectorService:
             )
 
     @staticmethod
+    async def _fetch_hyperliquid_order_fills(
+        connector: ConnectorBase,
+        order: InFlightOrder,
+    ) -> List[Dict[str, Any]]:
+        """Fetch Hyperliquid fills for one order when websocket fill events were missed."""
+        if not connector.__class__.__module__.startswith("hummingbot.connector.") or "hyperliquid" not in connector.__class__.__module__:
+            return []
+
+        user = (
+            getattr(connector, "hyperliquid_perpetual_address", None)
+            or getattr(connector, "hyperliquid_address", None)
+        )
+        if not user:
+            return []
+
+        url = await connector._api_request_url(path_url="/info")
+        fills = await asyncio.to_thread(
+            UnifiedConnectorService._post_json,
+            url,
+            {"type": "userFills", "user": user},
+        )
+        exchange_order_id = str(order.exchange_order_id or "")
+        client_order_id = str(order.client_order_id)
+        return [
+            fill for fill in fills or []
+            if str(fill.get("oid", "")) == exchange_order_id
+            or str(fill.get("cloid", "")) == client_order_id
+        ]
+
+    @staticmethod
+    def _post_json(url: str, payload: Dict[str, Any]) -> Any:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read())
+
+    @staticmethod
     async def _persist_tracked_order_fill(order_repo, order: InFlightOrder) -> None:
         """Persist fill totals already hydrated on an InFlightOrder without double-counting."""
         executed_amount = Decimal(str(getattr(order, "executed_amount_base", 0) or 0))
@@ -1100,6 +1153,58 @@ class UnifiedConnectorService:
             fee_currency=fee_currency,
             exchange_order_id=order.exchange_order_id,
         )
+
+    @staticmethod
+    async def _persist_external_order_fills(
+        *,
+        order_repo,
+        trade_repo,
+        order: InFlightOrder,
+        fills: List[Dict[str, Any]],
+    ) -> None:
+        """Persist exchange fills idempotently for terminal orders missing websocket fill events."""
+        if not fills:
+            return
+
+        db_order = await order_repo.get_order_by_client_id(order.client_order_id)
+        if db_order is None:
+            return
+
+        for fill in sorted(fills, key=lambda item: int(item.get("time", 0) or 0)):
+            trade_id = str(fill.get("tid") or "")
+            if not trade_id or await trade_repo.get_trade_by_id(trade_id):
+                continue
+
+            filled_amount = Decimal(str(fill["sz"]))
+            fill_price = Decimal(str(fill["px"]))
+            fee_paid = Decimal(str(fill.get("fee") or 0))
+            fee_currency = fill.get("feeToken")
+            timestamp_ms = int(fill.get("time") or 0)
+            trade_type = order.trade_type.name
+            created_trade = await trade_repo.create_trade(
+                {
+                    "order_id": db_order.id,
+                    "trade_id": trade_id,
+                    "timestamp": datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc),
+                    "trading_pair": order.trading_pair,
+                    "trade_type": trade_type,
+                    "amount": float(filled_amount),
+                    "price": float(fill_price),
+                    "fee_paid": float(fee_paid),
+                    "fee_currency": fee_currency,
+                }
+            )
+            if created_trade is None:
+                continue
+
+            await order_repo.update_order_fill(
+                client_order_id=order.client_order_id,
+                filled_amount=filled_amount,
+                average_fill_price=fill_price,
+                fee_paid=fee_paid,
+                fee_currency=fee_currency,
+                exchange_order_id=str(fill.get("oid") or order.exchange_order_id or ""),
+            )
 
     async def sync_all_orders_to_database(self):
         """
