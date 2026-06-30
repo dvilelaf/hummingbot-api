@@ -106,10 +106,7 @@ class TestBalanceRefresh:
 
         mock_connector.get_all_balances.return_value = {}
         mock_connector.get_available_balance.return_value = Decimal("0")
-        monkeypatch.setenv(
-            "HUMMINGBOT_HYPERLIQUID_TESTNET_ADDRESS",
-            "0x043F9e880763576c15eBCB7d4f0D7453F2Db1708",
-        )
+        mock_connector.hyperliquid_testnet_address = "0x043F9e880763576c15eBCB7d4f0D7453F2Db1708"
         monkeypatch.setattr(
             accounts_module,
             "_fetch_hyperliquid_testnet_clearinghouse_state",

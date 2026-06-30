@@ -268,6 +268,21 @@ class GatewayClient:
             "address": address
         })
 
+    async def set_marlin_default_wallet(
+        self,
+        chain: str,
+        network: str,
+        address: str,
+        wallet_ref: str,
+    ) -> Dict:
+        """Set the mnemonic-derived Marlin default wallet in Gateway."""
+        return await self._request("POST", "wallet/marlin-default", json={
+            "chain": chain,
+            "network": network,
+            "address": address,
+            "walletRef": wallet_ref
+        })
+
     async def get_balances(self, chain: str, network: str, address: str, tokens: Optional[List[str]] = None) -> Dict:
         """Get token balances for a wallet"""
         return await self._request("POST", f"chains/{chain}/balances", json={

@@ -82,6 +82,15 @@ class SetDefaultWalletRequest(BaseModel):
     address: str = Field(description="Wallet address to set as default")
 
 
+class MarlinDefaultWalletRequest(BaseModel):
+    """Marlin-scoped request to set a mnemonic-derived Gateway default wallet."""
+
+    chain: str = Field(description="Blockchain chain (e.g., 'solana', 'ethereum')")
+    network: str = Field(description="Network scope for the derived wallet")
+    address: str = Field(description="Mnemonic-derived public wallet address")
+    wallet_ref: str = Field(description="Marlin wallet policy reference")
+
+
 # ============================================
 # Pool and Token Management Models
 # ============================================

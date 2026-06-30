@@ -69,9 +69,6 @@ async def _fetch_hyperliquid_testnet_clearinghouse_state(address: str) -> dict[s
 
 
 def _hyperliquid_testnet_address(connector: Any) -> Optional[str]:
-    env_address = os.getenv("HUMMINGBOT_HYPERLIQUID_TESTNET_ADDRESS")
-    if env_address:
-        return env_address
     for attr_name in (
         "hyperliquid_testnet_address",
         "hyperliquid_address",

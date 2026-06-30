@@ -19,6 +19,10 @@ from services.accounts_service import AccountsService
 from services.gateway_poll import gateway_poll_error_detail
 from services.gateway_service import GatewayService
 from services.live_trading_gate import assert_live_gateway_mutation_allowed
+from services.marlin_runtime import (
+    assert_gateway_config_update_allowed,
+    assert_not_marlin_wallet_authority_surface,
+)
 
 router = APIRouter(tags=["Gateway"], prefix="/gateway")
 
@@ -237,6 +241,7 @@ async def update_connector_config(
                        or camelCase (e.g., {"slippagePct": 0.5})
     """
     try:
+        assert_gateway_config_update_allowed(namespace=connector_name, updates=config_updates)
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 
@@ -988,6 +993,7 @@ async def create_wallet(
     }
     """
     try:
+        assert_not_marlin_wallet_authority_surface("Gateway wallet create")
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 
@@ -1034,6 +1040,7 @@ async def show_private_key(
     }
     """
     try:
+        assert_not_marlin_wallet_authority_surface("Gateway wallet show-private-key")
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 
@@ -1081,6 +1088,7 @@ async def send_transaction(
     }
     """
     try:
+        assert_not_marlin_wallet_authority_surface("Gateway wallet send")
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 
