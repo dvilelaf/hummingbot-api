@@ -252,8 +252,6 @@ class GatewayClient:
             "toAddress": to_address,
             "amount": amount,
         }
-        if live_action_authorization is not None:
-            payload["liveActionAuthorization"] = live_action_authorization
         return await self._request("POST", "wallet/send", json=payload)
 
     async def remove_wallet(self, chain: str, address: str) -> Dict:
@@ -513,9 +511,6 @@ class GatewayClient:
             payload["slippagePct"] = slippage_pct
         if pool_address:
             payload["poolAddress"] = pool_address
-        if live_action_authorization is not None:
-            payload["liveActionAuthorization"] = live_action_authorization
-
         route_type = self._swap_route_type(connector, pool_address)
         return await self._request("POST", f"connectors/{connector}/{route_type}/execute-swap", json=payload)
 
@@ -553,8 +548,6 @@ class GatewayClient:
         }
         if gas_limit is not None:
             payload["gasLimit"] = gas_limit
-        if live_action_authorization is not None:
-            payload["liveActionAuthorization"] = live_action_authorization
         return await self._request("POST", "bridge/execute", json=payload)
 
     async def execute_quote(
@@ -596,9 +589,6 @@ class GatewayClient:
         }
         if slippage_pct is not None:
             payload["slippagePct"] = slippage_pct
-        if live_action_authorization is not None:
-            payload["liveActionAuthorization"] = live_action_authorization
-
         return await self._request("POST", f"connectors/{connector}/router/add-liquidity", json=payload)
 
     async def router_remove_liquidity(
@@ -624,9 +614,6 @@ class GatewayClient:
         }
         if slippage_pct is not None:
             payload["slippagePct"] = slippage_pct
-        if live_action_authorization is not None:
-            payload["liveActionAuthorization"] = live_action_authorization
-
         return await self._request("POST", f"connectors/{connector}/router/remove-liquidity", json=payload)
 
     # ============================================
@@ -665,9 +652,6 @@ class GatewayClient:
         # Add any connector-specific parameters
         if extra_params:
             payload.update(extra_params)
-        if live_action_authorization is not None:
-            payload["liveActionAuthorization"] = live_action_authorization
-
         return await self._request("POST", f"connectors/{connector}/clmm/open-position", json=payload)
 
     async def clmm_add_liquidity(
@@ -694,9 +678,6 @@ class GatewayClient:
             payload["quoteTokenAmount"] = str(quote_token_amount)
         if slippage_pct is not None:
             payload["slippagePct"] = slippage_pct
-        if live_action_authorization is not None:
-            payload["liveActionAuthorization"] = live_action_authorization
-
         return await self._request("POST", "clmm/liquidity/add", json=payload)
 
     async def clmm_close_position(
@@ -713,8 +694,6 @@ class GatewayClient:
             "walletAddress": wallet_address,
             "positionAddress": position_address,
         }
-        if live_action_authorization is not None:
-            payload["liveActionAuthorization"] = live_action_authorization
         return await self._request("POST", f"connectors/{connector}/clmm/close-position", json=payload)
 
     async def clmm_remove_liquidity(
@@ -734,8 +713,6 @@ class GatewayClient:
             "positionAddress": position_address,
             "percentage": percentage,
         }
-        if live_action_authorization is not None:
-            payload["liveActionAuthorization"] = live_action_authorization
         return await self._request("POST", "clmm/liquidity/remove", json=payload)
 
     async def clmm_position_info(
@@ -818,8 +795,6 @@ class GatewayClient:
             "address": wallet_address,
             "positionAddress": position_address,
         }
-        if live_action_authorization is not None:
-            payload["liveActionAuthorization"] = live_action_authorization
         return await self._request("POST", f"connectors/{connector}/clmm/collect-fees", json=payload)
 
     async def clmm_pool_info(

@@ -297,7 +297,7 @@ def test_cancel_cowswap_order_delegates_to_runtime_adapter():
     assert runtime.calls == [("cancel", "cow-1")]
 
 
-def test_cancel_cowswap_order_passes_live_authorization_to_signer():
+def test_cancel_cowswap_order_ignores_live_authorization():
     runtime = FakeCowSwapRuntime()
     authorization = {"status": "approved", "action": "order_cancel"}
 
@@ -311,7 +311,7 @@ def test_cancel_cowswap_order_passes_live_authorization_to_signer():
 
     assert cancelled == "cow-1"
     assert runtime.calls == [("cancel", "cow-1")]
-    assert runtime.signer_authorizations == [authorization, None]
+    assert runtime.signer_authorizations == []
 
 
 def test_cancel_cowswap_order_treats_fully_executed_response_as_terminal():

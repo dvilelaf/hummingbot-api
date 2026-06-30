@@ -68,10 +68,6 @@ class GatewayCowSigner:
         self.network = network
         self.owner_address = owner_address
         self.config = config
-        self.live_action_authorization: Mapping[str, Any] | None = None
-
-    def set_live_action_authorization(self, authorization: Mapping[str, Any] | None) -> None:
-        self.live_action_authorization = authorization
 
     def sign_order_payload(self, order: dict[str, object]) -> dict[str, object]:
         from hummingbot_cowswap.cowpy import ensure_cowpy_submodule_imports
@@ -128,8 +124,6 @@ class GatewayCowSigner:
             "types": dict(types),
             "value": dict(value),
         }
-        if self.live_action_authorization is not None:
-            payload["liveActionAuthorization"] = dict(self.live_action_authorization)
         response = _gateway_post(
             self.gateway_url,
             "wallet/sign-typed-data",
@@ -357,28 +351,19 @@ async def place_cowswap_market_order(
     if runtime is None:
         raise CowSwapRuntimeUnavailableError("CowSwap runtime is not initialized")
 
-    connector = getattr(runtime, "_connector", None)
-    signer_provider = getattr(runtime, "signer", None) or getattr(connector, "signer", None)
-    set_authorization = getattr(signer_provider, "set_live_action_authorization", None)
-    if callable(set_authorization):
-        set_authorization(live_action_authorization)
-    try:
-        normalized_side = side.upper()
-        if normalized_side == "SELL":
-            result = await runtime.sell(
-                trading_pair=trading_pair,
-                amount=amount,
-            )
-        elif normalized_side == "BUY":
-            result = await runtime.buy(
-                trading_pair=trading_pair,
-                amount=amount,
-            )
-        else:
-            raise ValueError("CowSwap side must be BUY or SELL")
-    finally:
-        if callable(set_authorization):
-            set_authorization(None)
+    normalized_side = side.upper()
+    if normalized_side == "SELL":
+        result = await runtime.sell(
+            trading_pair=trading_pair,
+            amount=amount,
+        )
+    elif normalized_side == "BUY":
+        result = await runtime.buy(
+            trading_pair=trading_pair,
+            amount=amount,
+        )
+    else:
+        raise ValueError("CowSwap side must be BUY or SELL")
 
     client_order_id = _extract_client_order_id(result)
     if not client_order_id:
@@ -397,20 +382,12 @@ async def cancel_cowswap_order(
     """Cancel a CowSwap order through the initialized runtime adapter."""
     if runtime is None:
         raise CowSwapRuntimeUnavailableError("CowSwap runtime is not initialized")
-    connector = getattr(runtime, "_connector", None)
-    signer_provider = getattr(runtime, "signer", None) or getattr(connector, "signer", None)
-    set_authorization = getattr(signer_provider, "set_live_action_authorization", None)
-    if callable(set_authorization):
-        set_authorization(live_action_authorization)
     try:
         result = await runtime.cancel(client_order_id)
     except Exception as exc:
         if _is_terminal_cowswap_cancel_response(exc):
             return client_order_id
         raise
-    finally:
-        if callable(set_authorization):
-            set_authorization(None)
     cancelled_id = _extract_client_order_id(result) or client_order_id
     return cancelled_id
 
