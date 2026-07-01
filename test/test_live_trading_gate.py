@@ -413,7 +413,20 @@ def test_gateway_bridge_router_is_registered_in_main():
     main_source = (ROOT / "main.py").read_text()
 
     assert "gateway_bridge" in main_source
+    assert "def _include_full_routers()" in main_source
     assert "app.include_router(gateway_bridge.router" in main_source
+    assert "_include_full_routers()" in main_source
+
+
+def test_provider_profile_excludes_bridge_router_from_marlin_runtime():
+    main_source = (ROOT / "main.py").read_text()
+    provider_section = main_source[
+        main_source.index("def _include_provider_routers()") : main_source.index("def _include_full_routers()")
+    ]
+
+    assert "provider_boundary" in provider_section
+    assert "gateway_swap" in provider_section
+    assert "gateway_bridge" not in provider_section
 
 
 def test_gateway_clmm_checks_live_gate_before_mutations():

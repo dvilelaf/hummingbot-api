@@ -42,47 +42,17 @@ from hummingbot.core.rate_oracle.rate_oracle import RATE_ORACLE_SOURCES, RateOra
 
 from config import settings  # noqa: E402
 from database import AsyncDatabaseManager  # noqa: E402
-from routers import (  # noqa: E402
-    accounts,
-    archived_bots,
-    backtesting,
-    bot_orchestration,
-    connectors,
-    controllers,
-    docker,
-    executors,
-    gateway,
-    gateway_bridge,
-    gateway_clmm,
-    gateway_lp,
-    gateway_swap,
-    market_data,
-    portfolio,
-    provider_boundary,
-    rate_oracle,
-    scripts,
-    storage,
-    trading,
-    websocket,
-)
 from services.accounts_service import AccountsService  # noqa: E402
-from services.backtesting_service import BacktestingService  # noqa: E402
 from services.cowswap_runtime import (  # noqa: E402
     CowSwapRuntimeDependencies,
     build_cowswap_runtime,
     cowswap_token_map_from_json,
     get_cowswap_runtime_status,
 )
-from services.bots_orchestrator import BotsOrchestrator  # noqa: E402
-from services.docker_service import DockerService  # noqa: E402
-from services.executor_service import ExecutorService  # noqa: E402
-from services.executor_ws_manager import ExecutorWebSocketManager  # noqa: E402
-from services.gateway_service import GatewayService  # noqa: E402
 from services.market_data_service import MarketDataService  # noqa: E402
 from services.trading_service import TradingService  # noqa: E402
 from services.unified_connector_service import UnifiedConnectorService  # noqa: E402
 from services.websocket_manager import WebSocketManager  # noqa: E402
-from utils.bot_archiver import BotArchiver  # noqa: E402
 from utils.security import BackendAPISecurity  # noqa: E402
 
 
@@ -107,6 +77,14 @@ def env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def runtime_profile() -> str:
+    return env_text("HUMMINGBOT_API_RUNTIME_PROFILE", "full").strip().lower()
+
+
+def provider_runtime_enabled() -> bool:
+    return runtime_profile() in {"provider", "marlin"}
 
 # Set up logging configuration
 logging.basicConfig(
@@ -288,46 +266,53 @@ async def lifespan(app: FastAPI):
         )
     logging.info("AccountsService initialized")
 
-    # =========================================================================
-    # 4. ExecutorService - depends on TradingService (NO circular dependency)
-    # =========================================================================
+    executor_service = None
+    executor_ws_manager = None
+    backtesting_service = None
+    bot_archiver = None
+    bots_orchestrator = None
+    docker_service = None
+    gateway_service = None
 
-    executor_service = ExecutorService(
-        trading_service=trading_service,
-        db_manager=db_manager,
-        default_account="master_account",
-        update_interval=1.0,
-        max_retries=10
-    )
-    logging.info("ExecutorService initialized")
-
-    # =========================================================================
-    # 5. Other Services
-    # =========================================================================
-
-    docker_control_disabled = env_bool("HUMMINGBOT_API_DISABLE_DOCKER_CONTROL")
-    if docker_control_disabled:
-        logging.info("Docker control services disabled by HUMMINGBOT_API_DISABLE_DOCKER_CONTROL")
-        bots_orchestrator = None
-        docker_service = None
-        gateway_service = None
+    if provider_runtime_enabled():
+        logging.info("Provider runtime profile enabled; bot orchestration/admin services disabled")
     else:
-        bots_orchestrator = BotsOrchestrator(
-            broker_host=settings.broker.host,
-            broker_port=settings.broker.port,
-            broker_username=settings.broker.username,
-            broker_password=settings.broker.password,
-            performance_dump_interval=settings.broker.performance_dump_interval
-        )
-        docker_service = DockerService()
-        gateway_service = GatewayService()
+        from services.backtesting_service import BacktestingService
+        from services.bots_orchestrator import BotsOrchestrator
+        from services.docker_service import DockerService
+        from services.executor_service import ExecutorService
+        from services.gateway_service import GatewayService
+        from utils.bot_archiver import BotArchiver
 
-    backtesting_service = BacktestingService()
-    bot_archiver = BotArchiver(
-        settings.aws.api_key,
-        settings.aws.secret_key,
-        settings.aws.s3_default_bucket_name
-    )
+        executor_service = ExecutorService(
+            trading_service=trading_service,
+            db_manager=db_manager,
+            default_account="master_account",
+            update_interval=1.0,
+            max_retries=10
+        )
+        logging.info("ExecutorService initialized")
+
+        docker_control_disabled = env_bool("HUMMINGBOT_API_DISABLE_DOCKER_CONTROL")
+        if docker_control_disabled:
+            logging.info("Docker control services disabled by HUMMINGBOT_API_DISABLE_DOCKER_CONTROL")
+        else:
+            bots_orchestrator = BotsOrchestrator(
+                broker_host=settings.broker.host,
+                broker_port=settings.broker.port,
+                broker_username=settings.broker.username,
+                broker_password=settings.broker.password,
+                performance_dump_interval=settings.broker.performance_dump_interval
+            )
+            docker_service = DockerService()
+            gateway_service = GatewayService()
+
+        backtesting_service = BacktestingService()
+        bot_archiver = BotArchiver(
+            settings.aws.api_key,
+            settings.aws.secret_key,
+            settings.aws.s3_default_bucket_name
+        )
 
     # =========================================================================
     # 6. Start services
@@ -353,9 +338,10 @@ async def lifespan(app: FastAPI):
         bots_orchestrator.start()
     market_data_service.start()
     await market_data_service.warmup_rate_oracle()
-    executor_service.start()
-    await executor_service.cleanup_orphaned_executors()
-    await executor_service.recover_positions_from_db()
+    if executor_service is not None:
+        executor_service.start()
+        await executor_service.cleanup_orphaned_executors()
+        await executor_service.recover_positions_from_db()
     accounts_service.start()
 
     # =========================================================================
@@ -377,8 +363,10 @@ async def lifespan(app: FastAPI):
     app.state.gateway_service = gateway_service
     app.state.bot_archiver = bot_archiver
 
-    # WebSocket manager for executor streaming
-    executor_ws_manager = ExecutorWebSocketManager(executor_service, market_data_service, bots_orchestrator)
+    if executor_service is not None:
+        from services.executor_ws_manager import ExecutorWebSocketManager
+
+        executor_ws_manager = ExecutorWebSocketManager(executor_service, market_data_service, bots_orchestrator)
     app.state.executor_ws_manager = executor_ws_manager
 
     logging.info("All services started successfully")
@@ -392,11 +380,13 @@ async def lifespan(app: FastAPI):
     logging.info("Shutting down services...")
 
     websocket_manager.shutdown()
-    await executor_ws_manager.shutdown()
+    if executor_ws_manager is not None:
+        await executor_ws_manager.shutdown()
     if bots_orchestrator is not None:
         bots_orchestrator.stop()
     await accounts_service.stop()
-    await executor_service.stop()
+    if executor_service is not None:
+        await executor_service.stop()
     market_data_service.stop()
     await connector_service.stop_all()
     if docker_service is not None:
@@ -476,31 +466,65 @@ def auth_user(
     return credentials.username
 
 
-# Include all routers with authentication
-app.include_router(docker.router, dependencies=[Depends(auth_user)])
-app.include_router(gateway.router, dependencies=[Depends(auth_user)])
-app.include_router(accounts.router, dependencies=[Depends(auth_user)])
-app.include_router(connectors.router, dependencies=[Depends(auth_user)])
-app.include_router(portfolio.router, dependencies=[Depends(auth_user)])
-app.include_router(trading.router, dependencies=[Depends(auth_user)])
-app.include_router(provider_boundary.router, dependencies=[Depends(auth_user)])
-app.include_router(gateway_swap.router, dependencies=[Depends(auth_user)])
-app.include_router(gateway_bridge.router, dependencies=[Depends(auth_user)])
-app.include_router(gateway_clmm.router, dependencies=[Depends(auth_user)])
-app.include_router(gateway_lp.router, dependencies=[Depends(auth_user)])
-app.include_router(bot_orchestration.router, dependencies=[Depends(auth_user)])
-app.include_router(controllers.router, dependencies=[Depends(auth_user)])
-app.include_router(scripts.router, dependencies=[Depends(auth_user)])
-app.include_router(market_data.router, dependencies=[Depends(auth_user)])
-app.include_router(rate_oracle.router, dependencies=[Depends(auth_user)])
-app.include_router(backtesting.router, dependencies=[Depends(auth_user)])
-app.include_router(archived_bots.router, dependencies=[Depends(auth_user)])
-app.include_router(storage.router, dependencies=[Depends(auth_user)])
+def _include_provider_routers() -> None:
+    from routers import (
+        connectors,
+        gateway_swap,
+        market_data,
+        portfolio,
+        provider_boundary,
+        rate_oracle,
+        trading,
+    )
 
-app.include_router(executors.router, dependencies=[Depends(auth_user)])
+    app.include_router(connectors.router, dependencies=[Depends(auth_user)])
+    app.include_router(portfolio.router, dependencies=[Depends(auth_user)])
+    app.include_router(trading.router, dependencies=[Depends(auth_user)])
+    app.include_router(provider_boundary.router, dependencies=[Depends(auth_user)])
+    app.include_router(gateway_swap.router, dependencies=[Depends(auth_user)])
+    app.include_router(market_data.router, dependencies=[Depends(auth_user)])
+    app.include_router(rate_oracle.router, dependencies=[Depends(auth_user)])
 
-# WebSocket router (handles its own auth)
-app.include_router(websocket.router)
+
+def _include_full_routers() -> None:
+    from routers import (
+        accounts,
+        archived_bots,
+        backtesting,
+        bot_orchestration,
+        controllers,
+        docker,
+        executors,
+        gateway,
+        gateway_bridge,
+        gateway_clmm,
+        gateway_lp,
+        scripts,
+        storage,
+        websocket,
+    )
+
+    app.include_router(docker.router, dependencies=[Depends(auth_user)])
+    app.include_router(gateway.router, dependencies=[Depends(auth_user)])
+    app.include_router(accounts.router, dependencies=[Depends(auth_user)])
+    _include_provider_routers()
+    app.include_router(gateway_bridge.router, dependencies=[Depends(auth_user)])
+    app.include_router(gateway_clmm.router, dependencies=[Depends(auth_user)])
+    app.include_router(gateway_lp.router, dependencies=[Depends(auth_user)])
+    app.include_router(bot_orchestration.router, dependencies=[Depends(auth_user)])
+    app.include_router(controllers.router, dependencies=[Depends(auth_user)])
+    app.include_router(scripts.router, dependencies=[Depends(auth_user)])
+    app.include_router(backtesting.router, dependencies=[Depends(auth_user)])
+    app.include_router(archived_bots.router, dependencies=[Depends(auth_user)])
+    app.include_router(storage.router, dependencies=[Depends(auth_user)])
+    app.include_router(executors.router, dependencies=[Depends(auth_user)])
+    app.include_router(websocket.router)
+
+
+if provider_runtime_enabled():
+    _include_provider_routers()
+else:
+    _include_full_routers()
 
 
 @app.get("/")

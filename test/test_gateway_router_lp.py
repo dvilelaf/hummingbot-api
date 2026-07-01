@@ -312,4 +312,15 @@ def test_gateway_lp_router_is_registered_in_main():
     main_source = (Path(__file__).resolve().parents[1] / "main.py").read_text()
 
     assert "gateway_lp" in main_source
+    assert "def _include_full_routers()" in main_source
     assert "app.include_router(gateway_lp.router" in main_source
+
+
+def test_provider_profile_excludes_lp_router_from_marlin_runtime():
+    main_source = (Path(__file__).resolve().parents[1] / "main.py").read_text()
+    provider_section = main_source[
+        main_source.index("def _include_provider_routers()") : main_source.index("def _include_full_routers()")
+    ]
+
+    assert "gateway_swap" in provider_section
+    assert "gateway_lp" not in provider_section

@@ -1,18 +1,23 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from fastapi import Request
 
-from database import AsyncDatabaseManager
-from services.accounts_service import AccountsService
-from services.bots_orchestrator import BotsOrchestrator
-from services.docker_service import DockerService
-from services.executor_service import ExecutorService
-from services.executor_ws_manager import ExecutorWebSocketManager
-from services.gateway_service import GatewayService
-from services.market_data_service import MarketDataService
-from services.trading_service import TradingService
-from services.unified_connector_service import UnifiedConnectorService
-from services.backtesting_service import BacktestingService
-from services.websocket_manager import WebSocketManager
-from utils.bot_archiver import BotArchiver
+if TYPE_CHECKING:
+    from database import AsyncDatabaseManager
+    from services.accounts_service import AccountsService
+    from services.backtesting_service import BacktestingService
+    from services.bots_orchestrator import BotsOrchestrator
+    from services.docker_service import DockerService
+    from services.executor_service import ExecutorService
+    from services.executor_ws_manager import ExecutorWebSocketManager
+    from services.gateway_service import GatewayService
+    from services.market_data_service import MarketDataService
+    from services.trading_service import TradingService
+    from services.unified_connector_service import UnifiedConnectorService
+    from services.websocket_manager import WebSocketManager
+    from utils.bot_archiver import BotArchiver
 
 
 def get_bots_orchestrator(request: Request) -> BotsOrchestrator:

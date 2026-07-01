@@ -6,7 +6,6 @@ services:
       - "8001:8000"
     volumes:
       - ./bots:/hummingbot-api/bots
-      - /var/run/docker.sock:/var/run/docker.sock
     logging:
       driver: json-file
       options:
@@ -16,6 +15,8 @@ services:
       - .env
     environment:
       # Override specific values for Docker networking
+      - HUMMINGBOT_API_RUNTIME_PROFILE=provider
+      - MARLIN_RUNTIME_PROFILE=marlin
       - BROKER_HOST=emqx
       - DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@postgres:5432/hummingbot_api
       - GATEWAY_URL=http://host.docker.internal:15888
@@ -29,6 +30,8 @@ services:
     depends_on:
       - postgres
   emqx:
+    profiles:
+      - full
     container_name: hummingbot-broker
     image: emqx:5
     restart: unless-stopped

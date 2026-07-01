@@ -1,9 +1,7 @@
-from .accounts_service import AccountsService
-from .bots_orchestrator import BotsOrchestrator
-from .docker_service import DockerService
+"""Service package marker.
 
-__all__ = [
-    "AccountsService",
-    "BotsOrchestrator",
-    "DockerService",
-]
+Import concrete services from their modules. Keeping this package initializer
+empty prevents provider-mode imports from loading Docker or bot orchestration.
+"""
+
+__all__: list[str] = []
