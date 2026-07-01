@@ -358,4 +358,20 @@ async def _provider_trading_rule(
     except Exception:
         return None
     rule = rules.get(trading_pair) if isinstance(rules, dict) else None
-    return rule if isinstance(rule, dict) and "error" not in rule else None
+    if not isinstance(rule, dict) or "error" in rule:
+        return None
+    return _normalized_provider_trading_rule(connector_name, rule)
+
+
+def _normalized_provider_trading_rule(connector_name: str, rule: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(rule)
+    if connector_name != "hyperliquid":
+        return normalized
+    min_notional = Decimal(str(normalized.get("min_notional_size") or 0))
+    min_order_value = Decimal(str(normalized.get("min_order_value") or 0))
+    hyperliquid_minimum = Decimal("10")
+    if min_notional < hyperliquid_minimum:
+        normalized["min_notional_size"] = float(hyperliquid_minimum)
+    if min_order_value < hyperliquid_minimum:
+        normalized["min_order_value"] = float(hyperliquid_minimum)
+    return normalized
