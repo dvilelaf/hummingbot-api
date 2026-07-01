@@ -36,6 +36,10 @@ from utils.file_system import fs_util
 # Create module-specific logger
 logger = logging.getLogger(__name__)
 GATEWAY_CHAIN_PREFIXES = ("ethereum-", "solana-")
+GATEWAY_PRICE_CONNECTORS = {
+    "ethereum-base": "aerodrome",
+    "solana-mainnet-beta": "jupiter",
+}
 COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}
 SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_perpetual_testnet", "hyperliquid_testnet"}
 HYPERLIQUID_TESTNET_INFO_URL = "https://api.hyperliquid-testnet.xyz/info"
@@ -2564,16 +2568,17 @@ class AccountsService:
         Returns:
             Dictionary mapping token symbol to price in USDC
         """
-        from hummingbot.core.data_type.common import TradeType
-        from hummingbot.core.gateway.gateway_http_client import GatewayHttpClient
         from hummingbot.core.rate_oracle.rate_oracle import RateOracle
 
-        gateway_client = GatewayHttpClient.get_instance()
         rate_oracle = RateOracle.get_instance()
         prices = {}
 
         # Construct full network name (e.g., "solana-mainnet-beta")
         full_network = f"{chain}-{network}"
+        price_connector = GATEWAY_PRICE_CONNECTORS.get(full_network)
+        if price_connector is None:
+            logger.debug("No Gateway price connector configured for %s", full_network)
+            return prices
 
         # Create tasks for all tokens in parallel
         tasks = []
@@ -2607,13 +2612,13 @@ class AccountsService:
                 continue
 
             try:
-                # get_price will auto-fetch dex/trading_type from network's swap provider
-                task = gateway_client.get_price(
-                    network=full_network,
+                task = self.gateway_client.quote_swap(
+                    connector=price_connector,
+                    network=network,
                     base_asset=token,
                     quote_asset=quote_asset,
                     amount=Decimal("1"),
-                    side=TradeType.SELL
+                    side="SELL",
                 )
                 tasks.append(task)
                 task_tokens.append(token)
@@ -2627,8 +2632,25 @@ class AccountsService:
                 for token, result in zip(task_tokens, results):
                     if isinstance(result, Exception):
                         logger.warning(f"Error fetching price for {token}: {result}")
+                    elif result and result.get("error"):
+                        logger.warning(
+                            "Gateway price quote failed for %s on %s/%s: %s",
+                            token,
+                            full_network,
+                            price_connector,
+                            result.get("error"),
+                        )
                     elif result and "price" in result:
                         price = Decimal(str(result["price"]))
+                        if price <= 0:
+                            logger.warning(
+                                "Gateway returned non-positive price for %s on %s/%s: %s",
+                                token,
+                                full_network,
+                                price_connector,
+                                price,
+                            )
+                            continue
                         prices[token] = price
                         # Also update the rate oracle so future lookups can find it
                         trading_pair = f"{token}-USDC"

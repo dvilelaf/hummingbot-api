@@ -2,6 +2,9 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import hashlib
+import hmac
+import json
 from pathlib import Path
 
 import pytest
@@ -149,6 +152,7 @@ def test_gateway_mutation_gate_allows_test_networks_by_default(monkeypatch):
 
 def test_gateway_mutation_gate_blocks_mainnet_by_default(monkeypatch):
     monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
+    monkeypatch.delenv("MARLIN_RUNTIME_PROFILE", raising=False)
     gate = _live_gate_module()
 
     try:
@@ -162,6 +166,155 @@ def test_gateway_mutation_gate_blocks_mainnet_by_default(monkeypatch):
         assert exc.status_code == 503
         assert "live Gateway mutation disabled" in str(exc.detail)
         assert "ethereum/base" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+def test_gateway_mutation_gate_allows_authorized_marlin_provider_intents(monkeypatch):
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", raising=False)
+    monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+    monkeypatch.setenv("MARLIN_MNEMONIC", "test mnemonic")
+    gate = _live_gate_module()
+    payload = {
+        "action": "swap",
+        "connector_name": "jupiter",
+        "live_action_authorization": {
+            "action": "gateway_swap",
+            "scope": "provider_intent",
+            "source": "marlin",
+        },
+    }
+    signature = hmac.new(
+        b"test mnemonic",
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    gate.assert_live_gateway_mutation_allowed(
+        action="swap_execute",
+        chain="solana",
+        expected_connector_id="jupiter",
+        expected_instrument="SOL-USDC",
+        expected_notional="0.0001",
+        expected_slippage_bps="100",
+        live_action_authorization={
+            "action": "gateway_swap",
+            "scope": "provider_intent",
+            "source": "marlin",
+        },
+        network="mainnet-beta",
+        provider_intent_payload=payload,
+        provider_intent_signature=signature,
+        source="provider.intents",
+    )
+
+
+def test_gateway_mutation_gate_blocks_unauthorized_marlin_provider_intents(
+    monkeypatch,
+):
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", raising=False)
+    monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+    monkeypatch.setenv("MARLIN_MNEMONIC", "test mnemonic")
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_gateway_mutation_allowed(
+            action="swap_execute",
+            chain="solana",
+            live_action_authorization={
+                "action": "gateway_swap",
+                "scope": "provider_intent",
+                "source": "marlin",
+            },
+            network="mainnet-beta",
+            provider_intent_payload={
+                "action": "swap",
+                "connector_name": "jupiter",
+                "live_action_authorization": {
+                    "action": "gateway_swap",
+                    "scope": "provider_intent",
+                    "source": "marlin",
+                },
+            },
+            source="provider.intents",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "live Gateway mutation disabled for action swap_execute" in str(exc.detail)
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+def test_gateway_mutation_gate_rejects_replayed_marlin_provider_intent_signature(
+    monkeypatch,
+):
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", raising=False)
+    monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+    monkeypatch.setenv("MARLIN_MNEMONIC", "replay mnemonic")
+    gate = _live_gate_module()
+    authorization = {
+        "action": "gateway_swap",
+        "scope": "provider_intent",
+        "source": "marlin",
+    }
+    payload = {
+        "action": "swap",
+        "connector_name": "jupiter",
+        "correlation_id": "replay-001",
+        "live_action_authorization": authorization,
+    }
+    signature = hmac.new(
+        b"replay mnemonic",
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    gate.assert_live_gateway_mutation_allowed(
+        action="swap_execute",
+        chain="solana",
+        live_action_authorization=authorization,
+        network="mainnet-beta",
+        provider_intent_payload=payload,
+        provider_intent_signature=signature,
+        source="provider.intents",
+    )
+    try:
+        gate.assert_live_gateway_mutation_allowed(
+            action="swap_execute",
+            chain="solana",
+            live_action_authorization=authorization,
+            network="mainnet-beta",
+            provider_intent_payload=payload,
+            provider_intent_signature=signature,
+            source="provider.intents",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+    else:
+        raise AssertionError("expected HTTPException")
+
+
+def test_gateway_mutation_gate_still_blocks_direct_gateway_swap_in_marlin_profile(
+    monkeypatch,
+):
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
+    monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", raising=False)
+    monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+    gate = _live_gate_module()
+
+    try:
+        gate.assert_live_gateway_mutation_allowed(
+            action="swap_execute",
+            chain="solana",
+            network="mainnet-beta",
+            source="gateway_swap.execute_swap",
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 503
+        assert "live Gateway mutation disabled for action swap_execute" in str(exc.detail)
     else:
         raise AssertionError("expected HTTPException")
 
@@ -504,11 +657,19 @@ def test_gateway_mutation_models_accept_live_action_authorization():
     assert "live_action_authorization: Optional[Dict[str, Any]]" in send_model
 
 
-def test_gateway_client_does_not_forward_live_action_authorization_to_gateway():
+def test_gateway_client_only_forwards_live_action_authorization_to_swap_execute():
     source = (ROOT / "services" / "gateway_client.py").read_text()
 
+    execute_swap_start = source.index("async def execute_swap")
+    execute_swap_end = source.find("\n    async def ", execute_swap_start + 1)
+    execute_swap_source = source[execute_swap_start:execute_swap_end]
+    assert "live_action_authorization: Optional[Dict[str, Any]] = None" in execute_swap_source
+    assert "marlin_provider_intent_authorized: bool = False" in execute_swap_source
+    assert "live_action_authorization is not None and marlin_provider_intent_authorized" in execute_swap_source
+    assert 'payload["liveActionAuthorization"] = live_action_authorization' in execute_swap_source
+    assert '"x-marlin-provider-intent": passphrase' in execute_swap_source
+
     for method_name in (
-        "execute_swap",
         "router_add_liquidity",
         "router_remove_liquidity",
         "execute_bridge",

@@ -22,12 +22,21 @@ from services.cowswap_runtime import (
     cowswap_order_submission_blocker,
     cowswap_supported_order_types,
 )
-from services.live_trading_gate import assert_live_gateway_mutation_allowed
+from services.live_trading_gate import (
+    assert_live_gateway_mutation_allowed,
+    consume_marlin_provider_intent_swap_authorization,
+)
 from services.marlin_runtime import assert_marlin_default_wallet_identity
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Provider Boundary"], prefix="/provider")
+
+GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS = {
+    "aerodrome": "ethereum-base",
+    "jupiter": "solana-mainnet-beta",
+    "orca": "solana-mainnet-beta",
+}
 
 
 @router.post("/snapshot", response_model=ProviderSnapshotResponse)
@@ -57,10 +66,15 @@ async def provider_snapshot(
         issues.append(f"provider not available: {connector_name}")
 
     if body.refresh_portfolio:
+        refresh_connector_names = [connector_name]
+        if "swap" in {action.lower() for action in provider_actions}:
+            refresh_connector_names = [
+                GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS.get(connector_name, connector_name)
+            ]
         try:
             await accounts_service.update_account_state(
                 account_names=[body.account_name],
-                connector_names=[connector_name],
+                connector_names=refresh_connector_names,
                 skip_gateway="swap" not in {action.lower() for action in provider_actions},
             )
         except Exception as exc:
@@ -69,8 +83,20 @@ async def provider_snapshot(
     try:
         portfolio_state = accounts_service.get_accounts_state()
         account_state = portfolio_state.get(body.account_name, {})
+        portfolio_value = account_state.get(connector_name)
+        if (
+            "swap" in {action.lower() for action in provider_actions}
+            and connector_name in GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS
+        ):
+            gateway_portfolio_value = _gateway_verified_portfolio_rows(
+                account_state.get(GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS[connector_name])
+            )
+            if gateway_portfolio_value is not None:
+                portfolio_value = gateway_portfolio_value
         if connector_name in account_state:
-            portfolio = {body.account_name: {connector_name: account_state.get(connector_name, [])}}
+            portfolio = {body.account_name: {connector_name: portfolio_value}}
+        elif portfolio_value is not None:
+            portfolio = {body.account_name: {connector_name: portfolio_value}}
         else:
             portfolio = {body.account_name: {}}
     except Exception as exc:
@@ -105,13 +131,18 @@ async def provider_snapshot(
 @router.post("/intents", response_model=ProviderIntentResponse)
 async def submit_provider_intent(
     body: ProviderIntentRequest,
+    request: Request,
     accounts_service: AccountsService = Depends(get_accounts_service),
     db_manager=Depends(get_database_manager),  # noqa: ANN001 - kept for parity with swap router dependencies.
 ) -> ProviderIntentResponse:
     del db_manager
     if body.action == "order":
         return await _submit_order_intent(body, accounts_service)
-    return await _submit_swap_intent(body, accounts_service)
+    return await _submit_swap_intent(
+        body,
+        accounts_service,
+        provider_intent_signature=request.headers.get("x-marlin-provider-intent-signature"),
+    )
 
 
 async def _submit_order_intent(
@@ -158,6 +189,8 @@ async def _submit_order_intent(
 async def _submit_swap_intent(
     body: ProviderIntentRequest,
     accounts_service: AccountsService,
+    *,
+    provider_intent_signature: str | None,
 ) -> ProviderIntentResponse:
     network_id = str(body.risk_metadata.get("network", "")).strip()
     if not network_id:
@@ -181,6 +214,14 @@ async def _submit_swap_intent(
             )
         chain, network = accounts_service.gateway_client.parse_network_id(network_id)
         slippage_pct = Decimal(str(body.risk_metadata.get("slippage_pct", "1.0")))
+        provider_intent_payload = body.model_dump(mode="json", exclude_none=True)
+        marlin_provider_intent_authorized = consume_marlin_provider_intent_swap_authorization(
+            action="swap_execute",
+            live_action_authorization=body.live_action_authorization,
+            provider_intent_payload=provider_intent_payload,
+            provider_intent_signature=provider_intent_signature,
+            source="provider.intents",
+        )
         assert_live_gateway_mutation_allowed(
             action="swap_execute",
             chain=chain,
@@ -189,7 +230,10 @@ async def _submit_swap_intent(
             expected_notional=body.quantity,
             expected_slippage_bps=slippage_pct * Decimal("100"),
             live_action_authorization=body.live_action_authorization,
+            marlin_provider_intent_authorized=marlin_provider_intent_authorized,
             network=network,
+            provider_intent_payload=provider_intent_payload,
+            provider_intent_signature=provider_intent_signature,
             source="provider.intents",
         )
         wallet_address = await _ensure_marlin_wallet_default(
@@ -210,6 +254,7 @@ async def _submit_swap_intent(
             slippage_pct=float(slippage_pct),
             pool_address=body.risk_metadata.get("pool_address"),
             live_action_authorization=body.live_action_authorization,
+            marlin_provider_intent_authorized=marlin_provider_intent_authorized,
         )
     except HTTPException as exc:
         return ProviderIntentResponse(
@@ -227,10 +272,18 @@ async def _submit_swap_intent(
 
     tx_hash = result.get("signature") or result.get("txHash") or result.get("hash")
     if not tx_hash:
+        provider_error = (
+            result.get("error")
+            or result.get("message")
+            or result.get("detail")
+            or result.get("error_message")
+        )
         return ProviderIntentResponse(
             status="failed",
             correlation_id=body.correlation_id,
-            provider_error="swap response missing transaction hash",
+            provider_error=_redact_secret_text(provider_error)
+            if provider_error
+            else "swap response missing transaction hash",
             provider_status=str(result.get("status", "")),
         )
     return ProviderIntentResponse(
@@ -311,6 +364,18 @@ def _metadata_connector_name(connector_name: str) -> str:
         if connector_name.endswith(suffix):
             return connector_name[: -len(suffix)]
     return connector_name
+
+
+def _gateway_verified_portfolio_rows(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    rows: list[Any] = []
+    for item in value:
+        if isinstance(item, dict):
+            rows.append({**item, "balance_source": "gateway"})
+        else:
+            rows.append(item)
+    return rows
 
 
 def _network_alias(network: str) -> str:

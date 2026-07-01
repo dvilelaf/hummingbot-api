@@ -43,6 +43,20 @@ class GatewayClient:
             return format(value, "f")
         return str(value)
 
+    @staticmethod
+    def _gateway_passphrase() -> str:
+        value = os.getenv("GATEWAY_PASSPHRASE", "").strip()
+        if value:
+            return value
+        file_path = os.getenv("GATEWAY_PASSPHRASE_FILE", "").strip()
+        if not file_path:
+            return ""
+        try:
+            with open(file_path, encoding="utf-8") as handle:
+                return handle.read().strip()
+        except OSError:
+            return ""
+
     async def get_wallet_address_or_default(self, chain: str, wallet_address: Optional[str] = None) -> str:
         """Get wallet address - use provided or get default for chain"""
         if wallet_address:
@@ -93,28 +107,35 @@ class GatewayClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def _request(self, method: str, path: str, params: Dict = None, json: Dict = None) -> Optional[Dict]:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        params: Dict = None,
+        json: Dict = None,
+        headers: Dict[str, str] | None = None,
+    ) -> Optional[Dict]:
         """Make HTTP request to Gateway"""
         session = await self._get_session()
         url = f"{self.base_url}/{path}"
 
         try:
             if method == "GET":
-                async with session.get(url, params=params) as response:
+                async with session.get(url, params=params, headers=headers) as response:
                     if not response.ok:
                         error_body = await self._get_error_body(response)
                         logger.warning(f"Gateway request failed: {method} {url} - {response.status} - {error_body}")
                         return {"error": error_body, "status": response.status}
                     return await response.json()
             elif method == "POST":
-                async with session.post(url, params=params, json=json) as response:
+                async with session.post(url, params=params, json=json, headers=headers) as response:
                     if not response.ok:
                         error_body = await self._get_error_body(response)
                         logger.warning(f"Gateway request failed: {method} {url} - {response.status} - {error_body}")
                         return {"error": error_body, "status": response.status}
                     return await response.json()
             elif method == "DELETE":
-                async with session.delete(url, params=params, json=json) as response:
+                async with session.delete(url, params=params, json=json, headers=headers) as response:
                     if not response.ok:
                         error_body = await self._get_error_body(response)
                         logger.warning(f"Gateway request failed: {method} {url} - {response.status} - {error_body}")
@@ -512,6 +533,7 @@ class GatewayClient:
         slippage_pct: Optional[float] = None,
         pool_address: Optional[str] = None,
         live_action_authorization: Optional[Dict[str, Any]] = None,
+        marlin_provider_intent_authorized: bool = False,
     ) -> Dict:
         """Execute a swap"""
         payload = {
@@ -526,8 +548,19 @@ class GatewayClient:
             payload["slippagePct"] = slippage_pct
         if pool_address:
             payload["poolAddress"] = pool_address
+        headers = None
+        if live_action_authorization is not None and marlin_provider_intent_authorized:
+            payload["liveActionAuthorization"] = live_action_authorization
+            passphrase = self._gateway_passphrase()
+            if passphrase:
+                headers = {"x-marlin-provider-intent": passphrase}
         route_type = self._swap_route_type(connector, pool_address)
-        return await self._request("POST", f"connectors/{connector}/{route_type}/execute-swap", json=payload)
+        return await self._request(
+            "POST",
+            f"connectors/{connector}/{route_type}/execute-swap",
+            json=payload,
+            headers=headers,
+        )
 
     async def execute_bridge(
         self,
