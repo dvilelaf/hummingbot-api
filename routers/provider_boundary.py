@@ -267,7 +267,8 @@ async def _provider_capabilities(
         return [], []
     if not hasattr(connector_instance, "supported_order_types"):
         return [], []
-    return [order_type.name for order_type in connector_instance.supported_order_types()], []
+    order_types = [order_type.name for order_type in connector_instance.supported_order_types()]
+    return order_types, (["order", "cancel"] if order_types else [])
 
 
 async def _ensure_marlin_wallet_default(
