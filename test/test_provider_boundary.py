@@ -5,9 +5,39 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 LIVE_GATE_CALLS = []
 EXECUTE_SWAP_CALLS = []
+SET_DEFAULT_WALLET_CALLS = []
+STUBBED_MODULES = (
+    "deps",
+    "fastapi",
+    "hummingbot",
+    "hummingbot.client",
+    "hummingbot.client.settings",
+    "hummingbot.core",
+    "hummingbot.core.data_type",
+    "hummingbot.core.data_type.common",
+    "routers.connectors",
+    "routers.gateway_swap",
+    "services.accounts_service",
+    "services.cowswap_runtime",
+    "services.live_trading_gate",
+    "services.marlin_runtime",
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_stubbed_modules():
+    previous = {name: sys.modules.get(name) for name in STUBBED_MODULES}
+    yield
+    for name, module in previous.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
 
 
 def _install_provider_boundary_stubs():
@@ -132,6 +162,7 @@ class FakeGatewayClient:
         }
 
     async def set_marlin_default_wallet(self, **_kwargs):
+        SET_DEFAULT_WALLET_CALLS.append(_kwargs)
         return {"status": "default_set"}
 
     async def execute_swap(self, **_kwargs):
@@ -198,6 +229,7 @@ def test_swap_provider_snapshot_uses_gateway_chain_network_portfolio():
 def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash():
     LIVE_GATE_CALLS.clear()
     EXECUTE_SWAP_CALLS.clear()
+    SET_DEFAULT_WALLET_CALLS.clear()
     provider_boundary = _provider_boundary_module()
     service = FakeAccountsService()
 
@@ -254,6 +286,14 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash()
     assert gate_call["provider_intent_payload"]["connector_name"] == "jupiter"
     assert gate_call["provider_intent_payload"]["quantity"] == "0.0001"
     assert gate_call["source"] == "provider.intents"
+    assert SET_DEFAULT_WALLET_CALLS == [
+        {
+            "address": "9AtFd6KcR9tx5Etxc9SVkYrkZb7yC5BDibao7yPT5Ce1",
+            "chain": "solana",
+            "network": "mainnet-beta",
+            "wallet_ref": "solana:mainnet-beta:solana_gateway",
+        }
+    ]
     assert EXECUTE_SWAP_CALLS[0]["network"] == "mainnet-beta"
     assert EXECUTE_SWAP_CALLS[0]["marlin_provider_intent_authorized"] is True
     assert EXECUTE_SWAP_CALLS[0]["live_action_authorization"] == {
@@ -261,3 +301,56 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash()
         "scope": "provider_intent",
         "source": "marlin",
     }
+
+
+def test_base_swap_provider_intent_accepts_gateway_network_identity_alias():
+    LIVE_GATE_CALLS.clear()
+    EXECUTE_SWAP_CALLS.clear()
+    SET_DEFAULT_WALLET_CALLS.clear()
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="swap",
+        connector_name="aerodrome",
+        correlation_id="swap-base-001",
+        market_id="AERO-USDC",
+        mode="mainnet",
+        quantity="0.0001",
+        risk_metadata={"network": "ethereum-base"},
+        side="SELL",
+        live_action_authorization={
+            "action": "gateway_swap",
+            "scope": "provider_intent",
+            "source": "marlin",
+        },
+        wallet_identity={
+            "address": "0x1111111111111111111111111111111111111111",
+            "chain": "ethereum",
+            "network": "ethereum-base",
+            "wallet_ref": "base:mainnet:evm_gateway",
+        },
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            SimpleNamespace(headers={"x-marlin-provider-intent-signature": "test-signature"}),
+            service,
+        ),
+    )
+
+    assert result.provider_error == "Insufficient funds for transaction."
+    assert SET_DEFAULT_WALLET_CALLS == [
+        {
+            "address": "0x1111111111111111111111111111111111111111",
+            "chain": "ethereum",
+            "network": "ethereum-base",
+            "wallet_ref": "base:mainnet:evm_gateway",
+        }
+    ]
+    assert LIVE_GATE_CALLS[0]["chain"] == "ethereum"
+    assert LIVE_GATE_CALLS[0]["network"] == "base"
+    assert EXECUTE_SWAP_CALLS[0]["network"] == "base"
+    assert EXECUTE_SWAP_CALLS[0]["connector"] == "aerodrome"

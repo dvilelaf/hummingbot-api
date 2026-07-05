@@ -382,6 +382,10 @@ def _network_alias(network: str) -> str:
     normalized = network.strip().lower()
     if normalized in {"solana-mainnet-beta", "mainnet-beta"}:
         return "solana-mainnet-beta"
+    if normalized in {"ethereum-base", "base"}:
+        return "ethereum-base"
+    if normalized in {"ethereum-base-sepolia", "base-sepolia"}:
+        return "ethereum-base-sepolia"
     return normalized
 
 
