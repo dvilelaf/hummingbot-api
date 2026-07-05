@@ -91,3 +91,39 @@ async def test_cowswap_portfolio_state_sees_persisted_credential_after_restart(t
         service._update_gateway_balances.assert_not_awaited()
     finally:
         fs_util.base_path = old_base_path
+
+
+@pytest.mark.asyncio
+async def test_cowswap_runtime_ready_marks_account_without_sidecar_credentials(tmp_path):
+    from services.accounts_service import AccountsService
+    from services.cowswap_runtime import COWSWAP_CONNECTOR_NAME, CowSwapRuntimeDependencies
+    from utils.file_system import fs_util
+
+    old_base_path = fs_util.base_path
+    fs_util.base_path = str(tmp_path)
+    try:
+        (tmp_path / "credentials" / "master_account").mkdir(parents=True)
+
+        service = AccountsService.__new__(AccountsService)
+        service.accounts_state = {}
+        service._connector_service = MagicMock()
+        service._connector_service.get_all_trading_connectors.return_value = {}
+        service._update_gateway_balances = AsyncMock()
+        service._connector_balance_refresh_errors = {}
+        service._cowswap_runtime_dependencies = CowSwapRuntimeDependencies(
+            signer_provider=object(),
+            evm_reader=object(),
+            token_map={"WETH-USDC": object()},
+            order_store=object(),
+            owner_address="0x00000000000000000000000000000000000000aa",
+        )
+
+        await service.update_account_state(
+            skip_gateway=True,
+            account_names=["master_account"],
+            connector_names=[COWSWAP_CONNECTOR_NAME],
+        )
+
+        assert service.get_accounts_state() == {"master_account": {"cowswap": []}}
+    finally:
+        fs_util.base_path = old_base_path

@@ -1162,7 +1162,14 @@ class AccountsService:
             return
 
         for account_name in accounts:
-            if self._has_cowswap_credentials(account_name):
+            runtime_ready = (
+                cowswap_order_submission_blocker(
+                    COWSWAP_CONNECTOR_NAME,
+                    runtime_dependencies=self._cowswap_runtime_dependencies,
+                )
+                is None
+            )
+            if runtime_ready or self._has_cowswap_credentials(account_name):
                 self._mark_cowswap_account_configured(account_name)
 
     def _mark_cowswap_account_configured(self, account_name: str):
