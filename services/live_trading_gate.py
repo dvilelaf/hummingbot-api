@@ -27,6 +27,16 @@ def assert_live_order_submission_allowed(
     """Fail closed before direct live connector order submission."""
     if _is_safe_connector(connector_name):
         return
+    if _is_marlin_runtime_profile():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "direct live order submission disabled in Marlin runtime; "
+                "submit mainnet Marlin orders through /provider/intents with "
+                "MARLIN_PROVIDER_INTENT_TOKEN "
+                f"(source={source}, account={account_name}, connector={connector_name})"
+            ),
+        )
     if _env_bool(LIVE_ORDER_SUBMISSION_ENV):
         return
     raise HTTPException(
@@ -49,6 +59,16 @@ def assert_live_order_cancel_allowed(
     """Fail closed before direct live connector order cancellation."""
     if _is_safe_connector(connector_name):
         return
+    if _is_marlin_runtime_profile():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "direct live order cancellation disabled in Marlin runtime; "
+                "submit mainnet Marlin cancellations through /provider/intents with "
+                "MARLIN_PROVIDER_INTENT_TOKEN "
+                f"(source={source}, account={account_name}, connector={connector_name})"
+            ),
+        )
     if _env_bool(LIVE_ORDER_CANCEL_ENV):
         return
     raise HTTPException(
@@ -139,6 +159,10 @@ def _is_safe_gateway_network(network: str) -> bool:
 
 def _env_bool(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_marlin_runtime_profile() -> bool:
+    return os.getenv(MARLIN_RUNTIME_PROFILE_ENV, "").strip().lower() == "marlin"
 
 
 def _assert_bridge_provider_allowed(provider: Any, *, source: str) -> None:

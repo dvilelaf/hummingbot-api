@@ -67,6 +67,7 @@ def test_live_order_gate_blocks_non_paper_connector_by_default(monkeypatch):
 
 def test_live_order_gate_allows_non_paper_connector_when_explicitly_enabled(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.delenv("MARLIN_RUNTIME_PROFILE", raising=False)
     gate = _live_gate_module()
 
     gate.assert_live_order_submission_allowed(
@@ -78,6 +79,7 @@ def test_live_order_gate_allows_non_paper_connector_when_explicitly_enabled(monk
 
 def test_live_order_gate_ignores_stale_authorization_when_env_enabled(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.delenv("MARLIN_RUNTIME_PROFILE", raising=False)
     gate = _live_gate_module()
 
     gate.assert_live_order_submission_allowed(
@@ -88,8 +90,28 @@ def test_live_order_gate_ignores_stale_authorization_when_env_enabled(monkeypatc
     )
 
 
+def test_marlin_runtime_blocks_direct_live_order_even_when_env_enabled(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+    gate = _live_gate_module()
+
+    with pytest.raises(HTTPException) as exc_info:
+        gate.assert_live_order_submission_allowed(
+            account_name="master_account",
+            connector_name="binance",
+            source="test",
+        )
+
+    assert exc_info.value.status_code == 503
+    assert "direct live order submission disabled in Marlin runtime" in str(
+        exc_info.value.detail,
+    )
+    assert "/provider/intents" in str(exc_info.value.detail)
+
+
 def test_live_order_cancel_gate_uses_separate_action_and_flag(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED", "true")
+    monkeypatch.delenv("MARLIN_RUNTIME_PROFILE", raising=False)
     gate = _live_gate_module()
 
     gate.assert_live_order_cancel_allowed(
@@ -101,6 +123,7 @@ def test_live_order_cancel_gate_uses_separate_action_and_flag(monkeypatch):
 
 def test_live_order_cancel_gate_ignores_submit_authorization(monkeypatch):
     monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED", "true")
+    monkeypatch.delenv("MARLIN_RUNTIME_PROFILE", raising=False)
     gate = _live_gate_module()
 
     gate.assert_live_order_cancel_allowed(
@@ -127,6 +150,25 @@ def test_live_order_cancel_gate_blocks_non_paper_connector_by_default(monkeypatc
         assert "TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED" in str(exc.detail)
     else:
         raise AssertionError("expected HTTPException")
+
+
+def test_marlin_runtime_blocks_direct_live_order_cancel_even_when_env_enabled(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+    gate = _live_gate_module()
+
+    with pytest.raises(HTTPException) as exc_info:
+        gate.assert_live_order_cancel_allowed(
+            account_name="master_account",
+            connector_name="binance",
+            source="test",
+        )
+
+    assert exc_info.value.status_code == 503
+    assert "direct live order cancellation disabled in Marlin runtime" in str(
+        exc_info.value.detail,
+    )
+    assert "/provider/intents" in str(exc_info.value.detail)
 
 
 def test_gateway_mutation_gate_allows_test_networks_by_default(monkeypatch):
