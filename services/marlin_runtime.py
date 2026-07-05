@@ -74,7 +74,9 @@ GATEWAY_WALLET_POLICIES = {
     ("solana", "devnet"): ("m/44'/501'/1'/0'", "solana:devnet:solana_gateway", Bip44Coins.SOLANA),
 }
 GATEWAY_WALLET_ALIASES = {
+    ("ethereum", "base"): ("base", "mainnet"),
     ("ethereum", "ethereum-base"): ("base", "mainnet"),
+    ("ethereum", "base-sepolia"): ("base", "sepolia"),
     ("ethereum", "ethereum-base-sepolia"): ("base", "sepolia"),
     ("ethereum", "arbitrum-mainnet"): ("arbitrum", "mainnet"),
     ("ethereum", "arbitrum-sepolia"): ("arbitrum", "sepolia"),
