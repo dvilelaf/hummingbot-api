@@ -45,6 +45,7 @@ GATEWAY_PRICE_CONNECTORS = {
     "ethereum-base": "aerodrome",
     "solana-mainnet-beta": "jupiter",
 }
+GATEWAY_PRICE_FETCH_TIMEOUT_SECONDS = 5
 COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}
 SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_perpetual_testnet", "hyperliquid_testnet"}
 HYPERLIQUID_TESTNET_INFO_URL = "https://api.hyperliquid-testnet.xyz/info"
@@ -2634,12 +2635,23 @@ class AccountsService:
             # Fetch prices for Gateway tokens
             if unique_tokens:
                 try:
-                    fetched_prices = await self._fetch_gateway_prices_immediate(
-                        chain, network, unique_tokens
+                    fetched_prices = await asyncio.wait_for(
+                        self._fetch_gateway_prices_immediate(
+                            chain, network, unique_tokens
+                        ),
+                        timeout=GATEWAY_PRICE_FETCH_TIMEOUT_SECONDS,
                     )
                     for token, price in fetched_prices.items():
                         if price > 0:
                             all_prices[token] = price
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timed out fetching Gateway prices for %s/%s tokens %s; "
+                        "returning fresh balances without full valuation",
+                        chain,
+                        network,
+                        unique_tokens,
+                    )
                 except Exception as e:
                     logger.warning(f"Error fetching gateway prices: {e}")
 
