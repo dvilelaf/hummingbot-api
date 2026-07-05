@@ -104,7 +104,10 @@ async def provider_snapshot(
             issues.append(f"portfolio refresh unavailable: {_redact_secret_text(exc)}")
         xrpl_refresh_error = _connector_balance_refresh_error(accounts_service, connector_name)
         if connector_name == "xrpl" and _xrpl_account_not_found(xrpl_refresh_error):
-            issues.append("account not activated: fund derived XRPL mainnet account reserve")
+            _append_issue_once(
+                issues,
+                "account not activated: fund derived XRPL mainnet account reserve",
+            )
 
     try:
         portfolio_state = accounts_service.get_accounts_state()
@@ -127,6 +130,11 @@ async def provider_snapshot(
             portfolio = {body.account_name: {}}
     except Exception as exc:
         issues.append(f"portfolio unavailable: {_redact_secret_text(exc)}")
+    if connector_name == "xrpl" and _xrpl_portfolio_unfunded(portfolio, body.account_name):
+        _append_issue_once(
+            issues,
+            "account not activated: fund derived XRPL mainnet account reserve",
+        )
 
     suppress_derived_order_issues = cow_runtime_blocker is not None
     if (
@@ -447,9 +455,9 @@ def _cowswap_provider_runtime_issue(blocker: str) -> str:
     if "raw private" in lowered:
         return "provider not ready: CowSwap metadata includes unsafe signing fields"
     return (
-        "provider not ready: CowSwap live order runtime disabled; configure "
-        "Gateway EIP-712 signer, CoW order store, EVM balance and allowance "
-        "reader, asset map, and API lifecycle"
+        "provider runtime disabled: CowSwap live order runtime requires "
+        "Marlin-scoped EIP-712 signer, CoW order store, EVM balance and "
+        "allowance reader, asset map, and API lifecycle"
     )
 
 
@@ -461,11 +469,26 @@ def _connector_balance_refresh_error(accounts_service: AccountsService, connecto
     return str(error) if error else None
 
 
+def _append_issue_once(issues: list[str], issue: str) -> None:
+    if issue not in issues:
+        issues.append(issue)
+
+
 def _xrpl_account_not_found(error: str | None) -> bool:
     if not error:
         return False
     lowered = error.lower()
     return "actnotfound" in lowered or "accountnotfound" in lowered or "account not found" in lowered
+
+
+def _xrpl_portfolio_unfunded(portfolio: dict[str, Any] | None, account_name: str) -> bool:
+    if not isinstance(portfolio, dict):
+        return False
+    account = portfolio.get(account_name)
+    if not isinstance(account, dict) or "xrpl" not in account:
+        return False
+    balances = account.get("xrpl")
+    return isinstance(balances, list) and len(balances) == 0
 
 
 async def _ensure_marlin_wallet_default(

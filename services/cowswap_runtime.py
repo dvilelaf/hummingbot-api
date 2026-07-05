@@ -458,6 +458,8 @@ def _runtime_dependency_blockers(
         return (UNWIRED_RUNTIME_BLOCKER,)
 
     blockers: list[str] = []
+    if os.environ.get("MARLIN_RUNTIME_PROFILE", "").strip().lower() == "marlin":
+        blockers.append("CowSwap live order runtime requires a Marlin-scoped EIP-712 signer")
     if dependencies.signer_provider is None:
         blockers.append("secure EIP-712 signer is missing")
     if dependencies.evm_reader is None:

@@ -312,9 +312,9 @@ def test_cowswap_provider_snapshot_reports_runtime_blocker_without_derived_noise
     assert result.order_types == []
     assert result.provider_actions == []
     assert result.operator_issues == [
-        "provider not ready: CowSwap live order runtime disabled; configure "
-        "Gateway EIP-712 signer, CoW order store, EVM balance and allowance "
-        "reader, asset map, and API lifecycle"
+        "provider runtime disabled: CowSwap live order runtime requires "
+        "Marlin-scoped EIP-712 signer, CoW order store, EVM balance and "
+        "allowance reader, asset map, and API lifecycle"
     ]
 
 
@@ -349,6 +349,32 @@ def test_xrpl_provider_snapshot_reports_account_activation_blocker():
     service = FakeAccountsService()
     service.accounts_state["master_account"]["xrpl"] = []
     service.balance_refresh_errors["xrpl"] = "actNotFound: Account not found."
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="xrpl",
+                trading_pair="XRP-USD",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.operator_issues == [
+        "account not activated: fund derived XRPL mainnet account reserve"
+    ]
+
+
+def test_xrpl_provider_snapshot_reports_empty_portfolio_as_activation_blocker():
+    provider_boundary = _provider_boundary_module()
+    provider_boundary._provider_available = _async_return(True)  # noqa: SLF001
+    provider_boundary._provider_capabilities = _async_return((["MARKET"], ["order", "cancel"]))  # noqa: SLF001
+    provider_boundary._provider_trading_rule = _async_return({"supports_market_orders": True})  # noqa: SLF001
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["xrpl"] = []
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
 
     result = asyncio.run(

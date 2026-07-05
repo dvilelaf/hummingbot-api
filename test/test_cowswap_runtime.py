@@ -145,6 +145,32 @@ def test_cowswap_runtime_status_can_report_ready_with_explicit_dependencies():
     assert status.blockers == ()
 
 
+def test_cowswap_runtime_stays_blocked_for_marlin_profile(monkeypatch):
+    monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+    metadata = {
+        "connector": COWSWAP_CONNECTOR_NAME,
+        "config_map": {"uses_raw_private_key": False},
+        "order_types": ["MARKET"],
+    }
+    dependencies = CowSwapRuntimeDependencies(
+        signer_provider=object(),
+        evm_reader=object(),
+        token_map={"WETH-USDC": object()},
+        order_store=object(),
+        owner_address="0x00000000000000000000000000000000000000aa",
+    )
+
+    status = get_cowswap_runtime_status(
+        import_module=metadata_importer(metadata),
+        runtime_dependencies=dependencies,
+    )
+
+    assert status.runtime_available is False
+    assert status.blockers == (
+        "CowSwap live order runtime requires a Marlin-scoped EIP-712 signer",
+    )
+
+
 def test_cowswap_order_blocker_clears_only_with_explicit_runtime_dependencies():
     metadata = {
         "connector": COWSWAP_CONNECTOR_NAME,
