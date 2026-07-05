@@ -349,8 +349,8 @@ async def _ensure_marlin_wallet_default(
         wallet_ref=wallet_ref,
     )
     result = await accounts_service.gateway_client.set_marlin_default_wallet(
-        chain=identity_chain,
-        network=identity_network,
+        chain=chain,
+        network=network,
         address=address,
         wallet_ref=wallet_ref,
     )
