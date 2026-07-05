@@ -2301,6 +2301,16 @@ class AccountsService:
                 logger.debug("Gateway service is not available, skipping wallet balance update")
                 return
 
+            if "master_account" not in self.accounts_state:
+                self.accounts_state["master_account"] = {}
+
+            if chain_networks:
+                await self._update_filtered_gateway_balances(
+                    chain_networks=chain_networks,
+                    tokens_by_chain_network=tokens_by_chain_network,
+                )
+                return
+
             # Get all available chains
             chains_result = await self.gateway_client.get_chains()
             if not chains_result or "chains" not in chains_result:
@@ -2312,13 +2322,6 @@ class AccountsService:
             # Ensure master_account exists in accounts_state
             if "master_account" not in self.accounts_state:
                 self.accounts_state["master_account"] = {}
-
-            if chain_networks:
-                await self._update_filtered_gateway_balances(
-                    chain_networks=chain_networks,
-                    tokens_by_chain_network=tokens_by_chain_network,
-                )
-                return
 
             # Collect all balance query tasks for parallel execution
             balance_tasks = []
