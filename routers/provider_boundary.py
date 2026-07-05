@@ -339,6 +339,8 @@ async def _provider_available(accounts_service: AccountsService, connector_name:
     connectors = set(AllConnectorSettings.get_connector_settings().keys())
     if connector_name in connectors or connector_name == COWSWAP_CONNECTOR_NAME:
         return True
+    if connector_name in GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS:
+        return True
     return any(_gateway_connector_name(item) == connector_name for item in await _gateway_connector_configs(accounts_service))
 
 
@@ -350,6 +352,8 @@ async def _provider_capabilities(
     if connector_name == COWSWAP_CONNECTOR_NAME:
         blocker = cowswap_order_submission_blocker(connector_name)
         return ([] if blocker else list(cowswap_supported_order_types() or ())), []
+    if connector_name in GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS:
+        return [], ["swap"]
     if await _gateway_swap_connector(accounts_service, connector_name) is True:
         return [], ["swap"]
     try:
@@ -465,6 +469,8 @@ async def _provider_trading_rule(
     connector_name: str,
     trading_pair: str,
 ) -> dict[str, Any] | None:
+    if connector_name in GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS:
+        return None
     if await _gateway_swap_connector(accounts_service, connector_name) is True:
         return None
     if connector_name == COWSWAP_CONNECTOR_NAME:
