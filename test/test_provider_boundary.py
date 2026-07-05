@@ -150,6 +150,13 @@ def _authorized_request():
     )
 
 
+def _async_return(value):
+    async def _inner(*_args, **_kwargs):
+        return value
+
+    return _inner
+
+
 class FakeGatewayClient:
     async def ping(self):
         return True
@@ -182,6 +189,7 @@ class FakeAccountsService:
     def __init__(self):
         self.gateway_client = FakeGatewayClient()
         self.update_calls = []
+        self.balance_refresh_errors = {}
         self.accounts_state = {
             "master_account": {
                 "jupiter": [{"token": "SOL", "units": "0"}],
@@ -204,6 +212,9 @@ class FakeAccountsService:
 
     def get_accounts_state(self):
         return self.accounts_state
+
+    def connector_balance_refresh_error(self, connector_name):
+        return self.balance_refresh_errors.get(connector_name)
 
 
 def test_swap_provider_snapshot_uses_gateway_chain_network_portfolio():
@@ -328,6 +339,33 @@ def test_cowswap_provider_snapshot_exposes_order_actions_when_runtime_ready():
     assert result.order_types == ["MARKET"]
     assert result.provider_actions == ["order", "cancel"]
     assert "provider actions missing: cowswap" not in result.operator_issues
+
+
+def test_xrpl_provider_snapshot_reports_account_activation_blocker():
+    provider_boundary = _provider_boundary_module()
+    provider_boundary._provider_available = _async_return(True)  # noqa: SLF001
+    provider_boundary._provider_capabilities = _async_return((["MARKET"], ["order", "cancel"]))  # noqa: SLF001
+    provider_boundary._provider_trading_rule = _async_return({"supports_market_orders": True})  # noqa: SLF001
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["xrpl"] = []
+    service.balance_refresh_errors["xrpl"] = "actNotFound: Account not found."
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="xrpl",
+                trading_pair="XRP-USD",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.operator_issues == [
+        "account not activated: fund derived XRPL mainnet account reserve"
+    ]
 
 
 def test_swap_provider_intent_blocks_mainnet_without_internal_token(monkeypatch):

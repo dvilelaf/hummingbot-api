@@ -607,6 +607,7 @@ class AccountsService:
         self._trading_interfaces: Dict[str, AccountTradingInterface] = {}
         self._cowswap_runtime = None
         self._cowswap_runtime_dependencies: CowSwapRuntimeDependencies | None = None
+        self._connector_balance_refresh_errors: Dict[str, str] = {}
 
     def configure_cowswap_runtime(
         self,
@@ -930,6 +931,7 @@ class AccountsService:
                 if connector_names and connector_name not in connector_names:
                     continue
 
+                self._connector_balance_refresh_errors.pop(connector_name, None)
                 tasks.append(self._get_connector_tokens_info(connector, connector_name))
                 task_meta.append((account_name, connector_name))
 
@@ -981,6 +983,7 @@ class AccountsService:
                 await connector._update_balances()
             except Exception as e:
                 logger.warning(f"Failed to refresh balances for {connector_name}, using cached data: {e}")
+                self._connector_balance_refresh_errors[connector_name] = str(e)
 
         balances = [{"token": key, "units": value} for key, value in connector.get_all_balances().items() if
                     value != Decimal("0") and key not in settings.banned_tokens]
@@ -1029,6 +1032,10 @@ class AccountsService:
                 tokens_info[info_idx]["value"] = float(price * Decimal(str(tokens_info[info_idx]["units"])))
 
         return tokens_info
+
+    def connector_balance_refresh_error(self, connector_name: str) -> str | None:
+        """Return the latest balance refresh error for a connector, if any."""
+        return self._connector_balance_refresh_errors.get(connector_name)
     
     async def _safe_get_last_traded_prices(self, connector, trading_pairs, timeout=10):
         """Safely get last traded prices with timeout and error handling.

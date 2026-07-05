@@ -102,6 +102,9 @@ async def provider_snapshot(
             )
         except Exception as exc:
             issues.append(f"portfolio refresh unavailable: {_redact_secret_text(exc)}")
+        xrpl_refresh_error = _connector_balance_refresh_error(accounts_service, connector_name)
+        if connector_name == "xrpl" and _xrpl_account_not_found(xrpl_refresh_error):
+            issues.append("account not activated: fund derived XRPL mainnet account reserve")
 
     try:
         portfolio_state = accounts_service.get_accounts_state()
@@ -448,6 +451,21 @@ def _cowswap_provider_runtime_issue(blocker: str) -> str:
         "Gateway EIP-712 signer, CoW order store, EVM balance and allowance "
         "reader, asset map, and API lifecycle"
     )
+
+
+def _connector_balance_refresh_error(accounts_service: AccountsService, connector_name: str) -> str | None:
+    error_getter = getattr(accounts_service, "connector_balance_refresh_error", None)
+    if not callable(error_getter):
+        return None
+    error = error_getter(connector_name)
+    return str(error) if error else None
+
+
+def _xrpl_account_not_found(error: str | None) -> bool:
+    if not error:
+        return False
+    lowered = error.lower()
+    return "actnotfound" in lowered or "accountnotfound" in lowered or "account not found" in lowered
 
 
 async def _ensure_marlin_wallet_default(
