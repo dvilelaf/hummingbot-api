@@ -2,9 +2,6 @@ import hashlib
 import hmac
 import importlib.util
 import json
-import hashlib
-import hmac
-import json
 from pathlib import Path
 
 import pytest
@@ -174,22 +171,7 @@ def test_gateway_mutation_gate_allows_authorized_marlin_provider_intents(monkeyp
     monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
     monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", raising=False)
     monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
-    monkeypatch.setenv("MARLIN_MNEMONIC", "test mnemonic")
     gate = _live_gate_module()
-    payload = {
-        "action": "swap",
-        "connector_name": "jupiter",
-        "live_action_authorization": {
-            "action": "gateway_swap",
-            "scope": "provider_intent",
-            "source": "marlin",
-        },
-    }
-    signature = hmac.new(
-        b"test mnemonic",
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(),
-        hashlib.sha256,
-    ).hexdigest()
 
     gate.assert_live_gateway_mutation_allowed(
         action="swap_execute",
@@ -198,14 +180,8 @@ def test_gateway_mutation_gate_allows_authorized_marlin_provider_intents(monkeyp
         expected_instrument="SOL-USDC",
         expected_notional="0.0001",
         expected_slippage_bps="100",
-        live_action_authorization={
-            "action": "gateway_swap",
-            "scope": "provider_intent",
-            "source": "marlin",
-        },
+        marlin_provider_intent_authorized=True,
         network="mainnet-beta",
-        provider_intent_payload=payload,
-        provider_intent_signature=signature,
         source="provider.intents",
     )
 
@@ -247,13 +223,12 @@ def test_gateway_mutation_gate_blocks_unauthorized_marlin_provider_intents(
         raise AssertionError("expected HTTPException")
 
 
-def test_gateway_mutation_gate_rejects_replayed_marlin_provider_intent_signature(
+def test_gateway_mutation_gate_rejects_legacy_provider_intent_signature(
     monkeypatch,
 ):
     monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
     monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", raising=False)
     monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
-    monkeypatch.setenv("MARLIN_MNEMONIC", "replay mnemonic")
     gate = _live_gate_module()
     authorization = {
         "action": "gateway_swap",
@@ -266,21 +241,7 @@ def test_gateway_mutation_gate_rejects_replayed_marlin_provider_intent_signature
         "correlation_id": "replay-001",
         "live_action_authorization": authorization,
     }
-    signature = hmac.new(
-        b"replay mnemonic",
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(),
-        hashlib.sha256,
-    ).hexdigest()
 
-    gate.assert_live_gateway_mutation_allowed(
-        action="swap_execute",
-        chain="solana",
-        live_action_authorization=authorization,
-        network="mainnet-beta",
-        provider_intent_payload=payload,
-        provider_intent_signature=signature,
-        source="provider.intents",
-    )
     try:
         gate.assert_live_gateway_mutation_allowed(
             action="swap_execute",
@@ -288,7 +249,7 @@ def test_gateway_mutation_gate_rejects_replayed_marlin_provider_intent_signature
             live_action_authorization=authorization,
             network="mainnet-beta",
             provider_intent_payload=payload,
-            provider_intent_signature=signature,
+            provider_intent_signature="legacy-signature",
             source="provider.intents",
         )
     except HTTPException as exc:

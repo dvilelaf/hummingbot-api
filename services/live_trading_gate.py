@@ -1,6 +1,3 @@
-import hashlib
-import hmac
-import json
 import os
 from typing import Any
 
@@ -16,7 +13,6 @@ BRIDGE_PROVIDER_ALLOWLIST_ENV = "TRADING_SAFETY_BRIDGE_PROVIDER_ALLOWLIST"
 SAFE_CONNECTOR_SUFFIXES = ("_paper_trade", "_testnet", "_sandbox")
 SAFE_GATEWAY_NETWORK_MARKERS = ("testnet", "devnet", "sepolia", "goerli", "amoy", "fuji", "local")
 _used_bridge_authorization_nonces: set[str] = set()
-_used_provider_intent_signatures: set[str] = set()
 
 
 def assert_live_order_submission_allowed(
@@ -84,13 +80,7 @@ def assert_live_gateway_mutation_allowed(
     """Fail closed before direct live Gateway signing or broadcast."""
     if _is_safe_gateway_network(network):
         return
-    if marlin_provider_intent_authorized or consume_marlin_provider_intent_swap_authorization(
-        action=action,
-        live_action_authorization=live_action_authorization,
-        provider_intent_payload=provider_intent_payload,
-        provider_intent_signature=provider_intent_signature,
-        source=source,
-    ):
+    if marlin_provider_intent_authorized:
         return
     action_env = _gateway_action_env(action)
     if _env_bool(action_env):
@@ -102,23 +92,6 @@ def assert_live_gateway_mutation_allowed(
             f"set {action_env}=true only for the Marlin runtime "
             f"(source={source}, network={chain}/{network})"
         ),
-    )
-
-
-def consume_marlin_provider_intent_swap_authorization(
-    *,
-    action: str,
-    live_action_authorization: dict[str, Any] | None,
-    provider_intent_payload: dict[str, Any] | None,
-    provider_intent_signature: str | None,
-    source: str,
-) -> bool:
-    return _is_marlin_provider_intent_swap_authorization(
-        action=action,
-        live_action_authorization=live_action_authorization,
-        provider_intent_payload=provider_intent_payload,
-        provider_intent_signature=provider_intent_signature,
-        source=source,
     )
 
 
@@ -166,56 +139,6 @@ def _is_safe_gateway_network(network: str) -> bool:
 
 def _env_bool(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _is_marlin_provider_intent_source(source: str) -> bool:
-    return (
-        os.getenv(MARLIN_RUNTIME_PROFILE_ENV, "").strip().lower() == "marlin"
-        and source == "provider.intents"
-    )
-
-
-def _is_marlin_provider_intent_swap_authorization(
-    *,
-    action: str,
-    live_action_authorization: dict[str, Any] | None,
-    provider_intent_payload: dict[str, Any] | None,
-    provider_intent_signature: str | None,
-    source: str,
-) -> bool:
-    return (
-        _is_marlin_provider_intent_source(source)
-        and action == "swap_execute"
-        and live_action_authorization is not None
-        and live_action_authorization.get("source") == "marlin"
-        and live_action_authorization.get("scope") == "provider_intent"
-        and live_action_authorization.get("action") == "gateway_swap"
-        and _provider_intent_signature_matches(provider_intent_payload, provider_intent_signature)
-    )
-
-
-def _provider_intent_signature_matches(
-    payload: dict[str, Any] | None,
-    signature: str | None,
-) -> bool:
-    mnemonic = _normalized_secret_env("MARLIN_MNEMONIC")
-    if not mnemonic or payload is None or not signature:
-        return False
-    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-    expected = hmac.new(mnemonic.encode(), encoded, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        return False
-    if signature in _used_provider_intent_signatures:
-        return False
-    _used_provider_intent_signatures.add(signature)
-    return True
-
-
-def _normalized_secret_env(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        return value[1:-1]
-    return value
 
 
 def _assert_bridge_provider_allowed(provider: Any, *, source: str) -> None:

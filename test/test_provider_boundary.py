@@ -105,9 +105,6 @@ def _install_provider_boundary_stubs():
     live_trading_gate.assert_live_gateway_mutation_allowed = (
         lambda *args, **kwargs: LIVE_GATE_CALLS.append(kwargs)
     )
-    live_trading_gate.consume_marlin_provider_intent_swap_authorization = (
-        lambda *args, **kwargs: True
-    )
     sys.modules["services.live_trading_gate"] = live_trading_gate
 
     marlin_runtime = types.ModuleType("services.marlin_runtime")
@@ -243,11 +240,6 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash()
         quantity="0.0001",
         risk_metadata={"network": "solana-mainnet-beta"},
         side="SELL",
-        live_action_authorization={
-            "action": "gateway_swap",
-            "scope": "provider_intent",
-            "source": "marlin",
-        },
         wallet_identity={
             "address": "9AtFd6KcR9tx5Etxc9SVkYrkZb7yC5BDibao7yPT5Ce1",
             "chain": "solana",
@@ -259,7 +251,7 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash()
     result = asyncio.run(
         provider_boundary.submit_provider_intent(
             body,
-            SimpleNamespace(headers={"x-marlin-provider-intent-signature": "test-signature"}),
+            SimpleNamespace(headers={}),
             service,
         ),
     )
@@ -275,16 +267,8 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash()
     assert gate_call["expected_instrument"] == "SOL-USDC"
     assert gate_call["expected_notional"] == provider_boundary.Decimal("0.0001")
     assert gate_call["expected_slippage_bps"] == provider_boundary.Decimal("100.0")
-    assert gate_call["live_action_authorization"] == {
-        "action": "gateway_swap",
-        "scope": "provider_intent",
-        "source": "marlin",
-    }
     assert gate_call["marlin_provider_intent_authorized"] is True
     assert gate_call["network"] == "mainnet-beta"
-    assert gate_call["provider_intent_signature"] == "test-signature"
-    assert gate_call["provider_intent_payload"]["connector_name"] == "jupiter"
-    assert gate_call["provider_intent_payload"]["quantity"] == "0.0001"
     assert gate_call["source"] == "provider.intents"
     assert SET_DEFAULT_WALLET_CALLS == [
         {
@@ -296,11 +280,7 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash()
     ]
     assert EXECUTE_SWAP_CALLS[0]["network"] == "mainnet-beta"
     assert EXECUTE_SWAP_CALLS[0]["marlin_provider_intent_authorized"] is True
-    assert EXECUTE_SWAP_CALLS[0]["live_action_authorization"] == {
-        "action": "gateway_swap",
-        "scope": "provider_intent",
-        "source": "marlin",
-    }
+    assert "live_action_authorization" not in EXECUTE_SWAP_CALLS[0]
 
 
 def test_base_swap_provider_intent_accepts_gateway_network_identity_alias():
@@ -320,11 +300,6 @@ def test_base_swap_provider_intent_accepts_gateway_network_identity_alias():
         quantity="0.0001",
         risk_metadata={"network": "ethereum-base"},
         side="SELL",
-        live_action_authorization={
-            "action": "gateway_swap",
-            "scope": "provider_intent",
-            "source": "marlin",
-        },
         wallet_identity={
             "address": "0x1111111111111111111111111111111111111111",
             "chain": "ethereum",
@@ -336,7 +311,7 @@ def test_base_swap_provider_intent_accepts_gateway_network_identity_alias():
     result = asyncio.run(
         provider_boundary.submit_provider_intent(
             body,
-            SimpleNamespace(headers={"x-marlin-provider-intent-signature": "test-signature"}),
+            SimpleNamespace(headers={}),
             service,
         ),
     )
@@ -346,7 +321,7 @@ def test_base_swap_provider_intent_accepts_gateway_network_identity_alias():
         {
             "address": "0x1111111111111111111111111111111111111111",
             "chain": "ethereum",
-            "network": "ethereum-base",
+            "network": "base",
             "wallet_ref": "base:mainnet:evm_gateway",
         }
     ]

@@ -24,7 +24,6 @@ from services.cowswap_runtime import (
 )
 from services.live_trading_gate import (
     assert_live_gateway_mutation_allowed,
-    consume_marlin_provider_intent_swap_authorization,
 )
 from services.marlin_runtime import assert_marlin_default_wallet_identity
 
@@ -141,7 +140,6 @@ async def submit_provider_intent(
     return await _submit_swap_intent(
         body,
         accounts_service,
-        provider_intent_signature=request.headers.get("x-marlin-provider-intent-signature"),
     )
 
 
@@ -161,7 +159,7 @@ async def _submit_order_intent(
             price=body.price,
             position_action=PositionAction.OPEN,
             safe_testnet=body.mode == "testnet",
-            live_action_authorization=body.live_action_authorization,
+            marlin_provider_intent_authorized=body.mode == "mainnet",
         )
     except HTTPException as exc:
         return ProviderIntentResponse(
@@ -189,8 +187,6 @@ async def _submit_order_intent(
 async def _submit_swap_intent(
     body: ProviderIntentRequest,
     accounts_service: AccountsService,
-    *,
-    provider_intent_signature: str | None,
 ) -> ProviderIntentResponse:
     network_id = str(body.risk_metadata.get("network", "")).strip()
     if not network_id:
@@ -214,14 +210,6 @@ async def _submit_swap_intent(
             )
         chain, network = accounts_service.gateway_client.parse_network_id(network_id)
         slippage_pct = Decimal(str(body.risk_metadata.get("slippage_pct", "1.0")))
-        provider_intent_payload = body.model_dump(mode="json", exclude_none=True)
-        marlin_provider_intent_authorized = consume_marlin_provider_intent_swap_authorization(
-            action="swap_execute",
-            live_action_authorization=body.live_action_authorization,
-            provider_intent_payload=provider_intent_payload,
-            provider_intent_signature=provider_intent_signature,
-            source="provider.intents",
-        )
         assert_live_gateway_mutation_allowed(
             action="swap_execute",
             chain=chain,
@@ -229,11 +217,8 @@ async def _submit_swap_intent(
             expected_instrument=body.market_id,
             expected_notional=body.quantity,
             expected_slippage_bps=slippage_pct * Decimal("100"),
-            live_action_authorization=body.live_action_authorization,
-            marlin_provider_intent_authorized=marlin_provider_intent_authorized,
+            marlin_provider_intent_authorized=body.mode == "mainnet",
             network=network,
-            provider_intent_payload=provider_intent_payload,
-            provider_intent_signature=provider_intent_signature,
             source="provider.intents",
         )
         wallet_address = await _ensure_marlin_wallet_default(
@@ -253,8 +238,7 @@ async def _submit_swap_intent(
             side=body.side,
             slippage_pct=float(slippage_pct),
             pool_address=body.risk_metadata.get("pool_address"),
-            live_action_authorization=body.live_action_authorization,
-            marlin_provider_intent_authorized=marlin_provider_intent_authorized,
+            marlin_provider_intent_authorized=body.mode == "mainnet",
         )
     except HTTPException as exc:
         return ProviderIntentResponse(

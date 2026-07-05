@@ -37,7 +37,6 @@ class ProviderIntentRequest(BaseModel):
     price: Optional[Decimal] = None
     correlation_id: Optional[str] = None
     risk_metadata: Dict[str, Any] = Field(default_factory=dict)
-    live_action_authorization: Optional[Dict[str, Any]] = None
     wallet_identity: Optional[Dict[str, Any]] = None
 
 

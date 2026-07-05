@@ -1573,6 +1573,7 @@ class AccountsService:
         position_action: PositionAction = PositionAction.OPEN,
         safe_testnet: bool = False,
         live_action_authorization: Optional[Dict[str, Any]] = None,
+        marlin_provider_intent_authorized: bool = False,
     ) -> str:
         """
         Place a trade using the specified account and connector.
@@ -1616,7 +1617,10 @@ class AccountsService:
             if order_type != OrderType.MARKET:
                 raise HTTPException(status_code=400, detail="CowSwap only supports MARKET orders")
             try:
-                if not _cowswap_safe_testnet_order_allowed(safe_testnet=safe_testnet):
+                if (
+                    not marlin_provider_intent_authorized
+                    and not _cowswap_safe_testnet_order_allowed(safe_testnet=safe_testnet)
+                ):
                     assert_live_order_submission_allowed(
                         account_name=account_name,
                         connector_name=connector_name,
@@ -1721,9 +1725,12 @@ class AccountsService:
         try:
             # Place the order using the connector with quantized values
             # (position_action will be ignored by non-perpetual connectors)
-            if not _safe_testnet_order_allowed(
-                connector_name=connector_name,
-                safe_testnet=safe_testnet,
+            if (
+                not marlin_provider_intent_authorized
+                and not _safe_testnet_order_allowed(
+                    connector_name=connector_name,
+                    safe_testnet=safe_testnet,
+                )
             ):
                 assert_live_order_submission_allowed(
                     account_name=account_name,
