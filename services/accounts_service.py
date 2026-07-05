@@ -894,7 +894,8 @@ class AccountsService:
         self,
         skip_gateway: bool = False,
         account_names: Optional[List[str]] = None,
-        connector_names: Optional[List[str]] = None
+        connector_names: Optional[List[str]] = None,
+        tokens_by_chain_network: Optional[Dict[str, List[str]]] = None,
     ):
         """Update account state for filtered connectors and optionally Gateway wallets.
 
@@ -903,6 +904,7 @@ class AccountsService:
             account_names: If provided, only update these accounts. If None, update all accounts.
             connector_names: If provided, only update these connectors. If None, update all connectors.
                             For Gateway, this filters by chain-network (e.g., 'solana-mainnet-beta').
+            tokens_by_chain_network: Optional Gateway token filters keyed by chain-network.
         """
         all_connectors = self._connector_service.get_all_trading_connectors() if self._connector_service else {}
 
@@ -939,7 +941,10 @@ class AccountsService:
             # Pass connector_names filter to gateway for chain-network filtering
             results = await asyncio.gather(
                 *tasks,
-                self._update_gateway_balances(chain_networks=gateway_filters),
+                self._update_gateway_balances(
+                    chain_networks=gateway_filters,
+                    tokens_by_chain_network=tokens_by_chain_network,
+                ),
                 return_exceptions=True
             )
             # Remove gateway result from processing (it handles its own state internally)
@@ -2269,7 +2274,11 @@ class AccountsService:
     # Gateway Wallet Management Methods
     # ============================================
 
-    async def _update_gateway_balances(self, chain_networks: Optional[List[str]] = None):
+    async def _update_gateway_balances(
+        self,
+        chain_networks: Optional[List[str]] = None,
+        tokens_by_chain_network: Optional[Dict[str, List[str]]] = None,
+    ):
         """Update Gateway wallet balances in master_account state.
 
         Only queries the defaultWallet on each network in defaultNetworks for each chain.
@@ -2279,6 +2288,7 @@ class AccountsService:
             chain_networks: If provided, only update these chain-network combinations
                            (e.g., ['solana-mainnet-beta', 'ethereum-mainnet']).
                            If None, update all defaultNetworks for each chain.
+            tokens_by_chain_network: Optional token filters keyed by chain-network.
         """
         try:
             # Check if Gateway is available
@@ -2349,7 +2359,19 @@ class AccountsService:
                     if chain_networks and chain_network_key not in chain_networks:
                         continue
 
-                    balance_tasks.append(self.get_gateway_balances(chain, default_wallet, network=network))
+                    tokens = (
+                        tokens_by_chain_network.get(chain_network_key)
+                        if tokens_by_chain_network
+                        else None
+                    )
+                    balance_tasks.append(
+                        self.get_gateway_balances(
+                            chain,
+                            default_wallet,
+                            network=network,
+                            tokens=tokens,
+                        )
+                    )
                     task_metadata.append((chain, network, default_wallet))
 
             # Build set of active chain-network keys

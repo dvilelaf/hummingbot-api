@@ -179,10 +179,17 @@ class FakeAccountsService:
 
     async def update_account_state(self, **kwargs):
         self.update_calls.append(kwargs)
-        self.accounts_state["master_account"]["solana-mainnet-beta"] = [
-            {"token": "SOL", "units": "0.1"},
-            {"token": "USDC", "units": "5"},
-        ]
+        if kwargs.get("connector_names") == ["ethereum-base"]:
+            self.accounts_state["master_account"]["ethereum-base"] = [
+                {"token": "AERO", "units": "2"},
+                {"token": "USDC", "units": "5"},
+                {"token": "ETH", "units": "0.01"},
+            ]
+        else:
+            self.accounts_state["master_account"]["solana-mainnet-beta"] = [
+                {"token": "SOL", "units": "0.1"},
+                {"token": "USDC", "units": "5"},
+            ]
 
     def get_accounts_state(self):
         return self.accounts_state
@@ -210,6 +217,7 @@ def test_swap_provider_snapshot_uses_gateway_chain_network_portfolio():
             "account_names": ["master_account"],
             "connector_names": ["solana-mainnet-beta"],
             "skip_gateway": False,
+            "tokens_by_chain_network": {"solana-mainnet-beta": ["SOL", "USDC"]},
         }
     ]
     assert result.provider_actions == ["swap"]
@@ -218,6 +226,43 @@ def test_swap_provider_snapshot_uses_gateway_chain_network_portfolio():
             "jupiter": [
                 {"balance_source": "gateway", "token": "SOL", "units": "0.1"},
                 {"balance_source": "gateway", "token": "USDC", "units": "5"},
+            ]
+        }
+    }
+
+
+def test_base_swap_provider_snapshot_scopes_gateway_balance_tokens():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="aerodrome",
+                trading_pair="AERO-USDC",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert service.update_calls == [
+        {
+            "account_names": ["master_account"],
+            "connector_names": ["ethereum-base"],
+            "skip_gateway": False,
+            "tokens_by_chain_network": {"ethereum-base": ["AERO", "USDC", "ETH"]},
+        }
+    ]
+    assert result.provider_actions == ["swap"]
+    assert result.portfolio == {
+        "master_account": {
+            "aerodrome": [
+                {"balance_source": "gateway", "token": "AERO", "units": "2"},
+                {"balance_source": "gateway", "token": "USDC", "units": "5"},
+                {"balance_source": "gateway", "token": "ETH", "units": "0.01"},
             ]
         }
     }

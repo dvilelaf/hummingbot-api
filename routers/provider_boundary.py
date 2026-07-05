@@ -66,15 +66,28 @@ async def provider_snapshot(
 
     if body.refresh_portfolio:
         refresh_connector_names = [connector_name]
-        if "swap" in {action.lower() for action in provider_actions}:
+        action_set = {action.lower() for action in provider_actions}
+        tokens_by_chain_network = None
+        if "swap" in action_set:
+            chain_network_key = GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS.get(
+                connector_name,
+                connector_name,
+            )
             refresh_connector_names = [
-                GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS.get(connector_name, connector_name)
+                chain_network_key
             ]
+            tokens_by_chain_network = {
+                chain_network_key: _gateway_balance_tokens_for_pair(
+                    body.trading_pair,
+                    chain_network_key=chain_network_key,
+                )
+            }
         try:
             await accounts_service.update_account_state(
                 account_names=[body.account_name],
                 connector_names=refresh_connector_names,
-                skip_gateway="swap" not in {action.lower() for action in provider_actions},
+                skip_gateway="swap" not in action_set,
+                tokens_by_chain_network=tokens_by_chain_network,
             )
         except Exception as exc:
             issues.append(f"portfolio refresh unavailable: {_redact_secret_text(exc)}")
@@ -403,6 +416,23 @@ def _gateway_verified_portfolio_rows(value: Any) -> Any:
         else:
             rows.append(item)
     return rows
+
+
+def _gateway_balance_tokens_for_pair(
+    trading_pair: str,
+    *,
+    chain_network_key: str,
+) -> list[str]:
+    tokens = [
+        token.strip().upper()
+        for token in trading_pair.replace("/", "-").split("-")
+        if token.strip()
+    ]
+    if chain_network_key.startswith("ethereum-"):
+        tokens.append("ETH")
+    if chain_network_key.startswith("solana-"):
+        tokens.append("SOL")
+    return list(dict.fromkeys(tokens))
 
 
 def _network_alias(network: str) -> str:
