@@ -283,6 +283,54 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash()
     assert "live_action_authorization" not in EXECUTE_SWAP_CALLS[0]
 
 
+def test_swap_provider_intent_preflight_does_not_execute_swap():
+    LIVE_GATE_CALLS.clear()
+    EXECUTE_SWAP_CALLS.clear()
+    SET_DEFAULT_WALLET_CALLS.clear()
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="swap",
+        connector_name="jupiter",
+        correlation_id="swap-preflight-001",
+        market_id="SOL-USDC",
+        mode="mainnet",
+        preflight_only=True,
+        quantity="0.0001",
+        risk_metadata={"network": "solana-mainnet-beta"},
+        side="SELL",
+        wallet_identity={
+            "address": "9AtFd6KcR9tx5Etxc9SVkYrkZb7yC5BDibao7yPT5Ce1",
+            "chain": "solana",
+            "network": "mainnet-beta",
+            "wallet_ref": "solana:mainnet-beta:solana_gateway",
+        },
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            SimpleNamespace(headers={}),
+            service,
+        ),
+    )
+
+    assert result.status == "accepted"
+    assert result.provider_status == "preflight_accepted"
+    assert len(LIVE_GATE_CALLS) == 1
+    assert SET_DEFAULT_WALLET_CALLS == [
+        {
+            "address": "9AtFd6KcR9tx5Etxc9SVkYrkZb7yC5BDibao7yPT5Ce1",
+            "chain": "solana",
+            "network": "mainnet-beta",
+            "wallet_ref": "solana:mainnet-beta:solana_gateway",
+        }
+    ]
+    assert EXECUTE_SWAP_CALLS == []
+
+
 def test_base_swap_provider_intent_accepts_gateway_network_identity_alias():
     LIVE_GATE_CALLS.clear()
     EXECUTE_SWAP_CALLS.clear()

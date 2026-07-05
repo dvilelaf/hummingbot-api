@@ -148,6 +148,8 @@ async def _submit_order_intent(
     accounts_service: AccountsService,
 ) -> ProviderIntentResponse:
     order_type = body.order_type or "MARKET"
+    if body.preflight_only:
+        return await _preflight_order_intent(body, accounts_service, order_type=order_type)
     try:
         order_id = await accounts_service.place_trade(
             account_name=body.account_name,
@@ -181,6 +183,40 @@ async def _submit_order_intent(
         submitted_quantity=body.quantity,
         submitted_notional=body.quantity * body.price if body.price is not None else None,
         provider_status="submitted",
+    )
+
+
+async def _preflight_order_intent(
+    body: ProviderIntentRequest,
+    accounts_service: AccountsService,
+    *,
+    order_type: str,
+) -> ProviderIntentResponse:
+    try:
+        await accounts_service.update_account_state(
+            account_names=[body.account_name],
+            connector_names=[body.connector_name],
+            skip_gateway=True,
+        )
+        account_state = accounts_service.get_accounts_state().get(body.account_name, {})
+    except Exception as exc:
+        return ProviderIntentResponse(
+            status="rejected",
+            correlation_id=body.correlation_id,
+            provider_error=_redact_secret_text(exc),
+        )
+    if body.connector_name not in account_state:
+        return ProviderIntentResponse(
+            status="rejected",
+            correlation_id=body.correlation_id,
+            provider_error=f"provider account not configured: {body.connector_name}",
+        )
+    return ProviderIntentResponse(
+        status="accepted",
+        correlation_id=body.correlation_id,
+        provider_status=f"preflight_accepted:{order_type}",
+        submitted_quantity=body.quantity,
+        submitted_notional=body.quantity * body.price if body.price is not None else None,
     )
 
 
@@ -227,6 +263,13 @@ async def _submit_swap_intent(
             chain=chain,
             network=network,
         )
+        if body.preflight_only:
+            return ProviderIntentResponse(
+                status="accepted",
+                correlation_id=body.correlation_id,
+                provider_status="preflight_accepted",
+                submitted_quantity=body.quantity,
+            )
         base, quote = body.market_id.split("-", 1)
         result = await accounts_service.gateway_client.execute_swap(
             connector=body.connector_name,
