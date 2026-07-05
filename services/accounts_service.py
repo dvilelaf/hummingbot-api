@@ -31,6 +31,11 @@ from services.live_trading_gate import (
     assert_live_order_cancel_allowed,
     assert_live_order_submission_allowed,
 )
+from services.marlin_runtime import (
+    GATEWAY_WALLET_POLICIES,
+    _canonical_gateway_wallet_context,
+    _derive_marlin_public_address,
+)
 from utils.file_system import fs_util
 
 # Create module-specific logger
@@ -2436,7 +2441,10 @@ class AccountsService:
             chain, _, network = chain_network.partition("-")
             if not chain or not network:
                 continue
-            default_wallet = await self.gateway_client.get_default_wallet_address(chain)
+            default_wallet = self._marlin_gateway_default_wallet_address(
+                chain=chain,
+                network=network,
+            )
             if not default_wallet:
                 logger.debug("Chain '%s' missing defaultWallet, skipping", chain)
                 continue
@@ -2477,6 +2485,20 @@ class AccountsService:
                 self.accounts_state["master_account"][chain_network] = []
             else:
                 self.accounts_state["master_account"][chain_network] = result or []
+
+    @staticmethod
+    def _marlin_gateway_default_wallet_address(*, chain: str, network: str) -> Optional[str]:
+        canonical = _canonical_gateway_wallet_context(chain=chain, network=network)
+        policy = GATEWAY_WALLET_POLICIES.get(canonical)
+        if policy is None:
+            logger.debug("Unsupported Marlin wallet policy for %s/%s", chain, network)
+            return None
+        derivation_path, _wallet_ref, coin = policy
+        try:
+            return _derive_marlin_public_address(derivation_path=derivation_path, coin=coin)
+        except Exception as exc:
+            logger.error("Failed to derive Marlin Gateway wallet for %s/%s: %s", chain, network, exc)
+            return None
 
     async def get_gateway_wallets(self) -> List[Dict]:
         """
