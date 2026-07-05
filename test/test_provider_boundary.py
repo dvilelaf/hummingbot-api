@@ -12,6 +12,7 @@ LIVE_GATE_CALLS = []
 EXECUTE_SWAP_CALLS = []
 SET_DEFAULT_WALLET_CALLS = []
 PROVIDER_INTENT_TOKEN = "test-provider-intent-token"
+COWSWAP_BLOCKER = None
 STUBBED_MODULES = (
     "deps",
     "fastapi",
@@ -32,8 +33,11 @@ STUBBED_MODULES = (
 
 @pytest.fixture(autouse=True)
 def _restore_stubbed_modules():
+    global COWSWAP_BLOCKER
+    COWSWAP_BLOCKER = None
     previous = {name: sys.modules.get(name) for name in STUBBED_MODULES}
     yield
+    COWSWAP_BLOCKER = None
     for name, module in previous.items():
         if module is None:
             sys.modules.pop(name, None)
@@ -98,8 +102,8 @@ def _install_provider_boundary_stubs():
 
     cowswap_runtime = types.ModuleType("services.cowswap_runtime")
     cowswap_runtime.COWSWAP_CONNECTOR_NAME = "cowswap"
-    cowswap_runtime.cowswap_order_submission_blocker = lambda *args, **kwargs: None
-    cowswap_runtime.cowswap_supported_order_types = lambda: ()
+    cowswap_runtime.cowswap_order_submission_blocker = lambda *args, **kwargs: COWSWAP_BLOCKER
+    cowswap_runtime.cowswap_supported_order_types = lambda: ["MARKET"]
     sys.modules["services.cowswap_runtime"] = cowswap_runtime
 
     live_trading_gate = types.ModuleType("services.live_trading_gate")
@@ -273,6 +277,57 @@ def test_base_swap_provider_snapshot_scopes_gateway_balance_tokens():
             ]
         }
     }
+
+
+def test_cowswap_provider_snapshot_reports_runtime_blocker_without_derived_noise():
+    global COWSWAP_BLOCKER
+    COWSWAP_BLOCKER = "CowSwap order submission is disabled: missing runtime wiring"
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                trading_pair="WETH-USDC",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.order_types == []
+    assert result.provider_actions == []
+    assert result.operator_issues == [
+        "provider not ready: CowSwap live order runtime disabled; configure "
+        "Gateway EIP-712 signer, CoW order store, EVM balance and allowance "
+        "reader, asset map, and API lifecycle"
+    ]
+
+
+def test_cowswap_provider_snapshot_exposes_order_actions_when_runtime_ready():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["cowswap"] = []
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                trading_pair="WETH-USDC",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.order_types == ["MARKET"]
+    assert result.provider_actions == ["order", "cancel"]
+    assert "provider actions missing: cowswap" not in result.operator_issues
 
 
 def test_swap_provider_intent_blocks_mainnet_without_internal_token(monkeypatch):

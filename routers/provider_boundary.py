@@ -50,10 +50,16 @@ async def provider_snapshot(
     connector_name = body.connector_name
     metadata_connector = _metadata_connector_name(connector_name)
     available = await _provider_available(accounts_service, metadata_connector)
+    cow_runtime_blocker = (
+        _cowswap_provider_runtime_blocker(accounts_service)
+        if metadata_connector == COWSWAP_CONNECTOR_NAME
+        else None
+    )
     order_types, provider_actions = await _provider_capabilities(
         request,
         accounts_service,
         metadata_connector,
+        runtime_blocker=cow_runtime_blocker,
     )
     trading_rule = await _provider_trading_rule(
         request,
@@ -66,6 +72,8 @@ async def provider_snapshot(
 
     if not available:
         issues.append(f"provider not available: {connector_name}")
+    if cow_runtime_blocker:
+        issues.append(_cowswap_provider_runtime_issue(cow_runtime_blocker))
 
     if body.refresh_portfolio:
         refresh_connector_names = [connector_name]
@@ -117,11 +125,22 @@ async def provider_snapshot(
     except Exception as exc:
         issues.append(f"portfolio unavailable: {_redact_secret_text(exc)}")
 
-    if not order_types and "swap" not in {action.lower() for action in provider_actions}:
+    suppress_derived_order_issues = cow_runtime_blocker is not None
+    if (
+        not suppress_derived_order_issues
+        and not order_types
+        and "swap" not in {action.lower() for action in provider_actions}
+    ):
         issues.append(f"provider actions missing: {connector_name}")
-    if trading_rule is None and "swap" not in {action.lower() for action in provider_actions}:
+    if (
+        not suppress_derived_order_issues
+        and trading_rule is None
+        and "swap" not in {action.lower() for action in provider_actions}
+    ):
         issues.append(f"trading rules missing for {body.trading_pair}")
     if (
+        not suppress_derived_order_issues
+        and
         portfolio is not None
         and connector_name not in portfolio.get(body.account_name, {})
         and "swap" not in {action.lower() for action in provider_actions}
@@ -386,10 +405,15 @@ async def _provider_capabilities(
     request: Request,
     accounts_service: AccountsService,
     connector_name: str,
+    *,
+    runtime_blocker: str | None = None,
 ) -> tuple[list[str], list[str]]:
     if connector_name == COWSWAP_CONNECTOR_NAME:
-        blocker = cowswap_order_submission_blocker(connector_name)
-        return ([] if blocker else list(cowswap_supported_order_types() or ())), []
+        blocker = runtime_blocker
+        if blocker is None:
+            blocker = _cowswap_provider_runtime_blocker(accounts_service)
+        order_types = [] if blocker else list(cowswap_supported_order_types() or ())
+        return order_types, (["order", "cancel"] if order_types else [])
     if connector_name in GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS:
         return [], ["swap"]
     if await _gateway_swap_connector(accounts_service, connector_name) is True:
@@ -404,6 +428,26 @@ async def _provider_capabilities(
         return [], []
     order_types = [order_type.name for order_type in connector_instance.supported_order_types()]
     return order_types, (["order", "cancel"] if order_types else [])
+
+
+def _cowswap_provider_runtime_blocker(accounts_service: AccountsService) -> str | None:
+    return cowswap_order_submission_blocker(
+        COWSWAP_CONNECTOR_NAME,
+        runtime_dependencies=getattr(accounts_service, "_cowswap_runtime_dependencies", None),
+    )
+
+
+def _cowswap_provider_runtime_issue(blocker: str) -> str:
+    lowered = blocker.lower()
+    if "not installed" in lowered:
+        return "provider not ready: CowSwap package is not installed"
+    if "raw private" in lowered:
+        return "provider not ready: CowSwap metadata includes unsafe signing fields"
+    return (
+        "provider not ready: CowSwap live order runtime disabled; configure "
+        "Gateway EIP-712 signer, CoW order store, EVM balance and allowance "
+        "reader, asset map, and API lifecycle"
+    )
 
 
 async def _ensure_marlin_wallet_default(
