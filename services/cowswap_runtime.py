@@ -63,11 +63,20 @@ class CowSwapRuntimeDependencies(NamedTuple):
 class GatewayCowSigner:
     """CoW EIP-712 signer backed by Gateway-managed Ethereum wallets."""
 
-    def __init__(self, *, gateway_url: str, network: str, owner_address: str, config: Any) -> None:
+    def __init__(
+        self,
+        *,
+        gateway_url: str,
+        network: str,
+        owner_address: str,
+        config: Any,
+        wallet_ref: str = "base:mainnet:evm_gateway",
+    ) -> None:
         self.gateway_url = gateway_url.rstrip("/")
         self.network = network
         self.owner_address = owner_address
         self.config = config
+        self.wallet_ref = wallet_ref
 
     def sign_order_payload(self, order: dict[str, object]) -> dict[str, object]:
         from hummingbot_cowswap.cowpy import ensure_cowpy_submodule_imports
@@ -120,13 +129,14 @@ class GatewayCowSigner:
             "chain": "ethereum",
             "network": self.network,
             "address": self.owner_address,
+            "walletRef": self.wallet_ref,
             "domain": dict(domain),
             "types": dict(types),
             "value": dict(value),
         }
         response = _gateway_post(
             self.gateway_url,
-            "wallet/sign-typed-data",
+            "wallet/marlin-cow/sign-typed-data",
             payload,
         )
         signature = response.get("signature")
@@ -459,7 +469,8 @@ def _runtime_dependency_blockers(
 
     blockers: list[str] = []
     if os.environ.get("MARLIN_RUNTIME_PROFILE", "").strip().lower() == "marlin":
-        blockers.append("CowSwap live order runtime requires a Marlin-scoped EIP-712 signer")
+        if not isinstance(dependencies.signer_provider, GatewayCowSigner):
+            blockers.append("CowSwap live order runtime requires a Marlin-scoped EIP-712 signer")
     if dependencies.signer_provider is None:
         blockers.append("secure EIP-712 signer is missing")
     if dependencies.evm_reader is None:

@@ -23,6 +23,7 @@ place_cowswap_market_order = cowswap_runtime.place_cowswap_market_order
 build_cowswap_runtime = cowswap_runtime.build_cowswap_runtime
 CowSwapRuntimeDependencies = cowswap_runtime.CowSwapRuntimeDependencies
 CowSwapRuntimeUnavailableError = cowswap_runtime.CowSwapRuntimeUnavailableError
+GatewayCowSigner = cowswap_runtime.GatewayCowSigner
 
 
 def missing_importer(name):
@@ -169,6 +170,78 @@ def test_cowswap_runtime_stays_blocked_for_marlin_profile(monkeypatch):
     assert status.blockers == (
         "CowSwap live order runtime requires a Marlin-scoped EIP-712 signer",
     )
+
+
+def test_cowswap_runtime_allows_gateway_cow_signer_for_marlin_profile(monkeypatch):
+    monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+    metadata = {
+        "connector": COWSWAP_CONNECTOR_NAME,
+        "config_map": {"uses_raw_private_key": False},
+        "order_types": ["MARKET"],
+    }
+    signer = GatewayCowSigner(
+        gateway_url="http://localhost:15888",
+        network="base",
+        owner_address="0x00000000000000000000000000000000000000aa",
+        config=object(),
+    )
+    dependencies = CowSwapRuntimeDependencies(
+        signer_provider=signer,
+        evm_reader=object(),
+        token_map={"WETH-USDC": object()},
+        order_store=object(),
+        owner_address="0x00000000000000000000000000000000000000aa",
+    )
+
+    status = get_cowswap_runtime_status(
+        import_module=metadata_importer(metadata),
+        runtime_dependencies=dependencies,
+    )
+
+    assert status.runtime_available is True
+    assert status.blockers == ()
+
+
+def test_gateway_cow_signer_uses_marlin_scoped_gateway_route(monkeypatch):
+    calls = []
+
+    def fake_gateway_post(gateway_url, path, payload):
+        calls.append((gateway_url, path, payload))
+        return {"signature": "0xsigned"}
+
+    monkeypatch.setattr(cowswap_runtime, "_gateway_post", fake_gateway_post)
+    signer = GatewayCowSigner(
+        gateway_url="http://localhost:15888/",
+        network="base",
+        owner_address="0x00000000000000000000000000000000000000aa",
+        config=object(),
+    )
+
+    signature = signer._sign_typed_data(
+        domain={"chainId": 8453, "verifyingContract": "0x9008d19f58aabd9ed0d60971565aa8510560ab41"},
+        types={"Order": [{"name": "sellToken", "type": "address"}]},
+        value={"sellToken": "0x4200000000000000000000000000000000000006"},
+    )
+
+    assert signature == "0xsigned"
+    assert calls == [
+        (
+            "http://localhost:15888",
+            "wallet/marlin-cow/sign-typed-data",
+            {
+                "address": "0x00000000000000000000000000000000000000aa",
+                "chain": "ethereum",
+                "domain": {
+                    "chainId": 8453,
+                    "verifyingContract": "0x9008d19f58aabd9ed0d60971565aa8510560ab41",
+                },
+                "network": "base",
+                "types": {"Order": [{"name": "sellToken", "type": "address"}]},
+                "value": {"sellToken": "0x4200000000000000000000000000000000000006"},
+                "walletRef": "base:mainnet:evm_gateway",
+            },
+        )
+    ]
 
 
 def test_cowswap_order_blocker_clears_only_with_explicit_runtime_dependencies():

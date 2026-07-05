@@ -86,6 +86,13 @@ def runtime_profile() -> str:
 def provider_runtime_enabled() -> bool:
     return runtime_profile() in {"provider", "marlin"}
 
+
+def marlin_runtime_enabled() -> bool:
+    return (
+        runtime_profile() == "marlin"
+        or os.environ.get("MARLIN_RUNTIME_PROFILE", "").strip().lower() == "marlin"
+    )
+
 # Set up logging configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -219,8 +226,15 @@ async def lifespan(app: FastAPI):
     accounts_service._trading_service = trading_service
     cowswap_status = get_cowswap_runtime_status()
     if cowswap_status.registration_available:
-        cowswap_owner = os.environ.get("COWSWAP_OWNER_ADDRESS")
-        if not cowswap_owner:
+        cowswap_owner = None
+        if marlin_runtime_enabled():
+            cowswap_owner = accounts_service._marlin_gateway_default_wallet_address(
+                chain="ethereum",
+                network="base",
+            )
+        else:
+            cowswap_owner = os.environ.get("COWSWAP_OWNER_ADDRESS")
+        if not cowswap_owner and not marlin_runtime_enabled():
             try:
                 cowswap_owner = await accounts_service.gateway_client.get_wallet_address_or_default("ethereum")
             except Exception as exc:
@@ -231,7 +245,11 @@ async def lifespan(app: FastAPI):
                 cowswap_runtime, cowswap_dependencies = build_cowswap_runtime(
                     gateway_url=settings.gateway.url,
                     owner_address=cowswap_owner,
-                    receiver_address=os.environ.get("COWSWAP_RECEIVER_ADDRESS") or cowswap_owner,
+                    receiver_address=(
+                        cowswap_owner
+                        if marlin_runtime_enabled()
+                        else os.environ.get("COWSWAP_RECEIVER_ADDRESS") or cowswap_owner
+                    ),
                     data_dir=Path(os.environ.get("BOTS_PATH", "/hummingbot-api/bots")) / "data",
                     chain_id=env_int("COWSWAP_CHAIN_ID", 8453),
                     chain_name=env_text("COWSWAP_CHAIN_NAME", "base"),
@@ -254,7 +272,7 @@ async def lifespan(app: FastAPI):
         else:
             logging.warning(
                 "CowSwap owner address not configured; "
-                "set COWSWAP_OWNER_ADDRESS or configure an Ethereum wallet in Gateway"
+                "set MARLIN_MNEMONIC in Marlin runtime or configure an Ethereum wallet in Gateway"
             )
             accounts_service.configure_cowswap_runtime(
                 runtime_dependencies=CowSwapRuntimeDependencies(),
