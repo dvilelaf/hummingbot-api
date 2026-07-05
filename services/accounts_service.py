@@ -45,7 +45,7 @@ GATEWAY_PRICE_CONNECTORS = {
     "ethereum-base": "aerodrome",
     "solana-mainnet-beta": "jupiter",
 }
-GATEWAY_PRICE_FETCH_TIMEOUT_SECONDS = 5
+GATEWAY_PRICE_FETCH_TIMEOUT_SECONDS = 2
 COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}
 SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_perpetual_testnet", "hyperliquid_testnet"}
 HYPERLIQUID_TESTNET_INFO_URL = "https://api.hyperliquid-testnet.xyz/info"
