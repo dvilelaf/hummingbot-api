@@ -306,6 +306,14 @@ def _marlin_provider_intent_token() -> str:
         return ""
 
 
+def _marlin_gateway_swap_authorization() -> dict[str, str]:
+    return {
+        "action": "gateway_swap",
+        "scope": "provider_intent",
+        "source": "marlin",
+    }
+
+
 async def _submit_swap_intent(
     body: ProviderIntentRequest,
     request: Request,
@@ -369,6 +377,7 @@ async def _submit_swap_intent(
             side=body.side,
             slippage_pct=float(slippage_pct),
             pool_address=body.risk_metadata.get("pool_address"),
+            live_action_authorization=_marlin_gateway_swap_authorization(),
             marlin_provider_intent_authorized=provider_intent_authorized,
         )
     except HTTPException as exc:

@@ -102,6 +102,16 @@ def assert_live_gateway_mutation_allowed(
         return
     if marlin_provider_intent_authorized:
         return
+    if _is_marlin_runtime_profile():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"direct live Gateway mutation disabled for action {action} in Marlin runtime; "
+                "submit mainnet Marlin Gateway mutations through /provider/intents with "
+                "MARLIN_PROVIDER_INTENT_TOKEN "
+                f"(source={source}, network={chain}/{network})"
+            ),
+        )
     action_env = _gateway_action_env(action)
     if _env_bool(action_env):
         return

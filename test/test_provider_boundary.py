@@ -523,7 +523,11 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash(m
     ]
     assert EXECUTE_SWAP_CALLS[0]["network"] == "mainnet-beta"
     assert EXECUTE_SWAP_CALLS[0]["marlin_provider_intent_authorized"] is True
-    assert "live_action_authorization" not in EXECUTE_SWAP_CALLS[0]
+    assert EXECUTE_SWAP_CALLS[0]["live_action_authorization"] == {
+        "action": "gateway_swap",
+        "scope": "provider_intent",
+        "source": "marlin",
+    }
 
 
 def test_swap_provider_intent_preflight_does_not_execute_swap(monkeypatch):

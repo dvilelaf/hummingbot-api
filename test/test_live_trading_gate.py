@@ -209,6 +209,25 @@ def test_gateway_mutation_gate_blocks_mainnet_by_default(monkeypatch):
         raise AssertionError("expected HTTPException")
 
 
+def test_gateway_mutation_gate_ignores_broad_live_flags_in_marlin_runtime(monkeypatch):
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", "true")
+    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", "true")
+    monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+    gate = _live_gate_module()
+
+    with pytest.raises(HTTPException) as exc_info:
+        gate.assert_live_gateway_mutation_allowed(
+            action="swap_execute",
+            chain="ethereum",
+            network="base",
+            source="direct.gateway",
+        )
+
+    assert exc_info.value.status_code == 503
+    assert "direct live Gateway mutation disabled" in str(exc_info.value.detail)
+    assert "/provider/intents" in str(exc_info.value.detail)
+
+
 def test_gateway_mutation_gate_allows_authorized_marlin_provider_intents(monkeypatch):
     monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
     monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_SWAP_EXECUTE_ENABLED", raising=False)
