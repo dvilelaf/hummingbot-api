@@ -196,10 +196,17 @@ async def _submit_order_intent(
     accounts_service: AccountsService,
 ) -> ProviderIntentResponse:
     order_type = body.order_type or "MARKET"
+    try:
+        provider_intent_authorized = _mainnet_provider_intent_authorized(body, request)
+    except HTTPException as exc:
+        return ProviderIntentResponse(
+            status="rejected" if exc.status_code < 500 else "failed",
+            correlation_id=body.correlation_id,
+            provider_error=_redact_secret_text(exc.detail),
+        )
     if body.preflight_only:
         return await _preflight_order_intent(body, accounts_service, order_type=order_type)
     try:
-        provider_intent_authorized = _mainnet_provider_intent_authorized(body, request)
         order_id = await accounts_service.place_trade(
             account_name=body.account_name,
             connector_name=body.connector_name,

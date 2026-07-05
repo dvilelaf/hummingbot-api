@@ -435,6 +435,36 @@ def test_swap_provider_intent_blocks_mainnet_without_internal_token(monkeypatch)
     assert EXECUTE_SWAP_CALLS == []
 
 
+def test_order_provider_intent_preflight_blocks_mainnet_without_internal_token(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="jupiter",
+        correlation_id="order-preflight-unauthorized-001",
+        market_id="SOL-USDC",
+        mode="mainnet",
+        preflight_only=True,
+        quantity="0.0001",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            SimpleNamespace(headers={}),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert "mainnet provider intents" in result.provider_error
+    assert service.update_calls == []
+
+
 def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash(monkeypatch):
     monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
     LIVE_GATE_CALLS.clear()
