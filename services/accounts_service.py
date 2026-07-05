@@ -2308,6 +2308,13 @@ class AccountsService:
             if "master_account" not in self.accounts_state:
                 self.accounts_state["master_account"] = {}
 
+            if chain_networks:
+                await self._update_filtered_gateway_balances(
+                    chain_networks=chain_networks,
+                    tokens_by_chain_network=tokens_by_chain_network,
+                )
+                return
+
             # Collect all balance query tasks for parallel execution
             balance_tasks = []
             task_metadata = []  # Store (chain, network, address) for each task
@@ -2416,6 +2423,60 @@ class AccountsService:
 
         except Exception as e:
             logger.error(f"Error updating Gateway balances: {e}")
+
+    async def _update_filtered_gateway_balances(
+        self,
+        *,
+        chain_networks: List[str],
+        tokens_by_chain_network: Optional[Dict[str, List[str]]] = None,
+    ) -> None:
+        balance_tasks = []
+        task_metadata = []
+        for chain_network in chain_networks:
+            chain, _, network = chain_network.partition("-")
+            if not chain or not network:
+                continue
+            default_wallet = await self.gateway_client.get_default_wallet_address(chain)
+            if not default_wallet:
+                logger.debug("Chain '%s' missing defaultWallet, skipping", chain)
+                continue
+            if default_wallet.startswith("<") and default_wallet.endswith(">"):
+                logger.debug(
+                    "Chain '%s' has placeholder defaultWallet '%s', skipping",
+                    chain,
+                    default_wallet,
+                )
+                continue
+            tokens = (
+                tokens_by_chain_network.get(chain_network)
+                if tokens_by_chain_network
+                else None
+            )
+            balance_tasks.append(
+                self.get_gateway_balances(
+                    chain,
+                    default_wallet,
+                    network=network,
+                    tokens=tokens,
+                )
+            )
+            task_metadata.append((chain, network, default_wallet))
+
+        if not balance_tasks:
+            return
+        results = await asyncio.gather(*balance_tasks, return_exceptions=True)
+        for result, (chain, network, address) in zip(results, task_metadata):
+            chain_network = f"{chain}-{network}"
+            if isinstance(result, Exception):
+                logger.error(
+                    "Error updating Gateway balances for %s wallet %s: %s",
+                    chain_network,
+                    address,
+                    result,
+                )
+                self.accounts_state["master_account"][chain_network] = []
+            else:
+                self.accounts_state["master_account"][chain_network] = result or []
 
     async def get_gateway_wallets(self) -> List[Dict]:
         """
