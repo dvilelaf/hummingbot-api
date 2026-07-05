@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LIVE_GATE_CALLS = []
 EXECUTE_SWAP_CALLS = []
 SET_DEFAULT_WALLET_CALLS = []
+PROVIDER_INTENT_TOKEN = "test-provider-intent-token"
 STUBBED_MODULES = (
     "deps",
     "fastapi",
@@ -137,6 +138,12 @@ def _provider_boundary_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _authorized_request():
+    return SimpleNamespace(
+        headers={"x-marlin-provider-intent-token": PROVIDER_INTENT_TOKEN}
+    )
 
 
 class FakeGatewayClient:
@@ -268,7 +275,49 @@ def test_base_swap_provider_snapshot_scopes_gateway_balance_tokens():
     }
 
 
-def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash():
+def test_swap_provider_intent_blocks_mainnet_without_internal_token(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    LIVE_GATE_CALLS.clear()
+    EXECUTE_SWAP_CALLS.clear()
+    SET_DEFAULT_WALLET_CALLS.clear()
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="swap",
+        connector_name="jupiter",
+        correlation_id="swap-unauthorized-001",
+        market_id="SOL-USDC",
+        mode="mainnet",
+        quantity="0.0001",
+        risk_metadata={"network": "solana-mainnet-beta"},
+        side="SELL",
+        wallet_identity={
+            "address": "9AtFd6KcR9tx5Etxc9SVkYrkZb7yC5BDibao7yPT5Ce1",
+            "chain": "solana",
+            "network": "mainnet-beta",
+            "wallet_ref": "solana:mainnet-beta:solana_gateway",
+        },
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            SimpleNamespace(headers={}),
+            service,
+        )
+    )
+
+    assert result.status == "rejected"
+    assert "mainnet provider intents" in result.provider_error
+    assert LIVE_GATE_CALLS == []
+    assert SET_DEFAULT_WALLET_CALLS == []
+    assert EXECUTE_SWAP_CALLS == []
+
+
+def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
     LIVE_GATE_CALLS.clear()
     EXECUTE_SWAP_CALLS.clear()
     SET_DEFAULT_WALLET_CALLS.clear()
@@ -296,7 +345,7 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash()
     result = asyncio.run(
         provider_boundary.submit_provider_intent(
             body,
-            SimpleNamespace(headers={}),
+            _authorized_request(),
             service,
         ),
     )
@@ -328,7 +377,8 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash()
     assert "live_action_authorization" not in EXECUTE_SWAP_CALLS[0]
 
 
-def test_swap_provider_intent_preflight_does_not_execute_swap():
+def test_swap_provider_intent_preflight_does_not_execute_swap(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
     LIVE_GATE_CALLS.clear()
     EXECUTE_SWAP_CALLS.clear()
     SET_DEFAULT_WALLET_CALLS.clear()
@@ -357,7 +407,7 @@ def test_swap_provider_intent_preflight_does_not_execute_swap():
     result = asyncio.run(
         provider_boundary.submit_provider_intent(
             body,
-            SimpleNamespace(headers={}),
+            _authorized_request(),
             service,
         ),
     )
@@ -376,7 +426,8 @@ def test_swap_provider_intent_preflight_does_not_execute_swap():
     assert EXECUTE_SWAP_CALLS == []
 
 
-def test_base_swap_provider_intent_accepts_gateway_network_identity_alias():
+def test_base_swap_provider_intent_accepts_gateway_network_identity_alias(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
     LIVE_GATE_CALLS.clear()
     EXECUTE_SWAP_CALLS.clear()
     SET_DEFAULT_WALLET_CALLS.clear()
@@ -404,7 +455,7 @@ def test_base_swap_provider_intent_accepts_gateway_network_identity_alias():
     result = asyncio.run(
         provider_boundary.submit_provider_intent(
             body,
-            SimpleNamespace(headers={}),
+            _authorized_request(),
             service,
         ),
     )

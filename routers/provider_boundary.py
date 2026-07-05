@@ -1,5 +1,7 @@
 import logging
+import os
 import re
+import secrets
 from decimal import Decimal
 from typing import Any
 
@@ -30,6 +32,7 @@ from services.marlin_runtime import assert_marlin_default_wallet_identity
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Provider Boundary"], prefix="/provider")
+MARLIN_PROVIDER_INTENT_TOKEN_HEADER = "x-marlin-provider-intent-token"
 
 GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS = {
     "aerodrome": "ethereum-base",
@@ -149,21 +152,24 @@ async def submit_provider_intent(
 ) -> ProviderIntentResponse:
     del db_manager
     if body.action == "order":
-        return await _submit_order_intent(body, accounts_service)
+        return await _submit_order_intent(body, request, accounts_service)
     return await _submit_swap_intent(
         body,
+        request,
         accounts_service,
     )
 
 
 async def _submit_order_intent(
     body: ProviderIntentRequest,
+    request: Request,
     accounts_service: AccountsService,
 ) -> ProviderIntentResponse:
     order_type = body.order_type or "MARKET"
     if body.preflight_only:
         return await _preflight_order_intent(body, accounts_service, order_type=order_type)
     try:
+        provider_intent_authorized = _mainnet_provider_intent_authorized(body, request)
         order_id = await accounts_service.place_trade(
             account_name=body.account_name,
             connector_name=body.connector_name,
@@ -174,7 +180,7 @@ async def _submit_order_intent(
             price=body.price,
             position_action=PositionAction.OPEN,
             safe_testnet=body.mode == "testnet",
-            marlin_provider_intent_authorized=body.mode == "mainnet",
+            marlin_provider_intent_authorized=provider_intent_authorized,
         )
     except HTTPException as exc:
         return ProviderIntentResponse(
@@ -233,8 +239,39 @@ async def _preflight_order_intent(
     )
 
 
+def _mainnet_provider_intent_authorized(
+    body: ProviderIntentRequest,
+    request: Request,
+) -> bool:
+    if body.mode != "mainnet":
+        return False
+    expected = _marlin_provider_intent_token()
+    provided = str(getattr(request, "headers", {}).get(MARLIN_PROVIDER_INTENT_TOKEN_HEADER, ""))
+    if expected and provided and secrets.compare_digest(provided, expected):
+        return True
+    raise HTTPException(
+        status_code=403,
+        detail="Marlin provider intent token required for mainnet provider intents",
+    )
+
+
+def _marlin_provider_intent_token() -> str:
+    value = os.getenv("MARLIN_PROVIDER_INTENT_TOKEN", "").strip()
+    if value:
+        return value
+    file_path = os.getenv("MARLIN_PROVIDER_INTENT_TOKEN_FILE", "").strip()
+    if not file_path:
+        return ""
+    try:
+        with open(file_path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
 async def _submit_swap_intent(
     body: ProviderIntentRequest,
+    request: Request,
     accounts_service: AccountsService,
 ) -> ProviderIntentResponse:
     network_id = str(body.risk_metadata.get("network", "")).strip()
@@ -257,6 +294,7 @@ async def _submit_swap_intent(
                 correlation_id=body.correlation_id,
                 provider_error="Gateway service is not available",
             )
+        provider_intent_authorized = _mainnet_provider_intent_authorized(body, request)
         chain, network = accounts_service.gateway_client.parse_network_id(network_id)
         slippage_pct = Decimal(str(body.risk_metadata.get("slippage_pct", "1.0")))
         assert_live_gateway_mutation_allowed(
@@ -266,7 +304,7 @@ async def _submit_swap_intent(
             expected_instrument=body.market_id,
             expected_notional=body.quantity,
             expected_slippage_bps=slippage_pct * Decimal("100"),
-            marlin_provider_intent_authorized=body.mode == "mainnet",
+            marlin_provider_intent_authorized=provider_intent_authorized,
             network=network,
             source="provider.intents",
         )
@@ -294,7 +332,7 @@ async def _submit_swap_intent(
             side=body.side,
             slippage_pct=float(slippage_pct),
             pool_address=body.risk_metadata.get("pool_address"),
-            marlin_provider_intent_authorized=body.mode == "mainnet",
+            marlin_provider_intent_authorized=provider_intent_authorized,
         )
     except HTTPException as exc:
         return ProviderIntentResponse(
