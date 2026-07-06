@@ -401,6 +401,37 @@ async def place_cowswap_market_order(
     return client_order_id
 
 
+async def cowswap_runtime_prices(
+    *,
+    runtime: Any | None,
+    trading_pairs: list[str],
+) -> dict[str, float]:
+    """Quote configured CowSwap pairs and return Hummingbot-style last prices."""
+    if runtime is None:
+        return {"error": "CowSwap runtime is not initialized"}
+
+    prices: dict[str, float] = {}
+    errors: dict[str, str] = {}
+    for trading_pair in trading_pairs:
+        try:
+            base_token, quote_token = runtime._tokens_for_pair(trading_pair)  # noqa: SLF001 - runtime adapter owns pair mapping.
+            quote, _minimum_buy = await runtime._connector.quote_sell(  # noqa: SLF001 - quote path is connector-owned.
+                base_token,
+                quote_token,
+                "1",
+            )
+            buy_amount = Decimal(_quote_field(quote, "buyAmount"))
+            quote_units = buy_amount / (Decimal(10) ** int(quote_token.decimals))
+            if quote_units <= 0:
+                raise CowSwapRuntimeUnavailableError("CowSwap quote returned non-positive buy amount")
+            prices[str(trading_pair)] = float(quote_units)
+        except Exception as exc:  # noqa: BLE001 - returned as market-data error, not hidden.
+            errors[str(trading_pair)] = str(exc)
+    if prices:
+        return prices
+    return {"error": "; ".join(f"{pair}: {reason}" for pair, reason in errors.items())}
+
+
 async def cancel_cowswap_order(
     *,
     live_action_authorization: Mapping[str, Any] | None = None,
@@ -442,6 +473,26 @@ def cowswap_order_records(
         if client_order_id:
             deduped[client_order_id] = record
     return list(deduped.values())
+
+
+def _quote_field(quote: object, field_name: str) -> str:
+    quote_payload = _object_field(quote, "quote", None)
+    if quote_payload is None:
+        raise CowSwapRuntimeUnavailableError("CowSwap quote payload missing quote")
+    value = _object_field(quote_payload, field_name, None)
+    if value is None:
+        raise CowSwapRuntimeUnavailableError(f"CowSwap quote payload missing {field_name}")
+    return _object_root(value)
+
+
+def _object_field(value: object, field_name: str, default: object = None) -> object:
+    if isinstance(value, Mapping):
+        return value.get(field_name, default)
+    return getattr(value, field_name, default)
+
+
+def _object_root(value: object) -> str:
+    return str(_object_field(value, "root", value))
 
 
 def _load_connector_metadata(import_module: ImportModule) -> Mapping[str, Any] | None:

@@ -224,6 +224,7 @@ async def lifespan(app: FastAPI):
     accounts_service._connector_service = connector_service
     accounts_service._market_data_service = market_data_service
     accounts_service._trading_service = trading_service
+    market_data_service.configure_accounts_service(accounts_service)
     cowswap_status = get_cowswap_runtime_status()
     if cowswap_status.registration_available:
         cowswap_owner = None

@@ -12,11 +12,13 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
+    from services.accounts_service import AccountsService
     from services.unified_connector_service import UnifiedConnectorService
 
 from hummingbot.core.rate_oracle.rate_oracle import RateOracle
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory, UnsupportedConnectorException
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
+from services.cowswap_runtime import COWSWAP_CONNECTOR_NAME, cowswap_runtime_prices
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,7 @@ class MarketDataService:
             feed_timeout: How long to keep unused feeds alive (seconds, default: 10 minutes)
         """
         self._connector_service = connector_service
+        self._accounts_service: Optional["AccountsService"] = None
         self._rate_oracle = rate_oracle
         self._cleanup_interval = cleanup_interval
         self._feed_timeout = feed_timeout
@@ -71,6 +74,10 @@ class MarketDataService:
         self._is_running = False
 
         logger.info("MarketDataService initialized")
+
+    def configure_accounts_service(self, accounts_service: "AccountsService") -> None:
+        """Attach account-owned optional runtimes used by provider market data."""
+        self._accounts_service = accounts_service
 
     # ==================== Lifecycle ====================
 
@@ -499,6 +506,17 @@ class MarketDataService:
             Dictionary mapping trading pairs to prices
         """
         try:
+            if connector_name == COWSWAP_CONNECTOR_NAME:
+                runtime = (
+                    getattr(self._accounts_service, "_cowswap_runtime", None)
+                    if self._accounts_service is not None
+                    else None
+                )
+                return await cowswap_runtime_prices(
+                    runtime=runtime,
+                    trading_pairs=trading_pairs,
+                )
+
             connector = self._connector_service.get_best_connector_for_market(
                 connector_name, account_name
             )

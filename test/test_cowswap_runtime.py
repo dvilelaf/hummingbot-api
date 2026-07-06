@@ -15,6 +15,7 @@ cowswap_connector_config_map = cowswap_runtime.cowswap_connector_config_map
 cowswap_connector_metadata = cowswap_runtime.cowswap_connector_metadata
 cowswap_order_records = cowswap_runtime.cowswap_order_records
 cowswap_order_submission_blocker = cowswap_runtime.cowswap_order_submission_blocker
+cowswap_runtime_prices = cowswap_runtime.cowswap_runtime_prices
 cowswap_supported_order_types = cowswap_runtime.cowswap_supported_order_types
 cowswap_token_map_from_json = cowswap_runtime.cowswap_token_map_from_json
 get_cowswap_runtime_status = cowswap_runtime.get_cowswap_runtime_status
@@ -311,10 +312,24 @@ class FakeCowSwapRuntime:
     def __init__(self):
         self.calls = []
         self.signer_authorizations = []
-        self._connector = SimpleNamespace(signer=self)
+        self._connector = SimpleNamespace(signer=self, quote_sell=self.quote_sell)
 
     def set_live_action_authorization(self, authorization):
         self.signer_authorizations.append(authorization)
+
+    def _tokens_for_pair(self, trading_pair):
+        if trading_pair != "WETH-USDC":
+            raise ValueError(f"unsupported pair: {trading_pair}")
+        return (
+            SimpleNamespace(symbol="WETH", decimals=18),
+            SimpleNamespace(symbol="USDC", decimals=6),
+        )
+
+    async def quote_sell(self, base_token, quote_token, amount):
+        self.calls.append(("quote_sell", base_token.symbol, quote_token.symbol, amount))
+        return SimpleNamespace(
+            quote=SimpleNamespace(buyAmount=SimpleNamespace(root="2500000000")),
+        ), "2487500000"
 
     async def sell(self, *, trading_pair, amount):
         self.calls.append(("sell", trading_pair, amount))
@@ -351,6 +366,17 @@ def test_place_cowswap_market_order_delegates_sell():
 
     assert client_order_id == "sell-1"
     assert runtime.calls == [("sell", "WETH-USDC", "0.01")]
+
+
+def test_cowswap_runtime_prices_quotes_configured_pair():
+    runtime = FakeCowSwapRuntime()
+
+    prices = asyncio.run(
+        cowswap_runtime_prices(runtime=runtime, trading_pairs=["WETH-USDC"]),
+    )
+
+    assert prices == {"WETH-USDC": 2500.0}
+    assert runtime.calls == [("quote_sell", "WETH", "USDC", "1")]
 
 
 def test_place_cowswap_market_order_delegates_buy():
