@@ -265,11 +265,28 @@ async def _preflight_order_intent(
             correlation_id=body.correlation_id,
             provider_error=_redact_secret_text(exc),
         )
+    refresh_blocker = _preflight_order_refresh_blocker(accounts_service, body.connector_name)
+    if refresh_blocker is not None:
+        return ProviderIntentResponse(
+            status="rejected",
+            correlation_id=body.correlation_id,
+            provider_error=refresh_blocker,
+        )
     if body.connector_name not in account_state:
         return ProviderIntentResponse(
             status="rejected",
             correlation_id=body.correlation_id,
             provider_error=f"provider account not configured: {body.connector_name}",
+        )
+    balance_blocker = _preflight_order_balance_blocker(
+        body,
+        account_state.get(body.connector_name),
+    )
+    if balance_blocker is not None:
+        return ProviderIntentResponse(
+            status="rejected",
+            correlation_id=body.correlation_id,
+            provider_error=balance_blocker,
         )
     return ProviderIntentResponse(
         status="accepted",
@@ -278,6 +295,66 @@ async def _preflight_order_intent(
         submitted_quantity=body.quantity,
         submitted_notional=body.quantity * body.price if body.price is not None else None,
     )
+
+
+def _preflight_order_refresh_blocker(
+    accounts_service: AccountsService,
+    connector_name: str,
+) -> str | None:
+    refresh_error = _connector_balance_refresh_error(accounts_service, connector_name)
+    if connector_name == "xrpl" and _xrpl_account_not_found(refresh_error):
+        return "account not activated: fund derived XRPL mainnet account reserve"
+    if refresh_error:
+        return f"balance refresh unavailable: {_redact_secret_text(refresh_error)}"
+    return None
+
+
+def _preflight_order_balance_blocker(
+    body: ProviderIntentRequest,
+    connector_rows: Any,
+) -> str | None:
+    if not isinstance(connector_rows, list):
+        return None
+    spend_asset, required = _preflight_order_spend_requirement(body)
+    if spend_asset is None or required is None:
+        return None
+    available = _available_units_for_asset(connector_rows, spend_asset)
+    if available >= required:
+        return None
+    return (
+        f"preflight spend balance {required} {spend_asset} exceeds "
+        f"available balance {available}"
+    )
+
+
+def _preflight_order_spend_requirement(
+    body: ProviderIntentRequest,
+) -> tuple[str | None, Decimal | None]:
+    if "-" not in body.market_id:
+        return None, None
+    base, quote = body.market_id.split("-", 1)
+    if body.side == "SELL":
+        return base, body.quantity
+    if body.price is None:
+        return None, None
+    return quote, body.quantity * body.price
+
+
+def _available_units_for_asset(rows: list[Any], asset: str) -> Decimal:
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        token = str(row.get("token") or row.get("asset") or row.get("symbol") or "").upper()
+        if token != asset.upper():
+            continue
+        for key in ("available_units", "available", "units", "balance", "total"):
+            value = row.get(key)
+            if value is not None:
+                try:
+                    return Decimal(str(value))
+                except Exception:
+                    return Decimal("0")
+    return Decimal("0")
 
 
 def _mainnet_provider_intent_authorized(

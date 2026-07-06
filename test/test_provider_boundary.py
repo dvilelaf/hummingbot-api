@@ -506,6 +506,108 @@ def test_order_provider_intent_preflight_blocks_mainnet_without_internal_token(m
     assert service.update_calls == []
 
 
+def test_order_provider_intent_preflight_rejects_xrpl_account_not_activated(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["xrpl"] = []
+    service.balance_refresh_errors["xrpl"] = "actNotFound: Account not found."
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="xrpl",
+        correlation_id="order-preflight-xrpl-unfunded-001",
+        market_id="XRP-USD",
+        mode="mainnet",
+        order_type="LIMIT",
+        preflight_only=True,
+        price="1",
+        quantity="100",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert result.provider_error == "account not activated: fund derived XRPL mainnet account reserve"
+
+
+def test_order_provider_intent_preflight_rejects_empty_spend_balance(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["hyperliquid"] = []
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="hyperliquid",
+        correlation_id="order-preflight-hyperliquid-empty-001",
+        market_id="HYPE-USDC",
+        mode="mainnet",
+        order_type="LIMIT",
+        preflight_only=True,
+        price="33.33",
+        quantity="3",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert result.provider_error == (
+        "preflight spend balance 99.99 USDC exceeds available balance 0"
+    )
+
+
+def test_order_provider_intent_preflight_accepts_sufficient_spend_balance(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["hyperliquid"] = [
+        {"token": "USDC", "units": 150, "available_units": 120},
+    ]
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="hyperliquid",
+        correlation_id="order-preflight-hyperliquid-funded-001",
+        market_id="HYPE-USDC",
+        mode="mainnet",
+        order_type="LIMIT",
+        preflight_only=True,
+        price="33.33",
+        quantity="3",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "accepted"
+    assert result.provider_status == "preflight_accepted:LIMIT"
+    assert result.submitted_notional == provider_boundary.Decimal("99.99")
+
+
 def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash(monkeypatch):
     monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
     LIVE_GATE_CALLS.clear()
