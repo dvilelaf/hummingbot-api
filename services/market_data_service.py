@@ -146,6 +146,14 @@ class MarketDataService:
         Returns:
             True if order book is ready, False otherwise
         """
+        if connector_name == COWSWAP_CONNECTOR_NAME:
+            prices = await self.get_prices(
+                connector_name=connector_name,
+                trading_pairs=[trading_pair],
+                account_name=account_name,
+            )
+            return trading_pair in prices and "error" not in prices
+
         return await self._connector_service.initialize_order_book(
             connector_name=connector_name,
             trading_pair=trading_pair,
