@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import ssl
@@ -8,6 +9,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 logger = logging.getLogger(__name__)
+DEFAULT_GATEWAY_REQUEST_TIMEOUT_SECONDS = 20.0
 
 
 class GatewayClient:
@@ -71,6 +73,19 @@ class GatewayClient:
         except OSError:
             return ""
 
+    @staticmethod
+    def _request_timeout() -> aiohttp.ClientTimeout:
+        raw_value = os.getenv("GATEWAY_REQUEST_TIMEOUT_SECONDS", "").strip()
+        if not raw_value:
+            return aiohttp.ClientTimeout(total=DEFAULT_GATEWAY_REQUEST_TIMEOUT_SECONDS)
+        try:
+            seconds = float(raw_value)
+        except ValueError:
+            seconds = DEFAULT_GATEWAY_REQUEST_TIMEOUT_SECONDS
+        if seconds <= 0:
+            return aiohttp.ClientTimeout(total=None)
+        return aiohttp.ClientTimeout(total=seconds)
+
     async def get_wallet_address_or_default(self, chain: str, wallet_address: Optional[str] = None) -> str:
         """Get wallet address - use provided or get default for chain"""
         if wallet_address:
@@ -88,10 +103,11 @@ class GatewayClient:
         """Get or create aiohttp session"""
         if self._session is None or self._session.closed:
             connector = self._create_ssl_connector()
+            timeout = self._request_timeout()
             if connector is not None:
-                self._session = aiohttp.ClientSession(connector=connector)
+                self._session = aiohttp.ClientSession(connector=connector, timeout=timeout)
             else:
-                self._session = aiohttp.ClientSession()
+                self._session = aiohttp.ClientSession(timeout=timeout)
         return self._session
 
     def _create_ssl_connector(self) -> Optional[aiohttp.TCPConnector]:
@@ -158,6 +174,9 @@ class GatewayClient:
         except aiohttp.ClientError as e:
             logger.debug(f"Gateway request error: {method} {url} - {e}")
             return None
+        except asyncio.TimeoutError:
+            logger.warning(f"Gateway request timed out: {method} {url}")
+            return {"error": "Gateway request timed out", "status": 504}
         except Exception as e:
             logger.debug(f"Gateway request failed: {method} {url} - {e}")
             raise
