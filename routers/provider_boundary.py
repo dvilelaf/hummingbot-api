@@ -315,9 +315,11 @@ def _preflight_order_balance_blocker(
 ) -> str | None:
     if not isinstance(connector_rows, list):
         return None
+    if body.connector_name == "xrpl" and not connector_rows:
+        return "account not activated: fund derived XRPL mainnet account reserve"
     spend_asset, required = _preflight_order_spend_requirement(body)
     if spend_asset is None or required is None:
-        return None
+        return f"preflight spend balance unavailable for {body.side} {body.market_id}"
     available = _available_units_for_asset(connector_rows, spend_asset)
     if available >= required:
         return None
@@ -338,6 +340,59 @@ def _preflight_order_spend_requirement(
     if body.price is None:
         return None, None
     return quote, body.quantity * body.price
+
+
+async def _preflight_swap_balance_blocker(
+    body: ProviderIntentRequest,
+    accounts_service: AccountsService,
+    *,
+    network_id: str,
+) -> str | None:
+    chain_network_key = GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS.get(body.connector_name)
+    if chain_network_key is None:
+        return None
+    try:
+        await accounts_service.update_account_state(
+            account_names=[body.account_name],
+            connector_names=[chain_network_key],
+            skip_gateway=False,
+            tokens_by_chain_network={
+                chain_network_key: _gateway_balance_tokens_for_pair(
+                    body.market_id,
+                    chain_network_key=chain_network_key,
+                )
+            },
+        )
+        account_state = accounts_service.get_accounts_state().get(body.account_name, {})
+    except Exception as exc:
+        return f"balance refresh unavailable: {_redact_secret_text(exc)}"
+    rows = _gateway_verified_portfolio_rows(
+        account_state.get(chain_network_key),
+        network=network_id,
+        route_id=str(body.risk_metadata.get("route_id") or "").strip() or None,
+        wallet_ref=(
+            str(body.wallet_identity.get("wallet_ref") or "").strip()
+            if isinstance(body.wallet_identity, dict)
+            else None
+        ),
+    )
+    spend_asset, required = _preflight_swap_spend_requirement(body)
+    if not isinstance(rows, list):
+        return f"preflight spend balance unavailable for {body.side} {body.market_id}"
+    available = _available_units_for_asset(rows, spend_asset)
+    if available >= required:
+        return None
+    return (
+        f"preflight spend balance {required} {spend_asset} exceeds "
+        f"available balance {available}"
+    )
+
+
+def _preflight_swap_spend_requirement(body: ProviderIntentRequest) -> tuple[str, Decimal]:
+    base, quote = body.market_id.split("-", 1)
+    if body.side == "SELL":
+        return base, body.quantity
+    return quote, body.quantity
 
 
 def _available_units_for_asset(rows: list[Any], asset: str) -> Decimal:
@@ -453,6 +508,17 @@ async def _submit_swap_intent(
             network=network,
         )
         if body.preflight_only:
+            balance_blocker = await _preflight_swap_balance_blocker(
+                body,
+                accounts_service,
+                network_id=network_id,
+            )
+            if balance_blocker is not None:
+                return ProviderIntentResponse(
+                    status="rejected",
+                    correlation_id=body.correlation_id,
+                    provider_error=balance_blocker,
+                )
             return ProviderIntentResponse(
                 status="accepted",
                 correlation_id=body.correlation_id,

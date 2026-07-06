@@ -539,6 +539,38 @@ def test_order_provider_intent_preflight_rejects_xrpl_account_not_activated(monk
     assert result.provider_error == "account not activated: fund derived XRPL mainnet account reserve"
 
 
+def test_order_provider_intent_preflight_rejects_empty_xrpl_without_refresh_error(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["xrpl"] = []
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="xrpl",
+        correlation_id="order-preflight-xrpl-empty-001",
+        market_id="XRP-USD",
+        mode="mainnet",
+        order_type="LIMIT",
+        preflight_only=True,
+        price="1",
+        quantity="100",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert result.provider_error == "account not activated: fund derived XRPL mainnet account reserve"
+
+
 def test_order_provider_intent_preflight_rejects_empty_spend_balance(monkeypatch):
     monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
     provider_boundary = _provider_boundary_module()
@@ -571,6 +603,39 @@ def test_order_provider_intent_preflight_rejects_empty_spend_balance(monkeypatch
     assert result.provider_error == (
         "preflight spend balance 99.99 USDC exceeds available balance 0"
     )
+
+
+def test_order_provider_intent_preflight_rejects_buy_without_price(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["hyperliquid"] = [
+        {"token": "USDC", "units": 150, "available_units": 120},
+    ]
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="hyperliquid",
+        correlation_id="order-preflight-hyperliquid-buy-market-001",
+        market_id="HYPE-USDC",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=True,
+        quantity="3",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert result.provider_error == "preflight spend balance unavailable for BUY HYPE-USDC"
 
 
 def test_order_provider_intent_preflight_accepts_sufficient_spend_balance(monkeypatch):
@@ -715,6 +780,55 @@ def test_swap_provider_intent_preflight_does_not_execute_swap(monkeypatch):
 
     assert result.status == "accepted"
     assert result.provider_status == "preflight_accepted"
+    assert len(LIVE_GATE_CALLS) == 1
+    assert SET_DEFAULT_WALLET_CALLS == [
+        {
+            "address": "9AtFd6KcR9tx5Etxc9SVkYrkZb7yC5BDibao7yPT5Ce1",
+            "chain": "solana",
+            "network": "mainnet-beta",
+            "wallet_ref": "solana:mainnet-beta:solana_gateway",
+        }
+    ]
+    assert EXECUTE_SWAP_CALLS == []
+
+
+def test_swap_provider_intent_preflight_rejects_underfunded_spend_balance(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    LIVE_GATE_CALLS.clear()
+    EXECUTE_SWAP_CALLS.clear()
+    SET_DEFAULT_WALLET_CALLS.clear()
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="swap",
+        connector_name="jupiter",
+        correlation_id="swap-preflight-underfunded-001",
+        market_id="SOL-USDC",
+        mode="mainnet",
+        preflight_only=True,
+        quantity="1",
+        risk_metadata={"network": "solana-mainnet-beta"},
+        side="SELL",
+        wallet_identity={
+            "address": "9AtFd6KcR9tx5Etxc9SVkYrkZb7yC5BDibao7yPT5Ce1",
+            "chain": "solana",
+            "network": "mainnet-beta",
+            "wallet_ref": "solana:mainnet-beta:solana_gateway",
+        },
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert result.provider_error == "preflight spend balance 1 SOL exceeds available balance 0.1"
     assert len(LIVE_GATE_CALLS) == 1
     assert SET_DEFAULT_WALLET_CALLS == [
         {
