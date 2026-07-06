@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import os
 import ssl
@@ -125,6 +126,8 @@ class GatewayCowSigner:
         }
 
     def _sign_typed_data(self, *, domain: Mapping[str, Any], types: Mapping[str, Any], value: Mapping[str, Any]) -> str:
+        signing_types = {key: item for key, item in types.items() if key != "EIP712Domain"}
+        signing_type = next(iter(signing_types), "")
         payload: dict[str, Any] = {
             "chain": "ethereum",
             "network": self.network,
@@ -133,11 +136,26 @@ class GatewayCowSigner:
             "domain": dict(domain),
             "types": dict(types),
             "value": dict(value),
+            "liveActionAuthorization": {
+                "action": "cowswap_sign_typed_data",
+                "connector_id": COWSWAP_CONNECTOR_NAME,
+                "network": self.network,
+                "payload_hash": _canonical_payload_hash(value),
+                "scope": "provider_intent",
+                "signing_type": signing_type,
+                "source": "marlin",
+                "wallet_address": self.owner_address,
+            },
         }
+        headers = {}
+        token = _marlin_gateway_provider_intent_token()
+        if token:
+            headers["x-marlin-gateway-provider-intent-token"] = token
         response = _gateway_post(
             self.gateway_url,
             "wallet/marlin-cow/sign-typed-data",
             payload,
+            headers=headers,
         )
         signature = response.get("signature")
         if not signature:
@@ -608,11 +626,20 @@ def _gateway_ssl_context() -> ssl.SSLContext | None:
     return context
 
 
-def _gateway_post(gateway_url: str, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+def _gateway_post(
+    gateway_url: str,
+    path: str,
+    payload: Mapping[str, Any],
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    request_headers = {"content-type": "application/json"}
+    if headers is not None:
+        request_headers.update(headers)
     request = urllib.request.Request(
         f"{gateway_url.rstrip('/')}/{path}",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"content-type": "application/json"},
+        headers=request_headers,
         method="POST",
     )
     try:
@@ -630,6 +657,25 @@ def _gateway_post(gateway_url: str, path: str, payload: Mapping[str, Any]) -> di
     if data.get("error"):
         raise CowSwapRuntimeUnavailableError(f"Gateway {path} failed: {data['error']}")
     return data
+
+
+def _marlin_gateway_provider_intent_token() -> str:
+    value = os.getenv("MARLIN_GATEWAY_PROVIDER_INTENT_TOKEN", "").strip()
+    if value:
+        return value
+    file_path = os.getenv("MARLIN_GATEWAY_PROVIDER_INTENT_TOKEN_FILE", "").strip()
+    if not file_path:
+        return ""
+    try:
+        with open(file_path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _canonical_payload_hash(value: Mapping[str, Any]) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _human_amount_to_atomic(amount: str, decimals: int) -> str:

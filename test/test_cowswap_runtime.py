@@ -205,10 +205,11 @@ def test_cowswap_runtime_allows_gateway_cow_signer_for_marlin_profile(monkeypatc
 def test_gateway_cow_signer_uses_marlin_scoped_gateway_route(monkeypatch):
     calls = []
 
-    def fake_gateway_post(gateway_url, path, payload):
-        calls.append((gateway_url, path, payload))
+    def fake_gateway_post(gateway_url, path, payload, *, headers=None):
+        calls.append((gateway_url, path, payload, headers))
         return {"signature": "0xsigned"}
 
+    monkeypatch.setenv("MARLIN_GATEWAY_PROVIDER_INTENT_TOKEN", "gateway-token")
     monkeypatch.setattr(cowswap_runtime, "_gateway_post", fake_gateway_post)
     signer = GatewayCowSigner(
         gateway_url="http://localhost:15888/",
@@ -238,8 +239,21 @@ def test_gateway_cow_signer_uses_marlin_scoped_gateway_route(monkeypatch):
                 "network": "base",
                 "types": {"Order": [{"name": "sellToken", "type": "address"}]},
                 "value": {"sellToken": "0x4200000000000000000000000000000000000006"},
+                "liveActionAuthorization": {
+                    "action": "cowswap_sign_typed_data",
+                    "connector_id": "cowswap",
+                    "network": "base",
+                    "payload_hash": cowswap_runtime._canonical_payload_hash(
+                        {"sellToken": "0x4200000000000000000000000000000000000006"},
+                    ),
+                    "scope": "provider_intent",
+                    "signing_type": "Order",
+                    "source": "marlin",
+                    "wallet_address": "0x00000000000000000000000000000000000000aa",
+                },
                 "walletRef": "base:mainnet:evm_gateway",
             },
+            {"x-marlin-gateway-provider-intent-token": "gateway-token"},
         )
     ]
 

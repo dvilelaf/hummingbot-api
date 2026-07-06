@@ -57,6 +57,20 @@ class GatewayClient:
         except OSError:
             return ""
 
+    @staticmethod
+    def _marlin_gateway_provider_intent_token() -> str:
+        value = os.getenv("MARLIN_GATEWAY_PROVIDER_INTENT_TOKEN", "").strip()
+        if value:
+            return value
+        file_path = os.getenv("MARLIN_GATEWAY_PROVIDER_INTENT_TOKEN_FILE", "").strip()
+        if not file_path:
+            return ""
+        try:
+            with open(file_path, encoding="utf-8") as handle:
+                return handle.read().strip()
+        except OSError:
+            return ""
+
     async def get_wallet_address_or_default(self, chain: str, wallet_address: Optional[str] = None) -> str:
         """Get wallet address - use provided or get default for chain"""
         if wallet_address:
@@ -551,9 +565,9 @@ class GatewayClient:
         headers = None
         if live_action_authorization is not None and marlin_provider_intent_authorized:
             payload["liveActionAuthorization"] = live_action_authorization
-            passphrase = self._gateway_passphrase()
-            if passphrase:
-                headers = {"x-marlin-provider-intent": passphrase}
+            token = self._marlin_gateway_provider_intent_token()
+            if token:
+                headers = {"x-marlin-gateway-provider-intent-token": token}
         route_type = self._swap_route_type(connector, pool_address)
         return await self._request(
             "POST",

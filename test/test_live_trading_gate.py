@@ -689,7 +689,7 @@ def test_gateway_client_only_forwards_live_action_authorization_to_swap_execute(
     assert "marlin_provider_intent_authorized: bool = False" in execute_swap_source
     assert "live_action_authorization is not None and marlin_provider_intent_authorized" in execute_swap_source
     assert 'payload["liveActionAuthorization"] = live_action_authorization' in execute_swap_source
-    assert '"x-marlin-provider-intent": passphrase' in execute_swap_source
+    assert '"x-marlin-gateway-provider-intent-token": token' in execute_swap_source
 
     for method_name in (
         "router_add_liquidity",

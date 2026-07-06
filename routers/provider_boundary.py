@@ -306,11 +306,23 @@ def _marlin_provider_intent_token() -> str:
         return ""
 
 
-def _marlin_gateway_swap_authorization() -> dict[str, str]:
+def _marlin_gateway_swap_authorization(
+    *,
+    connector_id: str,
+    network: str,
+    wallet_address: str,
+    notional: Any,
+    slippage_bps: Any,
+) -> dict[str, str]:
     return {
         "action": "gateway_swap",
+        "connector_id": connector_id,
+        "network": network,
+        "notional": str(notional),
         "scope": "provider_intent",
+        "slippage_bps": str(slippage_bps),
         "source": "marlin",
+        "wallet_address": wallet_address,
     }
 
 
@@ -377,7 +389,13 @@ async def _submit_swap_intent(
             side=body.side,
             slippage_pct=float(slippage_pct),
             pool_address=body.risk_metadata.get("pool_address"),
-            live_action_authorization=_marlin_gateway_swap_authorization(),
+            live_action_authorization=_marlin_gateway_swap_authorization(
+                connector_id=body.connector_name,
+                network=network,
+                wallet_address=wallet_address,
+                notional=body.quantity,
+                slippage_bps=slippage_pct * Decimal("100"),
+            ),
             marlin_provider_intent_authorized=provider_intent_authorized,
         )
     except HTTPException as exc:

@@ -525,8 +525,13 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash(m
     assert EXECUTE_SWAP_CALLS[0]["marlin_provider_intent_authorized"] is True
     assert EXECUTE_SWAP_CALLS[0]["live_action_authorization"] == {
         "action": "gateway_swap",
+        "connector_id": "jupiter",
+        "network": "mainnet-beta",
+        "notional": "0.0001",
         "scope": "provider_intent",
+        "slippage_bps": "100.0",
         "source": "marlin",
+        "wallet_address": "9AtFd6KcR9tx5Etxc9SVkYrkZb7yC5BDibao7yPT5Ce1",
     }
 
 
