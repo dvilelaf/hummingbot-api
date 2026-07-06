@@ -78,6 +78,15 @@ def test_provider_runtime_registered_routes_exclude_admin_surfaces():
     assert "docker.router" not in provider
 
 
+def test_marlin_cowswap_startup_reconciles_gateway_wallet_before_runtime_build():
+    source = _main_source()
+    section = source[source.index("if marlin_runtime_enabled():") : source.index("else:", source.index("if marlin_runtime_enabled():"))]
+
+    assert "_marlin_gateway_default_wallet_address(" in section
+    assert "set_marlin_default_wallet(" in section
+    assert 'wallet_ref="base:mainnet:evm_gateway"' in section
+
+
 def test_services_package_does_not_eager_import_orchestration_modules():
     for module_name in (
         "services",

@@ -232,6 +232,13 @@ async def lifespan(app: FastAPI):
                 chain="ethereum",
                 network="base",
             )
+            if cowswap_owner:
+                await accounts_service.gateway_client.set_marlin_default_wallet(
+                    address=cowswap_owner,
+                    chain="ethereum",
+                    network="base",
+                    wallet_ref="base:mainnet:evm_gateway",
+                )
         else:
             cowswap_owner = os.environ.get("COWSWAP_OWNER_ADDRESS")
         if not cowswap_owner and not marlin_runtime_enabled():
