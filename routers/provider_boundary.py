@@ -117,8 +117,12 @@ async def provider_snapshot(
             "swap" in {action.lower() for action in provider_actions}
             and connector_name in GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS
         ):
+            chain_network_key = GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS[connector_name]
             gateway_portfolio_value = _gateway_verified_portfolio_rows(
-                account_state.get(GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS[connector_name])
+                account_state.get(chain_network_key),
+                network=body.network or chain_network_key,
+                route_id=body.route_id,
+                wallet_ref=body.wallet_ref,
             )
             if gateway_portfolio_value is not None:
                 portfolio_value = gateway_portfolio_value
@@ -567,16 +571,36 @@ def _metadata_connector_name(connector_name: str) -> str:
     return connector_name
 
 
-def _gateway_verified_portfolio_rows(value: Any) -> Any:
+def _gateway_verified_portfolio_rows(
+    value: Any,
+    *,
+    network: str | None = None,
+    route_id: str | None = None,
+    wallet_ref: str | None = None,
+) -> Any:
     if not isinstance(value, list):
         return value
     rows: list[Any] = []
     for item in value:
         if isinstance(item, dict):
-            rows.append({**item, "balance_source": "gateway"})
+            row = {**item, "balance_source": "gateway"}
+            if network:
+                row["network"] = _provider_snapshot_network_scope(network)
+            if route_id:
+                row["route_id"] = route_id
+            if wallet_ref:
+                row["wallet_ref"] = wallet_ref
+            rows.append(row)
         else:
             rows.append(item)
     return rows
+
+
+def _provider_snapshot_network_scope(network: str) -> str:
+    normalized = _network_alias(network)
+    if normalized == "ethereum-base":
+        return "base"
+    return normalized.removeprefix("solana-")
 
 
 def _gateway_balance_tokens_for_pair(

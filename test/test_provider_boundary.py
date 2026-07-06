@@ -227,7 +227,10 @@ def test_swap_provider_snapshot_uses_gateway_chain_network_portfolio():
             provider_boundary.ProviderSnapshotRequest(
                 account_name="master_account",
                 connector_name="jupiter",
+                network="mainnet-beta",
+                route_id="jupiter-sol-usdc-mainnet",
                 trading_pair="SOL-USDC",
+                wallet_ref="solana:mainnet-beta:solana_gateway",
             ),
             request,
             service,
@@ -246,8 +249,22 @@ def test_swap_provider_snapshot_uses_gateway_chain_network_portfolio():
     assert result.portfolio == {
         "master_account": {
             "jupiter": [
-                {"balance_source": "gateway", "token": "SOL", "units": "0.1"},
-                {"balance_source": "gateway", "token": "USDC", "units": "5"},
+                {
+                    "balance_source": "gateway",
+                    "network": "mainnet-beta",
+                    "route_id": "jupiter-sol-usdc-mainnet",
+                    "token": "SOL",
+                    "units": "0.1",
+                    "wallet_ref": "solana:mainnet-beta:solana_gateway",
+                },
+                {
+                    "balance_source": "gateway",
+                    "network": "mainnet-beta",
+                    "route_id": "jupiter-sol-usdc-mainnet",
+                    "token": "USDC",
+                    "units": "5",
+                    "wallet_ref": "solana:mainnet-beta:solana_gateway",
+                },
             ]
         }
     }
@@ -263,7 +280,10 @@ def test_base_swap_provider_snapshot_scopes_gateway_balance_tokens():
             provider_boundary.ProviderSnapshotRequest(
                 account_name="master_account",
                 connector_name="aerodrome",
+                network="base",
+                route_id="aerodrome-aero-usdc-mainnet",
                 trading_pair="AERO-USDC",
+                wallet_ref="base:mainnet:evm_gateway",
             ),
             request,
             service,
@@ -282,9 +302,30 @@ def test_base_swap_provider_snapshot_scopes_gateway_balance_tokens():
     assert result.portfolio == {
         "master_account": {
             "aerodrome": [
-                {"balance_source": "gateway", "token": "AERO", "units": "2"},
-                {"balance_source": "gateway", "token": "USDC", "units": "5"},
-                {"balance_source": "gateway", "token": "ETH", "units": "0.01"},
+                {
+                    "balance_source": "gateway",
+                    "network": "base",
+                    "route_id": "aerodrome-aero-usdc-mainnet",
+                    "token": "AERO",
+                    "units": "2",
+                    "wallet_ref": "base:mainnet:evm_gateway",
+                },
+                {
+                    "balance_source": "gateway",
+                    "network": "base",
+                    "route_id": "aerodrome-aero-usdc-mainnet",
+                    "token": "USDC",
+                    "units": "5",
+                    "wallet_ref": "base:mainnet:evm_gateway",
+                },
+                {
+                    "balance_source": "gateway",
+                    "network": "base",
+                    "route_id": "aerodrome-aero-usdc-mainnet",
+                    "token": "ETH",
+                    "units": "0.01",
+                    "wallet_ref": "base:mainnet:evm_gateway",
+                },
             ]
         }
     }

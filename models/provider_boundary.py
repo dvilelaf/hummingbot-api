@@ -7,8 +7,11 @@ from pydantic import BaseModel, Field
 class ProviderSnapshotRequest(BaseModel):
     account_name: str = Field(min_length=1)
     connector_name: str = Field(min_length=1)
+    network: Optional[str] = Field(default=None, min_length=1)
     trading_pair: str = Field(min_length=1)
     refresh_portfolio: bool = True
+    route_id: Optional[str] = Field(default=None, min_length=1)
+    wallet_ref: Optional[str] = Field(default=None, min_length=1)
 
 
 class ProviderSnapshotResponse(BaseModel):
