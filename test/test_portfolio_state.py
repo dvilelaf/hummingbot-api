@@ -212,6 +212,72 @@ class TestGatewayRefreshSelection:
 
         service._update_gateway_balances.assert_awaited_once_with(chain_networks=None)
 
+    @pytest.mark.asyncio
+    async def test_marlin_gateway_balance_refresh_ensures_derived_wallet(self, monkeypatch):
+        """Marlin runtime must rehydrate Gateway's mnemonic-derived wallet before balances."""
+        from services.marlin_runtime import MARLIN_RUNTIME_PROFILE, MARLIN_RUNTIME_PROFILE_ENV
+        from services.accounts_service import AccountsService
+
+        class FakeGatewayClient:
+            def __init__(self):
+                self.default_wallet_calls = []
+                self.balance_calls = []
+
+            async def ping(self):
+                return True
+
+            async def set_marlin_default_wallet(self, **kwargs):
+                self.default_wallet_calls.append(kwargs)
+                return {"status": "ok"}
+
+            async def get_balances(self, chain, network, address, tokens=None):
+                self.balance_calls.append(
+                    {
+                        "chain": chain,
+                        "network": network,
+                        "address": address,
+                        "tokens": tokens,
+                    },
+                )
+                return {"balances": {}}
+
+        monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, MARLIN_RUNTIME_PROFILE)
+        monkeypatch.setenv(
+            "MARLIN_MNEMONIC",
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        service = AccountsService.__new__(AccountsService)
+        service.gateway_client = FakeGatewayClient()
+
+        await service.get_gateway_balances(
+            "ethereum",
+            "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+            network="ethereum-base",
+            tokens=["USDC"],
+        )
+        await service.get_gateway_balances(
+            "ethereum",
+            "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+            network="ethereum-base",
+            tokens=["USDC"],
+        )
+
+        assert service.gateway_client.default_wallet_calls == [
+            {
+                "chain": "ethereum",
+                "network": "ethereum-base",
+                "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+                "wallet_ref": "base:mainnet:evm_gateway",
+            },
+            {
+                "chain": "ethereum",
+                "network": "ethereum-base",
+                "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+                "wallet_ref": "base:mainnet:evm_gateway",
+            },
+        ]
+        assert len(service.gateway_client.balance_calls) == 2
+
 
 class TestConnectorStartup:
     """Tests for connector startup ordering."""

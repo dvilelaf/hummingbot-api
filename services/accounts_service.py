@@ -35,6 +35,7 @@ from services.marlin_runtime import (
     GATEWAY_WALLET_POLICIES,
     _canonical_gateway_wallet_context,
     _derive_marlin_public_address,
+    is_marlin_runtime,
 )
 from utils.file_system import fs_util
 
@@ -2505,18 +2506,50 @@ class AccountsService:
                 self.accounts_state["master_account"][chain_network] = result or []
 
     @staticmethod
-    def _marlin_gateway_default_wallet_address(*, chain: str, network: str) -> Optional[str]:
+    def _marlin_gateway_wallet_identity(*, chain: str, network: str) -> Optional[dict[str, str]]:
         canonical = _canonical_gateway_wallet_context(chain=chain, network=network)
         policy = GATEWAY_WALLET_POLICIES.get(canonical)
         if policy is None:
             logger.debug("Unsupported Marlin wallet policy for %s/%s", chain, network)
             return None
-        derivation_path, _wallet_ref, coin = policy
+        derivation_path, wallet_ref, coin = policy
         try:
-            return _derive_marlin_public_address(derivation_path=derivation_path, coin=coin)
+            address = _derive_marlin_public_address(derivation_path=derivation_path, coin=coin)
         except Exception as exc:
             logger.error("Failed to derive Marlin Gateway wallet for %s/%s: %s", chain, network, exc)
             return None
+        return {
+            "chain": chain,
+            "network": network,
+            "address": address,
+            "wallet_ref": wallet_ref,
+        }
+
+    @staticmethod
+    def _marlin_gateway_default_wallet_address(*, chain: str, network: str) -> Optional[str]:
+        identity = AccountsService._marlin_gateway_wallet_identity(chain=chain, network=network)
+        return identity["address"] if identity else None
+
+    async def _ensure_marlin_gateway_wallet(
+        self,
+        *,
+        chain: str,
+        network: str,
+        address: str,
+    ) -> None:
+        if not is_marlin_runtime():
+            return
+        identity = self._marlin_gateway_wallet_identity(chain=chain, network=network)
+        if not identity:
+            return
+        if identity["address"].lower() != address.lower():
+            return
+        await self.gateway_client.set_marlin_default_wallet(
+            chain=chain,
+            network=network,
+            address=identity["address"],
+            wallet_ref=identity["wallet_ref"],
+        )
 
     async def get_gateway_wallets(self) -> List[Dict]:
         """
@@ -2624,6 +2657,12 @@ class AccountsService:
                 network = await self.gateway_client.get_default_network(chain)
             if not network:
                 raise HTTPException(status_code=400, detail=f"Could not determine network for chain '{chain}'")
+
+            await self._ensure_marlin_gateway_wallet(
+                chain=chain,
+                network=network,
+                address=address,
+            )
 
             # Get balances from Gateway
             balances_response = await self.gateway_client.get_balances(chain, network, address, tokens=tokens)
