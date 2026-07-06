@@ -76,43 +76,15 @@ async def test_cowswap_order_book_initialization_fails_without_runtime_price(mon
 
 
 @pytest.mark.asyncio
-async def test_cowswap_order_book_data_uses_runtime_price(monkeypatch):
-    from services import market_data_service as module
+async def test_cowswap_order_book_data_does_not_fabricate_depth():
     from services.market_data_service import MarketDataService
 
     class ConnectorService:
         def get_best_connector_for_market(self, *_args, **_kwargs):
-            raise AssertionError("CowSwap order-book data must not use generic connectors")
+            return None
 
-    async def fake_cowswap_prices(*, runtime, trading_pairs):  # noqa: ARG001
-        assert trading_pairs == ["WETH-USDC"]
-        return {"WETH-USDC": 2500.0}
-
-    monkeypatch.setattr(module, "cowswap_runtime_prices", fake_cowswap_prices)
     service = MarketDataService(connector_service=ConnectorService(), rate_oracle=object())
 
     data = await service.get_order_book_data("cowswap", "WETH-USDC")
 
-    assert data["trading_pair"] == "WETH-USDC"
-    assert data["bids"][0][0] < 2500.0
-    assert data["asks"][0][0] > 2500.0
-
-
-@pytest.mark.asyncio
-async def test_cowswap_order_book_data_fails_without_runtime_price(monkeypatch):
-    from services import market_data_service as module
-    from services.market_data_service import MarketDataService
-
-    class ConnectorService:
-        def get_best_connector_for_market(self, *_args, **_kwargs):
-            raise AssertionError("CowSwap order-book data must not use generic connectors")
-
-    async def fake_cowswap_prices(*, runtime, trading_pairs):  # noqa: ARG001
-        return {"error": "unsupported pair"}
-
-    monkeypatch.setattr(module, "cowswap_runtime_prices", fake_cowswap_prices)
-    service = MarketDataService(connector_service=ConnectorService(), rate_oracle=object())
-
-    data = await service.get_order_book_data("cowswap", "UNI-USDC")
-
-    assert data == {"error": "unsupported pair"}
+    assert data == {"error": "No connector available for cowswap"}

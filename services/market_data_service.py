@@ -264,27 +264,6 @@ class MarketDataService:
             Dictionary with bids, asks, and metadata
         """
         try:
-            if connector_name == COWSWAP_CONNECTOR_NAME:
-                prices = await self.get_prices(
-                    connector_name=connector_name,
-                    trading_pairs=[trading_pair],
-                    account_name=account_name,
-                )
-                price = prices.get(trading_pair)
-                if price is None or "error" in prices:
-                    return {"error": prices.get("error", f"No CowSwap quote available for {trading_pair}")}
-                mid = float(price)
-                if mid <= 0:
-                    return {"error": f"No positive CowSwap quote available for {trading_pair}"}
-                spread = max(mid * 0.0001, 0.00000001)
-                amount = 10.0
-                return {
-                    "trading_pair": trading_pair,
-                    "bids": [[mid - spread, amount]],
-                    "asks": [[mid + spread, amount]],
-                    "timestamp": time.time(),
-                }
-
             connector = self._connector_service.get_best_connector_for_market(
                 connector_name, account_name
             )
