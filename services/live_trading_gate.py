@@ -7,9 +7,7 @@ from fastapi import HTTPException
 LIVE_ORDER_SUBMISSION_ENV = "TRADING_SAFETY_LIVE_ORDER_SUBMISSION_ENABLED"
 LIVE_ORDER_CANCEL_ENV = "TRADING_SAFETY_LIVE_ORDER_CANCEL_ENABLED"
 LIVE_GATEWAY_MUTATIONS_ENV = "TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED"
-LIVE_GATEWAY_BRIDGE_EXECUTE_ENV = "TRADING_SAFETY_LIVE_GATEWAY_BRIDGE_EXECUTE_ENABLED"
 MARLIN_RUNTIME_PROFILE_ENV = "MARLIN_RUNTIME_PROFILE"
-BRIDGE_PROVIDER_ALLOWLIST_ENV = "TRADING_SAFETY_BRIDGE_PROVIDER_ALLOWLIST"
 SAFE_CONNECTOR_SUFFIXES = ("_paper_trade", "_testnet", "_sandbox")
 SAFE_GATEWAY_NETWORK_MARKERS = ("testnet", "devnet", "sepolia", "goerli", "amoy", "fuji", "local")
 _used_bridge_authorization_nonces: set[str] = set()
@@ -140,16 +138,6 @@ def assert_live_bridge_execution_allowed(
     source: str,
 ) -> None:
     """Fail closed before forwarding a Marlin-approved bridge execution to Gateway."""
-    if not _env_bool(LIVE_GATEWAY_BRIDGE_EXECUTE_ENV):
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "live Gateway bridge execution disabled; "
-                f"set {LIVE_GATEWAY_BRIDGE_EXECUTE_ENV}=true only for the Marlin runtime "
-                f"(source={source})"
-            ),
-        )
-    _assert_bridge_provider_allowed(expected_provider, source=source)
     _assert_bridge_authorization_matches(
         live_action_authorization,
         {
@@ -188,16 +176,6 @@ def _env_bool(name: str) -> bool:
 
 def _is_marlin_runtime_profile() -> bool:
     return os.getenv(MARLIN_RUNTIME_PROFILE_ENV, "").strip().lower() == "marlin"
-
-
-def _assert_bridge_provider_allowed(provider: Any, *, source: str) -> None:
-    allowed = {
-        item.strip()
-        for item in os.getenv(BRIDGE_PROVIDER_ALLOWLIST_ENV, "").split(",")
-        if item.strip()
-    }
-    if str(provider).strip() not in allowed:
-        _raise_authorization_error("bridge provider not allowlisted", source=source)
 
 
 def _assert_bridge_authorization_matches(

@@ -523,8 +523,6 @@ def test_gateway_wallet_send_checks_live_gate_before_send_transaction():
 
 def test_bridge_execution_gate_rejects_authorization_route_payload_mismatch(monkeypatch):
     gate = _live_gate_module()
-    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_BRIDGE_EXECUTE_ENABLED", "true")
-    monkeypatch.setenv("TRADING_SAFETY_BRIDGE_PROVIDER_ALLOWLIST", "lifi,across")
 
     with pytest.raises(HTTPException) as exc:
         gate.assert_live_bridge_execution_allowed(
@@ -546,8 +544,6 @@ def test_bridge_execution_gate_rejects_authorization_route_payload_mismatch(monk
 
 def test_bridge_execution_gate_rejects_nonce_replay(monkeypatch):
     gate = _live_gate_module()
-    monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_BRIDGE_EXECUTE_ENABLED", "true")
-    monkeypatch.setenv("TRADING_SAFETY_BRIDGE_PROVIDER_ALLOWLIST", "lifi")
     monkeypatch.setenv("MARLIN_LIVE_ACTION_AUTH_SECRET", "test-secret")
 
     kwargs = {
