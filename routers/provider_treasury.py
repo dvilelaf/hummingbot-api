@@ -43,8 +43,8 @@ MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER = (
     "Marlin Arbitrum wallet identity unavailable for Hyperliquid Bridge2 rebalance"
 )
 CCTP_IDENTITY_MISMATCH_BLOCKER = (
-    "cctp_base_arbitrum_usdc identity mismatch: Base sender and Arbitrum recipient "
-    "must be the same mnemonic-derived EVM address"
+    "cctp_base_arbitrum_usdc identity mismatch: destination_account must be the "
+    "mnemonic-derived Arbitrum EVM address"
 )
 MARLIN_BASE_IDENTITY_UNAVAILABLE_BLOCKER = (
     "Marlin Base wallet identity unavailable for CCTP treasury rebalance"
@@ -80,10 +80,7 @@ async def create_provider_treasury_rebalance(
                 source_network=CCTP_DESTINATION_NETWORK,
                 blocker=MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER,
             )
-            if not (
-                _addresses_equal(wallet_identity["address"], body.destination_account)
-                and _addresses_equal(destination_identity["address"], body.destination_account)
-            ):
+            if not _addresses_equal(destination_identity["address"], body.destination_account):
                 raise HTTPException(status_code=400, detail=CCTP_IDENTITY_MISMATCH_BLOCKER)
             provider = CCTP_BASE_ARBITRUM_USDC_ROUTE
         else:

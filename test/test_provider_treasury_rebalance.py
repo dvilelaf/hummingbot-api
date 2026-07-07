@@ -126,10 +126,12 @@ class FakeAccountsService:
         self,
         *,
         address="0x1111111111111111111111111111111111111111",
+        arbitrum_address=None,
         wallet_ref="arbitrum:mainnet:evm_gateway",
     ):
         self.gateway_client = FakeGatewayClient()
         self.address = address
+        self.arbitrum_address = arbitrum_address or address
         self.wallet_ref = wallet_ref
 
     def _marlin_gateway_wallet_identity(self, *, chain, network):
@@ -142,8 +144,9 @@ class FakeAccountsService:
                 if network == "base"
                 else "arbitrum:mainnet:evm_gateway"
             )
+        address = self.arbitrum_address if network == "arbitrum-mainnet" else self.address
         return {
-            "address": self.address,
+            "address": address,
             "chain": chain,
             "network": network,
             "wallet_ref": wallet_ref,
@@ -390,7 +393,11 @@ def test_concurrent_execute_rebalance_marks_pending_before_gateway_submit(monkey
 
 def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(monkeypatch):
     provider_treasury = _provider_treasury_module()
-    service = FakeAccountsService(wallet_ref="auto")
+    service = FakeAccountsService(
+        address="0x1111111111111111111111111111111111111111",
+        arbitrum_address="0x2222222222222222222222222222222222222222",
+        wallet_ref="auto",
+    )
     monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
 
     result = asyncio.run(
@@ -401,6 +408,7 @@ def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(mo
                 source_network="base",
                 destination_venue="gateway",
                 destination_network="arbitrum-mainnet",
+                destination_account="0x2222222222222222222222222222222222222222",
                 amount="1.5",
             ),
             _authorized_request(),
@@ -418,7 +426,7 @@ def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(mo
             "wallet_ref": "base:mainnet:evm_gateway",
         },
         {
-            "address": "0x1111111111111111111111111111111111111111",
+            "address": "0x2222222222222222222222222222222222222222",
             "chain": "ethereum",
             "network": "arbitrum-mainnet",
             "wallet_ref": "arbitrum:mainnet:evm_gateway",
@@ -428,7 +436,7 @@ def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(mo
         {
             "idempotency_key": "rebalance-idem-001",
             "wallet_address": "0x1111111111111111111111111111111111111111",
-            "destination_address": "0x1111111111111111111111111111111111111111",
+            "destination_address": "0x2222222222222222222222222222222222222222",
             "amount": "1.5",
             "provider": "cctp_base_arbitrum_usdc",
             "source_network": "base",
