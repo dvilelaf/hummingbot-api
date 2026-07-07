@@ -103,6 +103,7 @@ def _install_provider_boundary_stubs():
     cowswap_runtime = types.ModuleType("services.cowswap_runtime")
     cowswap_runtime.COWSWAP_CONNECTOR_NAME = "cowswap"
     cowswap_runtime.cowswap_order_submission_blocker = lambda *args, **kwargs: COWSWAP_BLOCKER
+    cowswap_runtime.cowswap_runtime_prices = _fake_cowswap_runtime_prices
     cowswap_runtime.cowswap_supported_order_types = lambda: ["MARKET"]
     sys.modules["services.cowswap_runtime"] = cowswap_runtime
 
@@ -157,6 +158,10 @@ def _async_return(value):
     return _inner
 
 
+async def _fake_cowswap_runtime_prices(*, runtime, trading_pairs):  # noqa: ARG001
+    return {pair: 2500.0 for pair in trading_pairs}
+
+
 class FakeGatewayClient:
     async def ping(self):
         return True
@@ -190,6 +195,15 @@ class FakeAccountsService:
         self.gateway_client = FakeGatewayClient()
         self.update_calls = []
         self.balance_refresh_errors = {}
+        self._cowswap_runtime = SimpleNamespace(
+            trading_rules={
+                "WETH-USDC": SimpleNamespace(
+                    min_base_amount_increment=0,
+                    min_order_size=0,
+                    min_price_increment=0,
+                )
+            }
+        )
         self.accounts_state = {
             "master_account": {
                 "jupiter": [{"token": "SOL", "units": "0"}],
@@ -380,6 +394,9 @@ def test_cowswap_provider_snapshot_exposes_order_actions_when_runtime_ready():
     assert result.order_types == ["MARKET"]
     assert result.provider_actions == ["order", "cancel"]
     assert "provider actions missing: cowswap" not in result.operator_issues
+    rows = result.portfolio["master_account"]["cowswap"]
+    assert {"available_units": 0.0, "price": 2500.0, "token": "WETH", "units": 0.0, "value": 0.0} in rows
+    assert {"available_units": 0.0, "price": 1.0, "token": "USDC", "units": 0.0, "value": 0.0} in rows
 
 
 def test_xrpl_provider_snapshot_reports_account_activation_blocker():

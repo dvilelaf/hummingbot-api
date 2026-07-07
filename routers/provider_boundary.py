@@ -22,6 +22,7 @@ from services.accounts_service import AccountsService
 from services.cowswap_runtime import (
     COWSWAP_CONNECTOR_NAME,
     cowswap_order_submission_blocker,
+    cowswap_runtime_prices,
     cowswap_supported_order_types,
 )
 from services.live_trading_gate import (
@@ -132,6 +133,16 @@ async def provider_snapshot(
             portfolio = {body.account_name: {connector_name: portfolio_value}}
         else:
             portfolio = {body.account_name: {}}
+        if (
+            connector_name == COWSWAP_CONNECTOR_NAME
+            and cow_runtime_blocker is None
+            and trading_rule is not None
+        ):
+            portfolio = await _portfolio_with_cowswap_quote_prices(
+                accounts_service,
+                portfolio=portfolio,
+                request=body,
+            )
     except Exception as exc:
         issues.append(f"portfolio unavailable: {_redact_secret_text(exc)}")
     if connector_name == "xrpl" and _xrpl_portfolio_unfunded(portfolio, body.account_name):
@@ -831,3 +842,70 @@ def _normalized_provider_trading_rule(connector_name: str, rule: dict[str, Any])
     if min_order_value < hyperliquid_minimum:
         normalized["min_order_value"] = float(hyperliquid_minimum)
     return normalized
+
+
+async def _portfolio_with_cowswap_quote_prices(
+    accounts_service: AccountsService,
+    *,
+    portfolio: dict[str, Any] | None,
+    request: ProviderSnapshotRequest,
+) -> dict[str, Any] | None:
+    runtime = getattr(accounts_service, "_cowswap_runtime", None)
+    prices = await cowswap_runtime_prices(
+        runtime=runtime,
+        trading_pairs=[request.trading_pair],
+    )
+    price = prices.get(request.trading_pair) if "error" not in prices else None
+    if price is None:
+        return portfolio
+    try:
+        base_price = Decimal(str(price))
+    except Exception:
+        return portfolio
+    if base_price <= 0:
+        return portfolio
+
+    base_asset, quote_asset = _split_pair(request.trading_pair)
+    account_portfolio: dict[str, Any] = dict(portfolio or {})
+    account_rows = dict(account_portfolio.get(request.account_name) or {})
+    connector_rows = list(account_rows.get(COWSWAP_CONNECTOR_NAME) or [])
+    connector_rows = _upsert_price_row(connector_rows, token=base_asset, price=base_price)
+    if quote_asset.upper() in {"DAI", "USDC", "USDT", "USD"}:
+        connector_rows = _upsert_price_row(connector_rows, token=quote_asset, price=Decimal("1"))
+    account_rows[COWSWAP_CONNECTOR_NAME] = connector_rows
+    account_portfolio[request.account_name] = account_rows
+    return account_portfolio
+
+
+def _split_pair(trading_pair: str) -> tuple[str, str]:
+    parts = [part.strip().upper() for part in trading_pair.replace("/", "-").split("-") if part.strip()]
+    if len(parts) != 2:
+        return trading_pair.upper(), ""
+    return parts[0], parts[1]
+
+
+def _upsert_price_row(rows: list[Any], *, token: str, price: Decimal) -> list[Any]:
+    updated: list[Any] = []
+    found = False
+    for row in rows:
+        if not isinstance(row, dict):
+            updated.append(row)
+            continue
+        if str(row.get("token") or row.get("asset") or "").upper() != token.upper():
+            updated.append(row)
+            continue
+        patched = dict(row)
+        patched["price"] = float(price)
+        updated.append(patched)
+        found = True
+    if not found:
+        updated.append(
+            {
+                "available_units": 0.0,
+                "price": float(price),
+                "token": token.upper(),
+                "units": 0.0,
+                "value": 0.0,
+            }
+        )
+    return updated

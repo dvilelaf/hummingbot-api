@@ -219,6 +219,14 @@ async def get_supported_order_types(request: Request, connector_name: str):
     """
     try:
         if connector_name == COWSWAP_CONNECTOR_NAME:
+            accounts_service: AccountsService = request.app.state.accounts_service
+            dependencies = getattr(accounts_service, "_cowswap_runtime_dependencies", None)
+            blocker = cowswap_order_submission_blocker(
+                connector_name,
+                runtime_dependencies=dependencies,
+            )
+            if blocker:
+                raise HTTPException(status_code=503, detail=blocker)
             order_types = cowswap_supported_order_types()
             if order_types is None:
                 raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found")
