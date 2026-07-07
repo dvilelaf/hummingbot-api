@@ -162,7 +162,8 @@ async def execute_provider_treasury_rebalance(
             if stored is None:
                 raise HTTPException(status_code=404, detail="provider treasury rebalance request not found")
             if stored.get("status") in {"pending", "submitted", "confirmed"}:
-                raise HTTPException(status_code=409, detail="provider treasury rebalance already submitted")
+                result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
+                return _rebalance_response(result, rebalance_id=rebalance_id)
             stored["status"] = "pending"
             try:
                 result = await accounts_service.gateway_client.execute_treasury_rebalance(
@@ -174,6 +175,8 @@ async def execute_provider_treasury_rebalance(
                     source_network=stored["source_network"],
                     destination_network=stored.get("destination_network") or None,
                     live_action_authorization=_marlin_gateway_rebalance_authorization(
+                        destination_address=stored["destination_address"],
+                        destination_network=stored.get("destination_network") or "",
                         wallet_address=stored["wallet_address"],
                         amount=stored["amount"],
                         provider=stored["provider"],
@@ -290,9 +293,18 @@ def _rebalance_response(
             or result.get("txHash")
             or result.get("hash")
         ),
+        approval_transaction_hash=_optional_text(
+            result.get("approval_transaction_hash") or result.get("approvalTransactionHash")
+        ),
+        burn_transaction_hash=_optional_text(
+            result.get("burn_transaction_hash") or result.get("burnTransactionHash")
+        ),
+        finalize_transaction_hash=_optional_text(
+            result.get("finalize_transaction_hash") or result.get("finalizeTransactionHash")
+        ),
         provider_status=_optional_text(result.get("provider_status") or result.get("providerStatus")),
         provider_error=_optional_text(result.get("provider_error") or result.get("providerError")),
-        metadata=result.get("metadata") if isinstance(result.get("metadata"), dict) else {},
+        metadata=_safe_metadata(result.get("metadata")),
     )
 
 
@@ -310,6 +322,28 @@ def _optional_text(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+_SENSITIVE_METADATA_KEYS = {
+    "attestation",
+    "attestationbytes",
+    "calldata",
+    "mnemonic",
+    "privatekey",
+    "rawcalldata",
+    "signature",
+    "txcalldata",
+}
+
+
+def _safe_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key): item
+        for key, item in value.items()
+        if str(key).replace("_", "").lower() not in _SENSITIVE_METADATA_KEYS
+    }
 
 
 def _decimal_payload_value(value: Decimal) -> str:
@@ -355,6 +389,8 @@ def _marlin_provider_intent_token() -> str:
 
 def _marlin_gateway_rebalance_authorization(
     *,
+    destination_address: str,
+    destination_network: str,
     wallet_address: str,
     amount: str,
     provider: str,
@@ -363,6 +399,8 @@ def _marlin_gateway_rebalance_authorization(
     return {
         "action": "gateway_rebalance",
         "connector_id": "treasury" if provider == CCTP_BASE_ARBITRUM_USDC_ROUTE else "hyperliquid",
+        "destination_address": destination_address,
+        "destination_network": destination_network,
         "network": source_network,
         "notional": amount,
         "scope": "provider_treasury",

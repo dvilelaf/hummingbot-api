@@ -33,6 +33,9 @@ class ProviderTreasuryRebalanceResponse(BaseModel):
     provider: Optional[str] = None
     route: Optional[str] = None
     transaction_hash: Optional[str] = None
+    approval_transaction_hash: Optional[str] = None
+    burn_transaction_hash: Optional[str] = None
+    finalize_transaction_hash: Optional[str] = None
     provider_status: Optional[str] = None
     provider_error: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)

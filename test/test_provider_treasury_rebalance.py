@@ -110,6 +110,11 @@ class FakeGatewayClient:
         return {
             "status": "submitted",
             "transactionHash": "0xabc",
+            "approvalTransactionHash": "0xapprove",
+            "burnTransactionHash": "0xburn",
+            "finalize_transaction_hash": "0xfinalize",
+            "providerStatus": "burn_submitted",
+            "metadata": {"phase": "burn"},
         }
 
     async def get_treasury_rebalance(self, rebalance_id):
@@ -117,7 +122,13 @@ class FakeGatewayClient:
         return {
             "id": rebalance_id,
             "status": "confirmed",
-            "transactionHash": "0xabc",
+            "transactionHash": "0xstatus",
+            "approval_transaction_hash": "0xstatus-approve",
+            "burnTransactionHash": "0xstatus-burn",
+            "finalizeTransactionHash": "0xstatus-finalize",
+            "provider_status": "complete",
+            "providerError": "provider warning",
+            "metadata": {"phase": "complete"},
         }
 
 
@@ -197,14 +208,14 @@ def test_hyperliquid_bridge2_rebalance_build_forwards_semantic_gateway_request(m
     assert service.gateway_client.build_calls == [
         {
             "idempotency_key": "rebalance-idem-001",
-                "wallet_address": "0x1111111111111111111111111111111111111111",
-                "destination_address": "0x1111111111111111111111111111111111111111",
-                "amount": "25.5",
-                "provider": "hyperliquid_bridge2",
-                "source_network": "arbitrum",
-                "destination_network": None,
-            }
-        ]
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "destination_address": "0x1111111111111111111111111111111111111111",
+            "amount": "25.5",
+            "provider": "hyperliquid_bridge2",
+            "source_network": "arbitrum",
+            "destination_network": None,
+        }
+    ]
 
 
 def test_unsupported_rebalance_route_fails_closed_with_exact_blocker(monkeypatch):
@@ -277,20 +288,33 @@ def test_execute_and_status_forward_to_gateway_treasury_rebalance_endpoints(monk
 
     assert execute_result.status == "submitted"
     assert execute_result.transaction_hash == "0xabc"
+    assert execute_result.approval_transaction_hash == "0xapprove"
+    assert execute_result.burn_transaction_hash == "0xburn"
+    assert execute_result.finalize_transaction_hash == "0xfinalize"
+    assert execute_result.provider_status == "burn_submitted"
+    assert execute_result.metadata == {"phase": "burn"}
     assert status_result.status == "confirmed"
-    assert status_result.transaction_hash == "0xabc"
+    assert status_result.transaction_hash == "0xstatus"
+    assert status_result.approval_transaction_hash == "0xstatus-approve"
+    assert status_result.burn_transaction_hash == "0xstatus-burn"
+    assert status_result.finalize_transaction_hash == "0xstatus-finalize"
+    assert status_result.provider_status == "complete"
+    assert status_result.provider_error == "provider warning"
+    assert status_result.metadata == {"phase": "complete"}
     assert service.gateway_client.execute_calls == [
         {
             "idempotency_key": "rebalance-idem-001",
-                "wallet_address": "0x1111111111111111111111111111111111111111",
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "destination_address": "0x1111111111111111111111111111111111111111",
+            "amount": "25.5",
+            "provider": "hyperliquid_bridge2",
+            "source_network": "arbitrum",
+            "destination_network": None,
+            "live_action_authorization": {
+                "action": "gateway_rebalance",
+                "connector_id": "hyperliquid",
                 "destination_address": "0x1111111111111111111111111111111111111111",
-                "amount": "25.5",
-                "provider": "hyperliquid_bridge2",
-                "source_network": "arbitrum",
-                "destination_network": None,
-                "live_action_authorization": {
-                    "action": "gateway_rebalance",
-                    "connector_id": "hyperliquid",
+                "destination_network": "",
                 "network": "arbitrum",
                 "notional": "25.5",
                 "scope": "provider_treasury",
@@ -301,6 +325,26 @@ def test_execute_and_status_forward_to_gateway_treasury_rebalance_endpoints(monk
         }
     ]
     assert service.gateway_client.status_calls == ["rebalance-123"]
+
+
+def test_rebalance_response_scrubs_provider_internal_metadata():
+    provider_treasury = _provider_treasury_module()
+
+    result = provider_treasury._rebalance_response(
+        {
+            "id": "rebalance-idem-001",
+            "status": "confirmed",
+            "metadata": {
+                "phase": "complete",
+                "txCalldata": "0xcalldata",
+                "attestationBytes": "0xattestation",
+                "privateKey": "secret",
+                "mnemonic": "secret phrase",
+            },
+        }
+    )
+
+    assert result.metadata == {"phase": "complete"}
 
 
 def test_execute_rebalance_is_not_rebroadcast_with_new_execute_idempotency(monkeypatch):
@@ -323,29 +367,36 @@ def test_execute_rebalance_is_not_rebroadcast_with_new_execute_idempotency(monke
         ),
     )
 
-    with pytest.raises(provider_treasury.HTTPException) as exc:
-        asyncio.run(
-            provider_treasury.execute_provider_treasury_rebalance(
-                "rebalance-idem-001",
-                provider_treasury.ProviderTreasuryRebalanceExecuteRequest(idempotency_key="second-execute"),
-                _authorized_request(),
-                service,
-            ),
+    result = asyncio.run(
+        provider_treasury.execute_provider_treasury_rebalance(
+            "rebalance-idem-001",
+            provider_treasury.ProviderTreasuryRebalanceExecuteRequest(idempotency_key="second-execute"),
+            _authorized_request(),
+            service,
         )
+    )
 
-    assert exc.value.status_code == 409
+    assert result.status == "confirmed"
+    assert result.transaction_hash == "0xstatus"
+    assert result.approval_transaction_hash == "0xstatus-approve"
+    assert result.burn_transaction_hash == "0xstatus-burn"
+    assert result.finalize_transaction_hash == "0xstatus-finalize"
+    assert result.provider_status == "complete"
+    assert service.gateway_client.status_calls == ["rebalance-idem-001"]
     assert service.gateway_client.execute_calls == [
         {
             "idempotency_key": "rebalance-idem-001",
-                "wallet_address": "0x1111111111111111111111111111111111111111",
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "destination_address": "0x1111111111111111111111111111111111111111",
+            "amount": "25.5",
+            "provider": "hyperliquid_bridge2",
+            "source_network": "arbitrum",
+            "destination_network": None,
+            "live_action_authorization": {
+                "action": "gateway_rebalance",
+                "connector_id": "hyperliquid",
                 "destination_address": "0x1111111111111111111111111111111111111111",
-                "amount": "25.5",
-                "provider": "hyperliquid_bridge2",
-                "source_network": "arbitrum",
-                "destination_network": None,
-                "live_action_authorization": {
-                    "action": "gateway_rebalance",
-                    "connector_id": "hyperliquid",
+                "destination_network": "",
                 "network": "arbitrum",
                 "notional": "25.5",
                 "scope": "provider_treasury",
@@ -384,11 +435,10 @@ def test_concurrent_execute_rebalance_marks_pending_before_gateway_submit(monkey
     results = asyncio.run(execute_pair())
 
     successes = [result for result in results if not isinstance(result, Exception)]
-    failures = [result for result in results if isinstance(result, provider_treasury.HTTPException)]
-    assert len(successes) == 1
-    assert len(failures) == 1
-    assert failures[0].status_code == 409
+    assert len(successes) == 2
+    assert {result.status for result in successes} == {"submitted", "confirmed"}
     assert len(service.gateway_client.execute_calls) == 1
+    assert service.gateway_client.status_calls == ["rebalance-idem-001"]
 
 
 def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(monkeypatch):
@@ -430,7 +480,7 @@ def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(mo
             "chain": "ethereum",
             "network": "arbitrum-mainnet",
             "wallet_ref": "arbitrum:mainnet:evm_gateway",
-        }
+        },
     ]
     assert service.gateway_client.build_calls == [
         {
