@@ -86,6 +86,7 @@ class FakeGatewayClient:
         self.execute_calls = []
         self.status_calls = []
         self.wallet_calls = []
+        self.execute_delay = 0
 
     async def ping(self):
         return True
@@ -103,6 +104,8 @@ class FakeGatewayClient:
         }
 
     async def execute_treasury_rebalance(self, **kwargs):
+        if self.execute_delay:
+            await asyncio.sleep(self.execute_delay)
         self.execute_calls.append(kwargs)
         return {
             "status": "submitted",
@@ -333,3 +336,37 @@ def test_execute_rebalance_is_not_rebroadcast_with_new_execute_idempotency(monke
             "marlin_provider_intent_authorized": True,
         }
     ]
+
+
+def test_concurrent_execute_rebalance_marks_pending_before_gateway_submit(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService()
+    service.gateway_client.execute_delay = 0.01
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _hyperliquid_bridge2_request(provider_treasury),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    async def execute_once():
+        return await provider_treasury.execute_provider_treasury_rebalance(
+            "rebalance-idem-001",
+            provider_treasury.ProviderTreasuryRebalanceExecuteRequest(),
+            _authorized_request(),
+            service,
+        )
+
+    async def execute_pair():
+        return await asyncio.gather(execute_once(), execute_once(), return_exceptions=True)
+
+    results = asyncio.run(execute_pair())
+
+    successes = [result for result in results if not isinstance(result, Exception)]
+    failures = [result for result in results if isinstance(result, provider_treasury.HTTPException)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert failures[0].status_code == 409
+    assert len(service.gateway_client.execute_calls) == 1

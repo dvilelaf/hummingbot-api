@@ -3,6 +3,7 @@
 import logging
 import os
 import secrets
+import asyncio
 from decimal import Decimal
 from typing import Any
 
@@ -38,6 +39,7 @@ MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER = (
     "Marlin Arbitrum wallet identity unavailable for Hyperliquid Bridge2 rebalance"
 )
 _REBALANCE_REQUESTS: dict[str, dict[str, str]] = {}
+_REBALANCE_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 @router.post("/rebalances", response_model=ProviderTreasuryRebalanceResponse)
@@ -101,23 +103,30 @@ async def execute_provider_treasury_rebalance(
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
         _assert_provider_treasury_authorized(request)
-        stored = _REBALANCE_REQUESTS.get(rebalance_id)
-        if stored is None:
-            raise HTTPException(status_code=404, detail="provider treasury rebalance request not found")
-        if stored.get("status") in {"submitted", "confirmed"}:
-            raise HTTPException(status_code=409, detail="provider treasury rebalance already submitted")
-        result = await accounts_service.gateway_client.execute_treasury_rebalance(
-            idempotency_key=rebalance_id,
-            wallet_address=stored["wallet_address"],
-            destination_address=stored["destination_address"],
-            amount=stored["amount"],
-            live_action_authorization=_marlin_gateway_rebalance_authorization(
-                wallet_address=stored["wallet_address"],
-                amount=stored["amount"],
-            ),
-            marlin_provider_intent_authorized=True,
-        )
-        stored["status"] = "submitted"
+        lock = _rebalance_lock(rebalance_id)
+        async with lock:
+            stored = _REBALANCE_REQUESTS.get(rebalance_id)
+            if stored is None:
+                raise HTTPException(status_code=404, detail="provider treasury rebalance request not found")
+            if stored.get("status") in {"pending", "submitted", "confirmed"}:
+                raise HTTPException(status_code=409, detail="provider treasury rebalance already submitted")
+            stored["status"] = "pending"
+            try:
+                result = await accounts_service.gateway_client.execute_treasury_rebalance(
+                    idempotency_key=rebalance_id,
+                    wallet_address=stored["wallet_address"],
+                    destination_address=stored["destination_address"],
+                    amount=stored["amount"],
+                    live_action_authorization=_marlin_gateway_rebalance_authorization(
+                        wallet_address=stored["wallet_address"],
+                        amount=stored["amount"],
+                    ),
+                    marlin_provider_intent_authorized=True,
+                )
+                stored["status"] = "submitted"
+            except Exception:
+                stored["status"] = "failed"
+                raise
         result.setdefault("id", rebalance_id)
         result.setdefault("route", SUPPORTED_TREASURY_REBALANCE_ROUTE)
         return _rebalance_response(result, rebalance_id=rebalance_id)
@@ -237,6 +246,14 @@ def _decimal_payload_value(value: Decimal) -> str:
 
 def _rebalance_id(body: ProviderTreasuryRebalanceRequest) -> str:
     return f"{body.account_name}:{body.route}:{body.destination_account}:{_decimal_payload_value(body.amount)}"
+
+
+def _rebalance_lock(rebalance_id: str) -> asyncio.Lock:
+    lock = _REBALANCE_LOCKS.get(rebalance_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _REBALANCE_LOCKS[rebalance_id] = lock
+    return lock
 
 
 def _assert_provider_treasury_authorized(request: Request) -> None:
