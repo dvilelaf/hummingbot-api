@@ -136,6 +136,7 @@ async def create_provider_treasury_rebalance(
         }
         result.setdefault("id", rebalance_id)
         result.setdefault("route", provider)
+        result.setdefault("status", "built")
         return _rebalance_response(result)
     except HTTPException:
         raise
@@ -184,7 +185,11 @@ async def execute_provider_treasury_rebalance(
                     ),
                     marlin_provider_intent_authorized=True,
                 )
-                stored["status"] = "submitted"
+                status_result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
+                status_result.setdefault("id", rebalance_id)
+                status_result.setdefault("route", stored["provider"])
+                result = status_result
+                stored["status"] = str(status_result.get("status") or "submitted")
             except Exception:
                 stored["status"] = "failed"
                 raise

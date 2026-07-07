@@ -99,7 +99,6 @@ class FakeGatewayClient:
         self.build_calls.append(kwargs)
         return {
             "idempotencyKey": kwargs["idempotency_key"],
-            "status": "built",
             "provider": "hyperliquid_bridge2",
         }
 
@@ -108,13 +107,8 @@ class FakeGatewayClient:
             await asyncio.sleep(self.execute_delay)
         self.execute_calls.append(kwargs)
         return {
-            "status": "submitted",
-            "transactionHash": "0xabc",
-            "approvalTransactionHash": "0xapprove",
-            "burnTransactionHash": "0xburn",
-            "finalize_transaction_hash": "0xfinalize",
-            "providerStatus": "burn_submitted",
-            "metadata": {"phase": "burn"},
+            "signature": "0xabc",
+            "status": 0,
         }
 
     async def get_treasury_rebalance(self, rebalance_id):
@@ -286,13 +280,13 @@ def test_execute_and_status_forward_to_gateway_treasury_rebalance_endpoints(monk
         ),
     )
 
-    assert execute_result.status == "submitted"
-    assert execute_result.transaction_hash == "0xabc"
-    assert execute_result.approval_transaction_hash == "0xapprove"
-    assert execute_result.burn_transaction_hash == "0xburn"
-    assert execute_result.finalize_transaction_hash == "0xfinalize"
-    assert execute_result.provider_status == "burn_submitted"
-    assert execute_result.metadata == {"phase": "burn"}
+    assert execute_result.status == "confirmed"
+    assert execute_result.transaction_hash == "0xstatus"
+    assert execute_result.approval_transaction_hash == "0xstatus-approve"
+    assert execute_result.burn_transaction_hash == "0xstatus-burn"
+    assert execute_result.finalize_transaction_hash == "0xstatus-finalize"
+    assert execute_result.provider_status == "complete"
+    assert execute_result.metadata == {"phase": "complete"}
     assert status_result.status == "confirmed"
     assert status_result.transaction_hash == "0xstatus"
     assert status_result.approval_transaction_hash == "0xstatus-approve"
@@ -324,7 +318,7 @@ def test_execute_and_status_forward_to_gateway_treasury_rebalance_endpoints(monk
             "marlin_provider_intent_authorized": True,
         }
     ]
-    assert service.gateway_client.status_calls == ["rebalance-123"]
+    assert service.gateway_client.status_calls == ["rebalance-idem-001", "rebalance-123"]
 
 
 def test_rebalance_response_scrubs_provider_internal_metadata():
@@ -382,7 +376,7 @@ def test_execute_rebalance_is_not_rebroadcast_with_new_execute_idempotency(monke
     assert result.burn_transaction_hash == "0xstatus-burn"
     assert result.finalize_transaction_hash == "0xstatus-finalize"
     assert result.provider_status == "complete"
-    assert service.gateway_client.status_calls == ["rebalance-idem-001"]
+    assert service.gateway_client.status_calls == ["rebalance-idem-001", "rebalance-idem-001"]
     assert service.gateway_client.execute_calls == [
         {
             "idempotency_key": "rebalance-idem-001",
@@ -436,9 +430,9 @@ def test_concurrent_execute_rebalance_marks_pending_before_gateway_submit(monkey
 
     successes = [result for result in results if not isinstance(result, Exception)]
     assert len(successes) == 2
-    assert {result.status for result in successes} == {"submitted", "confirmed"}
+    assert {result.status for result in successes} == {"confirmed"}
     assert len(service.gateway_client.execute_calls) == 1
-    assert service.gateway_client.status_calls == ["rebalance-idem-001"]
+    assert service.gateway_client.status_calls == ["rebalance-idem-001", "rebalance-idem-001"]
 
 
 def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(monkeypatch):
