@@ -521,24 +521,27 @@ def test_gateway_wallet_send_checks_live_gate_before_send_transaction():
     )
 
 
-def test_bridge_execution_gate_ignores_authorization_route_payload(monkeypatch):
+def test_bridge_execution_gate_rejects_authorization_route_payload_mismatch(monkeypatch):
     gate = _live_gate_module()
     monkeypatch.setenv("TRADING_SAFETY_LIVE_GATEWAY_BRIDGE_EXECUTE_ENABLED", "true")
     monkeypatch.setenv("TRADING_SAFETY_BRIDGE_PROVIDER_ALLOWLIST", "lifi,across")
 
-    gate.assert_live_bridge_execution_allowed(
-        expected_authorization_nonce="bridge-auth-001",
-        expected_calldata_hash="sha256:calldata",
-        expected_provider="lifi",
-        expected_provider_route_id="route-tampered",
-        expected_quote_id="quote-123",
-        expected_route_payload_hash="sha256:route",
-        expected_source_chain_id="1",
-        expected_target="0x1111111111111111111111111111111111111111",
-        expected_value="0",
-        live_action_authorization=_approved_bridge_authorization(),
-        source="gateway_bridge.execute_bridge",
-    )
+    with pytest.raises(HTTPException) as exc:
+        gate.assert_live_bridge_execution_allowed(
+            expected_authorization_nonce="bridge-auth-001",
+            expected_calldata_hash="sha256:calldata",
+            expected_provider="lifi",
+            expected_provider_route_id="route-tampered",
+            expected_quote_id="quote-123",
+            expected_route_payload_hash="sha256:route",
+            expected_source_chain_id="1",
+            expected_target="0x1111111111111111111111111111111111111111",
+            expected_value="0",
+            live_action_authorization=_approved_bridge_authorization(),
+            source="gateway_bridge.execute_bridge",
+        )
+
+    assert "bridge authorization bridge_provider_route_id mismatch" in str(exc.value.detail)
 
 
 def test_bridge_execution_gate_rejects_nonce_replay(monkeypatch):
@@ -593,7 +596,7 @@ def test_gateway_bridge_router_is_registered_in_main():
     assert "_include_full_routers()" in main_source
 
 
-def test_provider_profile_excludes_bridge_router_from_marlin_runtime():
+def test_provider_profile_includes_bridge_router_for_marlin_runtime():
     main_source = (ROOT / "main.py").read_text()
     provider_section = main_source[
         main_source.index("def _include_provider_routers()") : main_source.index("def _include_full_routers()")
@@ -601,7 +604,7 @@ def test_provider_profile_excludes_bridge_router_from_marlin_runtime():
 
     assert "provider_boundary" in provider_section
     assert "gateway_swap" in provider_section
-    assert "gateway_bridge" not in provider_section
+    assert "gateway_bridge" in provider_section
 
 
 def test_gateway_clmm_checks_live_gate_before_mutations():
@@ -679,7 +682,7 @@ def test_gateway_mutation_models_accept_live_action_authorization():
     assert "live_action_authorization: Optional[Dict[str, Any]]" in send_model
 
 
-def test_gateway_client_only_forwards_live_action_authorization_to_swap_execute():
+def test_gateway_client_only_forwards_live_action_authorization_to_swap_and_bridge_execute():
     source = (ROOT / "services" / "gateway_client.py").read_text()
 
     execute_swap_start = source.index("async def execute_swap")
@@ -691,10 +694,15 @@ def test_gateway_client_only_forwards_live_action_authorization_to_swap_execute(
     assert 'payload["liveActionAuthorization"] = live_action_authorization' in execute_swap_source
     assert '"x-marlin-gateway-provider-intent-token": token' in execute_swap_source
 
+    bridge_start = source.index("async def execute_bridge")
+    bridge_end = source.find("\n    async def ", bridge_start + 1)
+    bridge_source = source[bridge_start : bridge_end if bridge_end != -1 else len(source)]
+    assert "live_action_authorization: Optional[Dict[str, Any]] = None" in bridge_source
+    assert 'payload["liveActionAuthorization"] = live_action_authorization' in bridge_source
+
     for method_name in (
         "router_add_liquidity",
         "router_remove_liquidity",
-        "execute_bridge",
         "clmm_open_position",
         "clmm_add_liquidity",
         "clmm_remove_liquidity",

@@ -150,6 +150,21 @@ def assert_live_bridge_execution_allowed(
             ),
         )
     _assert_bridge_provider_allowed(expected_provider, source=source)
+    _assert_bridge_authorization_matches(
+        live_action_authorization,
+        {
+            "bridge_authorization_nonce": expected_authorization_nonce,
+            "bridge_provider": expected_provider,
+            "bridge_provider_route_id": expected_provider_route_id,
+            "bridge_quote_id": expected_quote_id,
+            "bridge_route_payload_hash": expected_route_payload_hash,
+            "bridge_source_chain_id": expected_source_chain_id,
+            "bridge_tx_calldata_hash": expected_calldata_hash,
+            "bridge_tx_target": expected_target,
+            "bridge_tx_value": expected_value,
+        },
+        source=source,
+    )
     nonce = str(expected_authorization_nonce).strip()
     if nonce in _used_bridge_authorization_nonces:
         _raise_authorization_error("bridge authorization nonce replay", source=source)
@@ -183,6 +198,27 @@ def _assert_bridge_provider_allowed(provider: Any, *, source: str) -> None:
     }
     if str(provider).strip() not in allowed:
         _raise_authorization_error("bridge provider not allowlisted", source=source)
+
+
+def _assert_bridge_authorization_matches(
+    authorization: dict[str, Any] | None,
+    expectations: dict[str, Any],
+    *,
+    source: str,
+) -> None:
+    if not isinstance(authorization, dict):
+        _raise_authorization_error("bridge authorization missing", source=source)
+    for key, expected in expectations.items():
+        if not _authorization_value_matches(expected, authorization.get(key)):
+            _raise_authorization_error(f"bridge authorization {key} mismatch", source=source)
+
+
+def _authorization_value_matches(expected: Any, provided: Any) -> bool:
+    if expected is None or str(expected).strip() == "":
+        return True
+    if provided is None or str(provided).strip() == "":
+        return False
+    return str(provided).strip() == str(expected).strip()
 
 
 def _gateway_action_env(action: str) -> str:

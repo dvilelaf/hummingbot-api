@@ -32,13 +32,13 @@ def test_provider_runtime_router_surface_is_provider_boundary_only():
         "portfolio",
         "trading",
         "provider_boundary",
+        "gateway_bridge",
         "gateway_swap",
         "market_data",
         "rate_oracle",
     )
     removed = (
         "docker",
-        "gateway_bridge",
         "gateway_clmm",
         "gateway_lp",
         "bot_orchestration",
@@ -68,12 +68,12 @@ def test_provider_runtime_does_not_eager_import_orchestration_services():
     assert "services.executor_service" not in top_level
 
 
-def test_provider_runtime_registered_routes_exclude_admin_surfaces():
+def test_provider_runtime_registered_routes_include_bridge_without_admin_surfaces():
     source = _main_source()
     provider = source[source.index("def _include_provider_routers()") : source.index("def _include_full_routers()")]
     assert "accounts.router" not in provider
     assert "gateway.router" not in provider
-    assert "gateway_bridge.router" not in provider
+    assert "gateway_bridge.router" in provider
     assert "gateway_lp.router" not in provider
     assert "docker.router" not in provider
 

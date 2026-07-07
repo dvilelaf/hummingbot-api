@@ -495,6 +495,7 @@ def auth_user(
 def _include_provider_routers() -> None:
     from routers import (
         connectors,
+        gateway_bridge,
         gateway_swap,
         market_data,
         portfolio,
@@ -507,6 +508,7 @@ def _include_provider_routers() -> None:
     app.include_router(portfolio.router, dependencies=[Depends(auth_user)])
     app.include_router(trading.router, dependencies=[Depends(auth_user)])
     app.include_router(provider_boundary.router, dependencies=[Depends(auth_user)])
+    app.include_router(gateway_bridge.router, dependencies=[Depends(auth_user)])
     app.include_router(gateway_swap.router, dependencies=[Depends(auth_user)])
     app.include_router(market_data.router, dependencies=[Depends(auth_user)])
     app.include_router(rate_oracle.router, dependencies=[Depends(auth_user)])

@@ -629,6 +629,8 @@ class GatewayClient:
         }
         if gas_limit is not None:
             payload["gasLimit"] = gas_limit
+        if live_action_authorization is not None:
+            payload["liveActionAuthorization"] = live_action_authorization
         return await self._request("POST", "bridge/execute", json=payload)
 
     async def execute_quote(
