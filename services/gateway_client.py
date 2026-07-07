@@ -640,21 +640,27 @@ class GatewayClient:
         wallet_address: str,
         destination_address: str,
         amount: str,
+        provider: str = "hyperliquid_bridge2",
+        source_network: str = "arbitrum",
+        destination_network: Optional[str] = None,
     ) -> Dict:
         """Build a provider-owned treasury rebalance through Gateway."""
         payload = {
-            "provider": "hyperliquid_bridge2",
+            "provider": provider,
             "idempotencyKey": idempotency_key,
             "mode": "mainnet",
             "sourceChain": "ethereum",
-            "sourceNetwork": "arbitrum",
+            "sourceNetwork": source_network,
             "sourceAsset": "USDC",
-            "destinationVenue": "hyperliquid",
             "destinationAsset": "USDC",
             "walletAddress": wallet_address,
             "destinationAddress": destination_address,
             "amount": amount,
         }
+        if provider == "hyperliquid_bridge2":
+            payload["destinationVenue"] = "hyperliquid"
+        if destination_network is not None:
+            payload["destinationNetwork"] = destination_network
         return await self._request("POST", "bridge/rebalance/build", json=payload)
 
     async def execute_treasury_rebalance(
@@ -664,23 +670,29 @@ class GatewayClient:
         wallet_address: str,
         destination_address: str,
         amount: str,
+        provider: str = "hyperliquid_bridge2",
+        source_network: str = "arbitrum",
+        destination_network: Optional[str] = None,
         live_action_authorization: Optional[Dict[str, Any]] = None,
         marlin_provider_intent_authorized: bool = False,
     ) -> Dict:
         """Execute a provider-owned treasury rebalance through Gateway."""
         payload = {
-            "provider": "hyperliquid_bridge2",
+            "provider": provider,
             "idempotencyKey": idempotency_key,
             "mode": "mainnet",
             "sourceChain": "ethereum",
-            "sourceNetwork": "arbitrum",
+            "sourceNetwork": source_network,
             "sourceAsset": "USDC",
-            "destinationVenue": "hyperliquid",
             "destinationAsset": "USDC",
             "walletAddress": wallet_address,
             "destinationAddress": destination_address,
             "amount": amount,
         }
+        if provider == "hyperliquid_bridge2":
+            payload["destinationVenue"] = "hyperliquid"
+        if destination_network is not None:
+            payload["destinationNetwork"] = destination_network
         headers = None
         if live_action_authorization is not None and marlin_provider_intent_authorized:
             payload["liveActionAuthorization"] = live_action_authorization

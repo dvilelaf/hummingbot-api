@@ -22,14 +22,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Provider Treasury"], prefix="/provider/treasury")
 MARLIN_PROVIDER_INTENT_TOKEN_HEADER = "x-marlin-provider-intent-token"
 
-SUPPORTED_TREASURY_REBALANCE_ROUTE = "hyperliquid_bridge2"
+HYPERLIQUID_BRIDGE2_ROUTE = "hyperliquid_bridge2"
+CCTP_BASE_ARBITRUM_USDC_ROUTE = "cctp_base_arbitrum_usdc"
 SUPPORTED_SOURCE_NETWORK = "arbitrum-mainnet"
 GATEWAY_SOURCE_NETWORK = "arbitrum"
+CCTP_SOURCE_NETWORK = "base"
+CCTP_DESTINATION_NETWORK = "arbitrum-mainnet"
+CCTP_GATEWAY_DESTINATION_NETWORK = "arbitrum"
 SUPPORTED_DESTINATION_NETWORK = "mainnet"
 SUPPORTED_ASSET = "USDC"
 UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER = (
-    "unsupported treasury rebalance route: only Hyperliquid Bridge2 from "
-    "Arbitrum USDC to Hyperliquid is supported"
+    "unsupported treasury rebalance route: only Hyperliquid Bridge2 from Arbitrum "
+    "USDC to Hyperliquid and CCTP Base USDC to Arbitrum USDC are supported"
 )
 HYPERLIQUID_BRIDGE2_IDENTITY_MISMATCH_BLOCKER = (
     "hyperliquid_bridge2 identity mismatch: Arbitrum sender must equal "
@@ -37,6 +41,13 @@ HYPERLIQUID_BRIDGE2_IDENTITY_MISMATCH_BLOCKER = (
 )
 MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER = (
     "Marlin Arbitrum wallet identity unavailable for Hyperliquid Bridge2 rebalance"
+)
+CCTP_IDENTITY_MISMATCH_BLOCKER = (
+    "cctp_base_arbitrum_usdc identity mismatch: Base sender and Arbitrum recipient "
+    "must be the same mnemonic-derived EVM address"
+)
+MARLIN_BASE_IDENTITY_UNAVAILABLE_BLOCKER = (
+    "Marlin Base wallet identity unavailable for CCTP treasury rebalance"
 )
 _REBALANCE_REQUESTS: dict[str, dict[str, str]] = {}
 _REBALANCE_LOCKS: dict[str, asyncio.Lock] = {}
@@ -50,15 +61,42 @@ async def create_provider_treasury_rebalance(
 ) -> ProviderTreasuryRebalanceResponse:
     """Build a provider-owned treasury rebalance through Gateway."""
     try:
-        _assert_supported_hyperliquid_bridge2(body)
+        route = body.route.strip().lower()
+        _assert_supported_treasury_rebalance(body)
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
         _assert_provider_treasury_authorized(request)
 
-        source_network = _source_network(body.source_network)
-        wallet_identity = _marlin_arbitrum_wallet_identity(accounts_service, source_network=source_network)
-        if not _addresses_equal(wallet_identity["address"], body.destination_account):
-            raise HTTPException(status_code=400, detail=HYPERLIQUID_BRIDGE2_IDENTITY_MISMATCH_BLOCKER)
+        if route == CCTP_BASE_ARBITRUM_USDC_ROUTE:
+            source_network = CCTP_SOURCE_NETWORK
+            destination_network = CCTP_GATEWAY_DESTINATION_NETWORK
+            wallet_identity = _marlin_evm_wallet_identity(
+                accounts_service,
+                source_network=source_network,
+                blocker=MARLIN_BASE_IDENTITY_UNAVAILABLE_BLOCKER,
+            )
+            destination_identity = _marlin_evm_wallet_identity(
+                accounts_service,
+                source_network=CCTP_DESTINATION_NETWORK,
+                blocker=MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER,
+            )
+            if not (
+                _addresses_equal(wallet_identity["address"], body.destination_account)
+                and _addresses_equal(destination_identity["address"], body.destination_account)
+            ):
+                raise HTTPException(status_code=400, detail=CCTP_IDENTITY_MISMATCH_BLOCKER)
+            provider = CCTP_BASE_ARBITRUM_USDC_ROUTE
+        else:
+            source_network = _source_network(body.source_network)
+            destination_network = None
+            wallet_identity = _marlin_evm_wallet_identity(
+                accounts_service,
+                source_network=source_network,
+                blocker=MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER,
+            )
+            if not _addresses_equal(wallet_identity["address"], body.destination_account):
+                raise HTTPException(status_code=400, detail=HYPERLIQUID_BRIDGE2_IDENTITY_MISMATCH_BLOCKER)
+            provider = HYPERLIQUID_BRIDGE2_ROUTE
 
         wallet_result = await accounts_service.gateway_client.set_marlin_default_wallet(
             chain="ethereum",
@@ -68,6 +106,18 @@ async def create_provider_treasury_rebalance(
         )
         if isinstance(wallet_result, dict) and wallet_result.get("error"):
             raise HTTPException(status_code=400, detail=f"Failed to set default wallet: {wallet_result.get('error')}")
+        if route == CCTP_BASE_ARBITRUM_USDC_ROUTE:
+            destination_wallet_result = await accounts_service.gateway_client.set_marlin_default_wallet(
+                chain="ethereum",
+                network=CCTP_DESTINATION_NETWORK,
+                address=destination_identity["address"],
+                wallet_ref=destination_identity["wallet_ref"],
+            )
+            if isinstance(destination_wallet_result, dict) and destination_wallet_result.get("error"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to set destination default wallet: {destination_wallet_result.get('error')}",
+                )
 
         rebalance_id = body.idempotency_key or _rebalance_id(body)
         result = await accounts_service.gateway_client.build_treasury_rebalance(
@@ -75,14 +125,20 @@ async def create_provider_treasury_rebalance(
             wallet_address=wallet_identity["address"],
             destination_address=body.destination_account,
             amount=_decimal_payload_value(body.amount),
+            provider=provider,
+            source_network=GATEWAY_SOURCE_NETWORK if provider == HYPERLIQUID_BRIDGE2_ROUTE else source_network,
+            destination_network=destination_network,
         )
         _REBALANCE_REQUESTS[rebalance_id] = {
             "amount": _decimal_payload_value(body.amount),
             "destination_address": body.destination_account,
+            "destination_network": destination_network or "",
+            "provider": provider,
+            "source_network": GATEWAY_SOURCE_NETWORK if provider == HYPERLIQUID_BRIDGE2_ROUTE else source_network,
             "wallet_address": wallet_identity["address"],
         }
         result.setdefault("id", rebalance_id)
-        result.setdefault("route", SUPPORTED_TREASURY_REBALANCE_ROUTE)
+        result.setdefault("route", provider)
         return _rebalance_response(result)
     except HTTPException:
         raise
@@ -117,9 +173,14 @@ async def execute_provider_treasury_rebalance(
                     wallet_address=stored["wallet_address"],
                     destination_address=stored["destination_address"],
                     amount=stored["amount"],
+                    provider=stored["provider"],
+                    source_network=stored["source_network"],
+                    destination_network=stored.get("destination_network") or None,
                     live_action_authorization=_marlin_gateway_rebalance_authorization(
                         wallet_address=stored["wallet_address"],
                         amount=stored["amount"],
+                        provider=stored["provider"],
+                        source_network=stored["source_network"],
                     ),
                     marlin_provider_intent_authorized=True,
                 )
@@ -128,7 +189,7 @@ async def execute_provider_treasury_rebalance(
                 stored["status"] = "failed"
                 raise
         result.setdefault("id", rebalance_id)
-        result.setdefault("route", SUPPORTED_TREASURY_REBALANCE_ROUTE)
+        result.setdefault("route", stored["provider"])
         return _rebalance_response(result, rebalance_id=rebalance_id)
     except HTTPException:
         raise
@@ -155,16 +216,27 @@ async def get_provider_treasury_rebalance(
         raise HTTPException(status_code=500, detail=f"Provider treasury rebalance status failed: {exc}")
 
 
-def _assert_supported_hyperliquid_bridge2(body: ProviderTreasuryRebalanceRequest) -> None:
-    if (
-        body.route.strip().lower() != SUPPORTED_TREASURY_REBALANCE_ROUTE
-        or body.source_venue.strip().lower() != "gateway"
-        or _source_network(body.source_network) != SUPPORTED_SOURCE_NETWORK
-        or body.source_asset.strip().upper() != SUPPORTED_ASSET
-        or body.destination_venue.strip().lower() != "hyperliquid"
-        or body.destination_network.strip().lower() != SUPPORTED_DESTINATION_NETWORK
-        or body.destination_asset.strip().upper() != SUPPORTED_ASSET
+def _assert_supported_treasury_rebalance(body: ProviderTreasuryRebalanceRequest) -> None:
+    route = body.route.strip().lower()
+    if route == HYPERLIQUID_BRIDGE2_ROUTE and (
+        body.source_venue.strip().lower() == "gateway"
+        and _source_network(body.source_network) == SUPPORTED_SOURCE_NETWORK
+        and body.source_asset.strip().upper() == SUPPORTED_ASSET
+        and body.destination_venue.strip().lower() == "hyperliquid"
+        and body.destination_network.strip().lower() == SUPPORTED_DESTINATION_NETWORK
+        and body.destination_asset.strip().upper() == SUPPORTED_ASSET
     ):
+        return
+    if route == CCTP_BASE_ARBITRUM_USDC_ROUTE and (
+        body.source_venue.strip().lower() == "gateway"
+        and _source_network(body.source_network) == CCTP_SOURCE_NETWORK
+        and body.source_asset.strip().upper() == SUPPORTED_ASSET
+        and body.destination_venue.strip().lower() == "gateway"
+        and _source_network(body.destination_network) == CCTP_DESTINATION_NETWORK
+        and body.destination_asset.strip().upper() == SUPPORTED_ASSET
+    ):
+        return
+    else:
         raise HTTPException(status_code=400, detail=UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER)
 
 
@@ -172,13 +244,16 @@ def _source_network(value: str) -> str:
     normalized = value.strip().lower().replace("_", "-")
     if normalized in {"arbitrum", "arbitrum-one", "arbitrum-mainnet", "ethereum-arbitrum-mainnet"}:
         return SUPPORTED_SOURCE_NETWORK
+    if normalized in {"base", "base-mainnet", "ethereum-base-mainnet"}:
+        return CCTP_SOURCE_NETWORK
     return normalized
 
 
-def _marlin_arbitrum_wallet_identity(
+def _marlin_evm_wallet_identity(
     accounts_service: AccountsService,
     *,
     source_network: str,
+    blocker: str,
 ) -> dict[str, str]:
     identity_getter = getattr(accounts_service, "_marlin_gateway_wallet_identity", None)
     identity = (
@@ -187,11 +262,11 @@ def _marlin_arbitrum_wallet_identity(
         else None
     )
     if not isinstance(identity, dict):
-        raise HTTPException(status_code=400, detail=MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER)
+        raise HTTPException(status_code=400, detail=blocker)
     address = str(identity.get("address") or "").strip()
     wallet_ref = str(identity.get("wallet_ref") or "").strip()
     if not address or not wallet_ref:
-        raise HTTPException(status_code=400, detail=MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER)
+        raise HTTPException(status_code=400, detail=blocker)
     return {"address": address, "wallet_ref": wallet_ref}
 
 
@@ -281,11 +356,17 @@ def _marlin_provider_intent_token() -> str:
         return ""
 
 
-def _marlin_gateway_rebalance_authorization(*, wallet_address: str, amount: str) -> dict[str, str]:
+def _marlin_gateway_rebalance_authorization(
+    *,
+    wallet_address: str,
+    amount: str,
+    provider: str,
+    source_network: str,
+) -> dict[str, str]:
     return {
         "action": "gateway_rebalance",
-        "connector_id": "hyperliquid",
-        "network": GATEWAY_SOURCE_NETWORK,
+        "connector_id": "treasury" if provider == CCTP_BASE_ARBITRUM_USDC_ROUTE else "hyperliquid",
+        "network": source_network,
         "notional": amount,
         "scope": "provider_treasury",
         "source": "marlin",

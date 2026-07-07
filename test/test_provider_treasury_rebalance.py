@@ -135,11 +135,18 @@ class FakeAccountsService:
     def _marlin_gateway_wallet_identity(self, *, chain, network):
         if self.address is None:
             return None
+        wallet_ref = self.wallet_ref
+        if wallet_ref == "auto":
+            wallet_ref = (
+                "base:mainnet:evm_gateway"
+                if network == "base"
+                else "arbitrum:mainnet:evm_gateway"
+            )
         return {
             "address": self.address,
             "chain": chain,
             "network": network,
-            "wallet_ref": self.wallet_ref,
+            "wallet_ref": wallet_ref,
         }
 
 
@@ -187,11 +194,14 @@ def test_hyperliquid_bridge2_rebalance_build_forwards_semantic_gateway_request(m
     assert service.gateway_client.build_calls == [
         {
             "idempotency_key": "rebalance-idem-001",
-            "wallet_address": "0x1111111111111111111111111111111111111111",
-            "destination_address": "0x1111111111111111111111111111111111111111",
-            "amount": "25.5",
-        }
-    ]
+                "wallet_address": "0x1111111111111111111111111111111111111111",
+                "destination_address": "0x1111111111111111111111111111111111111111",
+                "amount": "25.5",
+                "provider": "hyperliquid_bridge2",
+                "source_network": "arbitrum",
+                "destination_network": None,
+            }
+        ]
 
 
 def test_unsupported_rebalance_route_fails_closed_with_exact_blocker(monkeypatch):
@@ -269,12 +279,15 @@ def test_execute_and_status_forward_to_gateway_treasury_rebalance_endpoints(monk
     assert service.gateway_client.execute_calls == [
         {
             "idempotency_key": "rebalance-idem-001",
-            "wallet_address": "0x1111111111111111111111111111111111111111",
-            "destination_address": "0x1111111111111111111111111111111111111111",
-            "amount": "25.5",
-            "live_action_authorization": {
-                "action": "gateway_rebalance",
-                "connector_id": "hyperliquid",
+                "wallet_address": "0x1111111111111111111111111111111111111111",
+                "destination_address": "0x1111111111111111111111111111111111111111",
+                "amount": "25.5",
+                "provider": "hyperliquid_bridge2",
+                "source_network": "arbitrum",
+                "destination_network": None,
+                "live_action_authorization": {
+                    "action": "gateway_rebalance",
+                    "connector_id": "hyperliquid",
                 "network": "arbitrum",
                 "notional": "25.5",
                 "scope": "provider_treasury",
@@ -321,12 +334,15 @@ def test_execute_rebalance_is_not_rebroadcast_with_new_execute_idempotency(monke
     assert service.gateway_client.execute_calls == [
         {
             "idempotency_key": "rebalance-idem-001",
-            "wallet_address": "0x1111111111111111111111111111111111111111",
-            "destination_address": "0x1111111111111111111111111111111111111111",
-            "amount": "25.5",
-            "live_action_authorization": {
-                "action": "gateway_rebalance",
-                "connector_id": "hyperliquid",
+                "wallet_address": "0x1111111111111111111111111111111111111111",
+                "destination_address": "0x1111111111111111111111111111111111111111",
+                "amount": "25.5",
+                "provider": "hyperliquid_bridge2",
+                "source_network": "arbitrum",
+                "destination_network": None,
+                "live_action_authorization": {
+                    "action": "gateway_rebalance",
+                    "connector_id": "hyperliquid",
                 "network": "arbitrum",
                 "notional": "25.5",
                 "scope": "provider_treasury",
@@ -370,3 +386,52 @@ def test_concurrent_execute_rebalance_marks_pending_before_gateway_submit(monkey
     assert len(failures) == 1
     assert failures[0].status_code == 409
     assert len(service.gateway_client.execute_calls) == 1
+
+
+def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(wallet_ref="auto")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    result = asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _hyperliquid_bridge2_request(
+                provider_treasury,
+                route="cctp_base_arbitrum_usdc",
+                source_network="base",
+                destination_venue="gateway",
+                destination_network="arbitrum-mainnet",
+                amount="1.5",
+            ),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "built"
+    assert result.route == "cctp_base_arbitrum_usdc"
+    assert service.gateway_client.wallet_calls == [
+        {
+            "address": "0x1111111111111111111111111111111111111111",
+            "chain": "ethereum",
+            "network": "base",
+            "wallet_ref": "base:mainnet:evm_gateway",
+        },
+        {
+            "address": "0x1111111111111111111111111111111111111111",
+            "chain": "ethereum",
+            "network": "arbitrum-mainnet",
+            "wallet_ref": "arbitrum:mainnet:evm_gateway",
+        }
+    ]
+    assert service.gateway_client.build_calls == [
+        {
+            "idempotency_key": "rebalance-idem-001",
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "destination_address": "0x1111111111111111111111111111111111111111",
+            "amount": "1.5",
+            "provider": "cctp_base_arbitrum_usdc",
+            "source_network": "base",
+            "destination_network": "arbitrum",
+        }
+    ]
