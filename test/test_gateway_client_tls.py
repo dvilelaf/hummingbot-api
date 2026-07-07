@@ -27,7 +27,7 @@ def test_gateway_client_http_session_keeps_default_aiohttp_behavior(monkeypatch)
 
     assert result is session
     client_session.assert_called_once_with(timeout=ANY)
-    assert client_session.call_args.kwargs["timeout"].total == 20.0
+    assert client_session.call_args.kwargs["timeout"].total == 180.0
     tcp_connector.assert_not_called()
     create_default_context.assert_not_called()
 
@@ -53,7 +53,7 @@ def test_gateway_client_https_session_uses_client_certificate_ssl_context(monkey
     ssl_context.load_cert_chain.assert_called_once_with(certfile="/certs/client.pem", keyfile="/certs/client.key")
     tcp_connector.assert_called_once_with(ssl=ssl_context)
     client_session.assert_called_once_with(connector=connector, timeout=ANY)
-    assert client_session.call_args.kwargs["timeout"].total == 20.0
+    assert client_session.call_args.kwargs["timeout"].total == 180.0
 
 
 def test_gateway_client_https_session_can_skip_hostname_verification(monkeypatch):

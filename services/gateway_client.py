@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 logger = logging.getLogger(__name__)
-DEFAULT_GATEWAY_REQUEST_TIMEOUT_SECONDS = 20.0
+DEFAULT_GATEWAY_REQUEST_TIMEOUT_SECONDS = 180.0
 
 
 class GatewayClient:
