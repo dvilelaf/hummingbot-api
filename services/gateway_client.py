@@ -633,6 +633,66 @@ class GatewayClient:
             payload["liveActionAuthorization"] = live_action_authorization
         return await self._request("POST", "bridge/execute", json=payload)
 
+    async def build_treasury_rebalance(
+        self,
+        *,
+        idempotency_key: str,
+        wallet_address: str,
+        destination_address: str,
+        amount: str,
+    ) -> Dict:
+        """Build a provider-owned treasury rebalance through Gateway."""
+        payload = {
+            "provider": "hyperliquid_bridge2",
+            "idempotencyKey": idempotency_key,
+            "mode": "mainnet",
+            "sourceChain": "ethereum",
+            "sourceNetwork": "arbitrum",
+            "sourceAsset": "USDC",
+            "destinationVenue": "hyperliquid",
+            "destinationAsset": "USDC",
+            "walletAddress": wallet_address,
+            "destinationAddress": destination_address,
+            "amount": amount,
+        }
+        return await self._request("POST", "bridge/rebalance/build", json=payload)
+
+    async def execute_treasury_rebalance(
+        self,
+        *,
+        idempotency_key: str,
+        wallet_address: str,
+        destination_address: str,
+        amount: str,
+        live_action_authorization: Optional[Dict[str, Any]] = None,
+        marlin_provider_intent_authorized: bool = False,
+    ) -> Dict:
+        """Execute a provider-owned treasury rebalance through Gateway."""
+        payload = {
+            "provider": "hyperliquid_bridge2",
+            "idempotencyKey": idempotency_key,
+            "mode": "mainnet",
+            "sourceChain": "ethereum",
+            "sourceNetwork": "arbitrum",
+            "sourceAsset": "USDC",
+            "destinationVenue": "hyperliquid",
+            "destinationAsset": "USDC",
+            "walletAddress": wallet_address,
+            "destinationAddress": destination_address,
+            "amount": amount,
+        }
+        headers = None
+        if live_action_authorization is not None and marlin_provider_intent_authorized:
+            payload["liveActionAuthorization"] = live_action_authorization
+            token = self._marlin_gateway_provider_intent_token()
+            if token:
+                headers = {"x-marlin-gateway-provider-intent-token": token}
+        return await self._request("POST", "bridge/rebalance/execute", json=payload, headers=headers)
+
+    async def get_treasury_rebalance(self, rebalance_id: str) -> Dict:
+        """Fetch provider-owned treasury rebalance status from Gateway."""
+        return await self._request("GET", f"bridge/rebalance/{rebalance_id}")
+
     async def execute_quote(
         self,
         connector: str,

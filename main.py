@@ -500,6 +500,7 @@ def _include_provider_routers() -> None:
         market_data,
         portfolio,
         provider_boundary,
+        provider_treasury,
         rate_oracle,
         trading,
     )
@@ -508,6 +509,7 @@ def _include_provider_routers() -> None:
     app.include_router(portfolio.router, dependencies=[Depends(auth_user)])
     app.include_router(trading.router, dependencies=[Depends(auth_user)])
     app.include_router(provider_boundary.router, dependencies=[Depends(auth_user)])
+    app.include_router(provider_treasury.router, dependencies=[Depends(auth_user)])
     app.include_router(gateway_bridge.router, dependencies=[Depends(auth_user)])
     app.include_router(gateway_swap.router, dependencies=[Depends(auth_user)])
     app.include_router(market_data.router, dependencies=[Depends(auth_user)])
