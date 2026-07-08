@@ -245,10 +245,11 @@ async def create_provider_treasury_rebalance(
             source_network=GATEWAY_SOURCE_NETWORK if provider == HYPERLIQUID_BRIDGE2_ROUTE else source_network,
             destination_network=destination_network,
         )
+        built_destination_network = str(result.get("destinationNetwork") or destination_network or "").strip()
         _REBALANCE_REQUESTS[rebalance_id] = {
             "amount": _decimal_payload_value(body.amount),
             "destination_address": body.destination_account,
-            "destination_network": destination_network or "",
+            "destination_network": built_destination_network,
             "provider": provider,
             "source_network": GATEWAY_SOURCE_NETWORK if provider == HYPERLIQUID_BRIDGE2_ROUTE else source_network,
             "wallet_address": wallet_identity["address"],

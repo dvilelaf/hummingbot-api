@@ -97,10 +97,13 @@ class FakeGatewayClient:
 
     async def build_treasury_rebalance(self, **kwargs):
         self.build_calls.append(kwargs)
-        return {
+        result = {
             "idempotencyKey": kwargs["idempotency_key"],
             "provider": "hyperliquid_bridge2",
         }
+        if kwargs.get("destination_network") == "solana":
+            result["destinationNetwork"] = "mainnet-beta"
+        return result
 
     async def execute_treasury_rebalance(self, **kwargs):
         if self.execute_delay:
@@ -778,3 +781,40 @@ def test_cctp_rebalance_execute_authorization_uses_source_and_destination_networ
             "marlin_provider_intent_authorized": True,
         }
     ]
+
+
+def test_cctp_rebalance_execute_authorization_uses_gateway_normalized_solana_destination(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(
+        address="0x1111111111111111111111111111111111111111",
+        network_addresses={"mainnet-beta": "So11111111111111111111111111111111111111112"},
+        wallet_ref="auto",
+    )
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _hyperliquid_bridge2_request(
+                provider_treasury,
+                route="cctp_usdc",
+                source_network="base-mainnet",
+                destination_venue="gateway",
+                destination_network="solana-mainnet-beta",
+                destination_account="So11111111111111111111111111111111111111112",
+                amount="1.5",
+            ),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    asyncio.run(
+        provider_treasury.execute_provider_treasury_rebalance(
+            "rebalance-idem-001",
+            provider_treasury.ProviderTreasuryRebalanceExecuteRequest(),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert service.gateway_client.execute_calls[0]["destination_network"] == "mainnet-beta"
+    assert service.gateway_client.execute_calls[0]["live_action_authorization"]["destination_network"] == "mainnet-beta"
