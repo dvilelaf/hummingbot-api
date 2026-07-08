@@ -44,10 +44,13 @@ MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER = (
 )
 CCTP_IDENTITY_MISMATCH_BLOCKER = (
     "CCTP identity mismatch: destination_account must be the mnemonic-derived "
-    "destination EVM address"
+    "destination wallet address"
 )
 MARLIN_CCTP_IDENTITY_UNAVAILABLE_BLOCKER = (
-    "Marlin EVM wallet identity unavailable for CCTP treasury rebalance"
+    "Marlin destination wallet identity unavailable for CCTP treasury rebalance"
+)
+MARLIN_CCTP_SOURCE_IDENTITY_UNAVAILABLE_BLOCKER = (
+    "Marlin EVM source wallet identity unavailable for CCTP treasury rebalance"
 )
 EVM_GATEWAY_NETWORK_ALIASES = {
     "arbitrum": "arbitrum-mainnet",
@@ -146,6 +149,14 @@ GATEWAY_NETWORK_TO_WALLET_NETWORK = {
     "world-chain": "world-chain",
     "xdc": "xdc",
 }
+NON_EVM_CCTP_DESTINATION_ALIASES = {
+    "solana": "solana",
+    "solana-mainnet": "solana",
+    "solana-mainnet-beta": "solana",
+}
+GATEWAY_NETWORK_TO_WALLET_CONTEXT = {
+    "solana": ("solana", "mainnet-beta"),
+}
 _REBALANCE_REQUESTS: dict[str, dict[str, str]] = {}
 _REBALANCE_LOCKS: dict[str, asyncio.Lock] = {}
 
@@ -165,19 +176,21 @@ async def create_provider_treasury_rebalance(
         _assert_provider_treasury_authorized(request)
 
         if route in CCTP_ROUTE_ALIASES:
-            source_network = _cctp_gateway_network(body.source_network)
+            source_network = _cctp_evm_gateway_network(body.source_network)
             destination_network = _cctp_gateway_network(body.destination_network)
             if source_network == destination_network:
                 raise HTTPException(status_code=400, detail="CCTP source and destination networks must differ")
-            source_wallet_network = _wallet_identity_network(source_network)
-            destination_wallet_network = _wallet_identity_network(destination_network)
-            wallet_identity = _marlin_evm_wallet_identity(
+            source_wallet_chain, source_wallet_network = _wallet_identity_context(source_network)
+            destination_wallet_chain, destination_wallet_network = _wallet_identity_context(destination_network)
+            wallet_identity = _marlin_wallet_identity(
                 accounts_service,
+                chain=source_wallet_chain,
                 source_network=source_wallet_network,
-                blocker=MARLIN_CCTP_IDENTITY_UNAVAILABLE_BLOCKER,
+                blocker=MARLIN_CCTP_SOURCE_IDENTITY_UNAVAILABLE_BLOCKER,
             )
-            destination_identity = _marlin_evm_wallet_identity(
+            destination_identity = _marlin_wallet_identity(
                 accounts_service,
+                chain=destination_wallet_chain,
                 source_network=destination_wallet_network,
                 blocker=MARLIN_CCTP_IDENTITY_UNAVAILABLE_BLOCKER,
             )
@@ -189,8 +202,11 @@ async def create_provider_treasury_rebalance(
             destination_network = None
             source_wallet_network = source_network
             destination_wallet_network = None
-            wallet_identity = _marlin_evm_wallet_identity(
+            source_wallet_chain = "ethereum"
+            destination_wallet_chain = None
+            wallet_identity = _marlin_wallet_identity(
                 accounts_service,
+                chain=source_wallet_chain,
                 source_network=source_wallet_network,
                 blocker=MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER,
             )
@@ -199,7 +215,7 @@ async def create_provider_treasury_rebalance(
             provider = HYPERLIQUID_BRIDGE2_ROUTE
 
         wallet_result = await accounts_service.gateway_client.set_marlin_default_wallet(
-            chain="ethereum",
+            chain=source_wallet_chain,
             network=source_wallet_network,
             address=wallet_identity["address"],
             wallet_ref=wallet_identity["wallet_ref"],
@@ -208,7 +224,7 @@ async def create_provider_treasury_rebalance(
             raise HTTPException(status_code=400, detail=f"Failed to set default wallet: {wallet_result.get('error')}")
         if destination_wallet_network is not None:
             destination_wallet_result = await accounts_service.gateway_client.set_marlin_default_wallet(
-                chain="ethereum",
+                chain=destination_wallet_chain,
                 network=destination_wallet_network,
                 address=destination_identity["address"],
                 wallet_ref=destination_identity["wallet_ref"],
@@ -344,7 +360,7 @@ def _assert_supported_treasury_rebalance(body: ProviderTreasuryRebalanceRequest)
         and body.destination_venue.strip().lower() == "gateway"
         and body.destination_asset.strip().upper() == SUPPORTED_ASSET
     ):
-        _cctp_gateway_network(body.source_network)
+        _cctp_evm_gateway_network(body.source_network)
         _cctp_gateway_network(body.destination_network)
         return
     else:
@@ -362,6 +378,16 @@ def _cctp_gateway_network(value: str) -> str:
     normalized = value.strip().lower().replace("_", "-")
     network = EVM_GATEWAY_NETWORK_ALIASES.get(normalized)
     if network is None:
+        network = NON_EVM_CCTP_DESTINATION_ALIASES.get(normalized)
+    if network is None:
+        raise HTTPException(status_code=400, detail=UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER)
+    return "arbitrum" if network == "arbitrum-mainnet" else network
+
+
+def _cctp_evm_gateway_network(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    network = EVM_GATEWAY_NETWORK_ALIASES.get(normalized)
+    if network is None:
         raise HTTPException(status_code=400, detail=UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER)
     return "arbitrum" if network == "arbitrum-mainnet" else network
 
@@ -370,15 +396,23 @@ def _wallet_identity_network(gateway_network: str) -> str:
     return GATEWAY_NETWORK_TO_WALLET_NETWORK.get(gateway_network, gateway_network)
 
 
-def _marlin_evm_wallet_identity(
+def _wallet_identity_context(gateway_network: str) -> tuple[str, str]:
+    return GATEWAY_NETWORK_TO_WALLET_CONTEXT.get(
+        gateway_network,
+        ("ethereum", _wallet_identity_network(gateway_network)),
+    )
+
+
+def _marlin_wallet_identity(
     accounts_service: AccountsService,
     *,
+    chain: str,
     source_network: str,
     blocker: str,
 ) -> dict[str, str]:
     identity_getter = getattr(accounts_service, "_marlin_gateway_wallet_identity", None)
     identity = (
-        identity_getter(chain="ethereum", network=source_network)
+        identity_getter(chain=chain, network=source_network)
         if callable(identity_getter)
         else None
     )

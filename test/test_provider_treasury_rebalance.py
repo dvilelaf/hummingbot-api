@@ -166,11 +166,16 @@ class FakeAccountsService:
                 "polygon": "polygon",
                 "sei": "sei",
                 "sonic": "sonic",
+                "solana": "solana",
                 "unichain": "unichain",
                 "world-chain": "world-chain",
                 "xdc": "xdc",
             }.get(network, network)
-            wallet_ref = f"{wallet_ref_network}:mainnet:evm_gateway"
+            wallet_ref = (
+                "solana:mainnet-beta:solana_gateway"
+                if chain == "solana"
+                else f"{wallet_ref_network}:mainnet:evm_gateway"
+            )
         address = self.network_addresses.get(
             network,
             self.arbitrum_address if network == "arbitrum-mainnet" else self.address,
@@ -492,6 +497,7 @@ def test_concurrent_execute_rebalance_marks_pending_before_gateway_submit(monkey
         ("cctp_usdc", "linea-mainnet", "unichain-mainnet", "linea", "unichain"),
         ("cctp_usdc", "edge-mainnet", "sonic-mainnet", "edge", "sonic"),
         ("cctp_usdc", "worldchain-mainnet", "hyperevm-mainnet", "world-chain", "hyperevm"),
+        ("cctp_usdc", "base-mainnet", "solana-mainnet-beta", "base", "solana"),
     ],
 )
 def test_cctp_rebalance_build_forwards_semantic_gateway_request(
@@ -507,7 +513,11 @@ def test_cctp_rebalance_build_forwards_semantic_gateway_request(
         address="0x1111111111111111111111111111111111111111",
         arbitrum_address="0x2222222222222222222222222222222222222222",
         network_addresses={
-            provider_treasury._wallet_identity_network(gateway_destination): "0x2222222222222222222222222222222222222222",
+            provider_treasury._wallet_identity_context(gateway_destination)[1]: (
+                "So11111111111111111111111111111111111111112"
+                if gateway_destination == "solana"
+                else "0x2222222222222222222222222222222222222222"
+            ),
         },
         wallet_ref="auto",
     )
@@ -521,7 +531,11 @@ def test_cctp_rebalance_build_forwards_semantic_gateway_request(
                 source_network=source_network,
                 destination_venue="gateway",
                 destination_network=destination_network,
-                destination_account="0x2222222222222222222222222222222222222222",
+                destination_account=(
+                    "So11111111111111111111111111111111111111112"
+                    if gateway_destination == "solana"
+                    else "0x2222222222222222222222222222222222222222"
+                ),
                 amount="1.5",
             ),
             _authorized_request(),
@@ -535,21 +549,33 @@ def test_cctp_rebalance_build_forwards_semantic_gateway_request(
         {
             "address": "0x1111111111111111111111111111111111111111",
             "chain": "ethereum",
-            "network": provider_treasury._wallet_identity_network(gateway_source),
+            "network": provider_treasury._wallet_identity_context(gateway_source)[1],
             "wallet_ref": _evm_wallet_ref(provider_treasury._wallet_identity_network(gateway_source)),
         },
         {
-            "address": "0x2222222222222222222222222222222222222222",
-            "chain": "ethereum",
-            "network": provider_treasury._wallet_identity_network(gateway_destination),
-            "wallet_ref": _evm_wallet_ref(provider_treasury._wallet_identity_network(gateway_destination)),
+            "address": (
+                "So11111111111111111111111111111111111111112"
+                if gateway_destination == "solana"
+                else "0x2222222222222222222222222222222222222222"
+            ),
+            "chain": provider_treasury._wallet_identity_context(gateway_destination)[0],
+            "network": provider_treasury._wallet_identity_context(gateway_destination)[1],
+            "wallet_ref": (
+                "solana:mainnet-beta:solana_gateway"
+                if gateway_destination == "solana"
+                else _evm_wallet_ref(provider_treasury._wallet_identity_network(gateway_destination))
+            ),
         },
     ]
     assert service.gateway_client.build_calls == [
         {
             "idempotency_key": "rebalance-idem-001",
             "wallet_address": "0x1111111111111111111111111111111111111111",
-            "destination_address": "0x2222222222222222222222222222222222222222",
+            "destination_address": (
+                "So11111111111111111111111111111111111111112"
+                if gateway_destination == "solana"
+                else "0x2222222222222222222222222222222222222222"
+            ),
             "amount": "1.5",
             "provider": "cctp_usdc",
             "source_network": gateway_source,
@@ -562,7 +588,7 @@ def test_cctp_rebalance_build_forwards_semantic_gateway_request(
     "bad_source,bad_destination",
     [
         ("bsc", "base"),
-        ("base", "solana"),
+        ("solana", "base"),
         ("base", "starknet"),
         ("base", "stellar"),
     ],
@@ -645,6 +671,7 @@ def test_cctp_rebalance_rejects_same_network_before_wallet_defaults(monkeypatch)
         ("polygon-pos", "polygon", "polygon"),
         ("ethereum-sei-mainnet", "sei", "sei"),
         ("ethereum-sonic-mainnet", "sonic", "sonic"),
+        ("solana-mainnet-beta", "solana", "mainnet-beta"),
         ("ethereum-unichain-mainnet", "unichain", "unichain"),
         ("worldchain-mainnet", "world-chain", "world-chain"),
         ("ethereum-world-chain-mainnet", "world-chain", "world-chain"),
@@ -655,7 +682,7 @@ def test_cctp_gateway_network_aliases_map_to_wallet_networks(alias, gateway_netw
     provider_treasury = _provider_treasury_module()
 
     assert provider_treasury._cctp_gateway_network(alias) == gateway_network
-    assert provider_treasury._wallet_identity_network(gateway_network) == wallet_network
+    assert provider_treasury._wallet_identity_context(gateway_network)[1] == wallet_network
 
 
 def test_cctp_rebalance_response_redacts_sensitive_metadata():
