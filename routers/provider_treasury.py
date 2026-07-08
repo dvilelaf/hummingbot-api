@@ -59,7 +59,7 @@ SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER = (
     "wallet identity; use provider-owned or external treasury rebalance"
 )
 SQUID_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
-SQUID_EVM_SOURCE_ASSETS = {
+SQUID_EVM_USDC_ASSETS = {
     ("base", "usdc"): "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     ("arbitrum", "usdc"): "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
     ("mainnet", "usdc"): "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
@@ -67,6 +67,7 @@ SQUID_EVM_SOURCE_ASSETS = {
     ("polygon", "usdc"): "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
     ("avalanche", "usdc"): "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
 }
+SQUID_EVM_SOURCE_ASSETS = SQUID_EVM_USDC_ASSETS
 EVM_GATEWAY_NETWORK_ALIASES = {
     "arbitrum": "arbitrum-mainnet",
     "arbitrum-mainnet": "arbitrum-mainnet",
@@ -536,6 +537,10 @@ def _squid_destination_asset(value: str, *, destination_chain: str, destination_
         raise HTTPException(status_code=400, detail=SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER)
     if _is_squid_native_asset_for_context(value, chain=destination_chain, network=destination_network):
         return SQUID_NATIVE_TOKEN_ADDRESS
+    if destination_chain.strip().lower() == "ethereum":
+        token_address = SQUID_EVM_USDC_ASSETS.get((destination_network, normalized))
+        if token_address:
+            return token_address
     return value.strip()
 
 
