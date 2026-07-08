@@ -424,7 +424,7 @@ def _rebalance_response(
             result.get("finalize_transaction_hash") or result.get("finalizeTransactionHash")
         ),
         provider_status=_optional_text(result.get("provider_status") or result.get("providerStatus")),
-        provider_error=_optional_text(result.get("provider_error") or result.get("providerError")),
+        provider_error=_optional_provider_error(result.get("provider_error") or result.get("providerError")),
         metadata=_safe_metadata(result.get("metadata")),
     )
 
@@ -443,6 +443,12 @@ def _optional_text(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _optional_provider_error(value: Any) -> str | None:
+    if value is None:
+        return None
+    return _redact_provider_error(value)
 
 
 _SENSITIVE_METADATA_KEYS = {

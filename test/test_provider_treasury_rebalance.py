@@ -680,6 +680,20 @@ def test_cctp_rebalance_response_redacts_sensitive_metadata():
     assert response.metadata == {"phase": "built", "nested": {"route": "cctp_usdc"}}
 
 
+def test_cctp_rebalance_response_redacts_provider_error():
+    provider_treasury = _provider_treasury_module()
+
+    response = provider_treasury._rebalance_response(
+        {
+            "id": "rebalance-idem-001",
+            "status": "failed",
+            "providerError": "failed bearer abc123 token secret-value",
+        },
+    )
+
+    assert response.provider_error == "failed bearer [redacted] token [redacted]"
+
+
 def test_cctp_rebalance_execute_authorization_uses_source_and_destination_networks(monkeypatch):
     provider_treasury = _provider_treasury_module()
     service = FakeAccountsService(
