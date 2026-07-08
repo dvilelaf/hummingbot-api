@@ -760,6 +760,51 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash(m
     }
 
 
+def test_gateway_market_order_provider_intent_executes_as_authorized_swap(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    LIVE_GATE_CALLS.clear()
+    EXECUTE_SWAP_CALLS.clear()
+    SET_DEFAULT_WALLET_CALLS.clear()
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="jupiter",
+        correlation_id="order-jupiter-swap-001",
+        market_id="SOL-USDC",
+        mode="mainnet",
+        order_type="MARKET",
+        quantity="0.0001",
+        risk_metadata={"network": "solana-mainnet-beta"},
+        side="SELL",
+        wallet_identity={
+            "address": "9AtFd6KcR9tx5Etxc9SVkYrkZb7yC5BDibao7yPT5Ce1",
+            "chain": "solana",
+            "network": "mainnet-beta",
+            "wallet_ref": "solana:mainnet-beta:solana_gateway",
+        },
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "failed"
+    assert result.provider_error == "Insufficient funds for transaction."
+    assert len(LIVE_GATE_CALLS) == 1
+    assert EXECUTE_SWAP_CALLS[0]["connector"] == "jupiter"
+    assert EXECUTE_SWAP_CALLS[0]["network"] == "mainnet-beta"
+    assert EXECUTE_SWAP_CALLS[0]["marlin_provider_intent_authorized"] is True
+    assert EXECUTE_SWAP_CALLS[0]["live_action_authorization"]["scope"] == "provider_intent"
+    assert EXECUTE_SWAP_CALLS[0]["live_action_authorization"]["action"] == "gateway_swap"
+
+
 def test_swap_provider_intent_preflight_does_not_execute_swap(monkeypatch):
     monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
     LIVE_GATE_CALLS.clear()

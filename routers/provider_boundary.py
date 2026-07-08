@@ -197,11 +197,27 @@ async def submit_provider_intent(
 ) -> ProviderIntentResponse:
     del db_manager
     if body.action == "order":
+        if _order_intent_executes_as_gateway_swap(body):
+            return await _submit_swap_intent(
+                body,
+                request,
+                accounts_service,
+            )
         return await _submit_order_intent(body, request, accounts_service)
     return await _submit_swap_intent(
         body,
         request,
         accounts_service,
+    )
+
+
+def _order_intent_executes_as_gateway_swap(body: ProviderIntentRequest) -> bool:
+    network_id = str(body.risk_metadata.get("network", "")).strip()
+    order_type = (body.order_type or "MARKET").upper()
+    return (
+        order_type == "MARKET"
+        and body.connector_name in GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS
+        and bool(network_id)
     )
 
 
