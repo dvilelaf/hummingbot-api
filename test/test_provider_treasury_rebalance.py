@@ -524,6 +524,27 @@ def test_squid_router_bsc_source_alias_forwards_when_wallet_identity_exists(monk
     assert service.gateway_client.build_calls[0]["source_network"] == "bsc"
 
 
+def test_squid_router_base_usdc_source_forwards_token_address(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(
+        address="0x1111111111111111111111111111111111111111",
+        network_addresses={"arbitrum-mainnet": "0x2222222222222222222222222222222222222222"},
+        wallet_ref="auto",
+    )
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _squid_router_request(provider_treasury, source_asset="USDC"),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert service.gateway_client.build_calls[0]["source_network"] == "base"
+    assert service.gateway_client.build_calls[0]["source_asset"] == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+
 def test_squid_router_wrong_native_alias_for_source_network_fails_closed(monkeypatch):
     provider_treasury = _provider_treasury_module()
     service = FakeAccountsService(wallet_ref="auto")

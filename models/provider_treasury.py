@@ -11,6 +11,7 @@ class ProviderTreasuryRebalanceRequest(BaseModel):
     source_venue: str = Field(min_length=1)
     source_network: str = Field(min_length=1)
     source_asset: str = Field(min_length=1)
+    source_asset_decimals: Optional[int] = Field(default=None, ge=0, le=36)
     destination_venue: str = Field(min_length=1)
     destination_network: str = Field(min_length=1)
     destination_asset: str = Field(min_length=1)

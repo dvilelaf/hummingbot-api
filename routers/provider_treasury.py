@@ -27,14 +27,14 @@ HYPERLIQUID_BRIDGE2_ROUTE = "hyperliquid_bridge2"
 CCTP_USDC_ROUTE = "cctp_usdc"
 CCTP_BASE_ARBITRUM_USDC_ROUTE = "cctp_base_arbitrum_usdc"
 SQUID_ROUTER_ROUTE = "squid_router"
-CCTP_ROUTE_ALIASES = {CCTP_USDC_ROUTE, CCTP_BASE_ARBITRUM_USDC_ROUTE}
+CCTP_ROUTE_ALIASES: set[str] = set()
 SUPPORTED_SOURCE_NETWORK = "arbitrum-mainnet"
 GATEWAY_SOURCE_NETWORK = "arbitrum"
 SUPPORTED_DESTINATION_NETWORK = "mainnet"
 SUPPORTED_ASSET = "USDC"
 UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER = (
     "unsupported treasury rebalance route: only Hyperliquid Bridge2 from Arbitrum "
-    "USDC to Hyperliquid, CCTP gateway-to-gateway USDC, and Squid gateway-to-gateway "
+    "USDC to Hyperliquid and Squid gateway-to-gateway "
     "treasury rebalances are supported"
 )
 HYPERLIQUID_BRIDGE2_IDENTITY_MISMATCH_BLOCKER = (
@@ -59,6 +59,14 @@ SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER = (
     "wallet identity; use provider-owned or external treasury rebalance"
 )
 SQUID_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+SQUID_EVM_SOURCE_ASSETS = {
+    ("base", "usdc"): "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    ("arbitrum", "usdc"): "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    ("mainnet", "usdc"): "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    ("optimism", "usdc"): "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+    ("polygon", "usdc"): "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+    ("avalanche", "usdc"): "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
+}
 EVM_GATEWAY_NETWORK_ALIASES = {
     "arbitrum": "arbitrum-mainnet",
     "arbitrum-mainnet": "arbitrum-mainnet",
@@ -250,6 +258,7 @@ async def create_provider_treasury_rebalance(
             provider = SQUID_ROUTER_ROUTE
             source_chain = source_wallet_chain
             source_asset = _squid_source_asset(body.source_asset, source_network)
+            source_asset_decimals = body.source_asset_decimals
             destination_asset = _squid_destination_asset(
                 body.destination_asset,
                 destination_chain=destination_chain,
@@ -274,6 +283,7 @@ async def create_provider_treasury_rebalance(
             provider = HYPERLIQUID_BRIDGE2_ROUTE
             source_chain = "ethereum"
             source_asset = SUPPORTED_ASSET
+            source_asset_decimals = None
             destination_chain = None
             destination_asset = SUPPORTED_ASSET
             destination_venue = "hyperliquid"
@@ -315,6 +325,7 @@ async def create_provider_treasury_rebalance(
                 destination_chain=destination_chain,
                 destination_asset=destination_asset,
                 destination_venue=destination_venue,
+                source_asset_decimals=source_asset_decimals,
             ),
         )
         built_destination_network = str(result.get("destinationNetwork") or destination_network or "").strip()
@@ -327,6 +338,7 @@ async def create_provider_treasury_rebalance(
             "destination_venue": destination_venue or "",
             "provider": provider,
             "source_asset": source_asset,
+            "source_asset_decimals": str(source_asset_decimals or ""),
             "source_chain": source_chain,
             "source_network": GATEWAY_SOURCE_NETWORK if provider == HYPERLIQUID_BRIDGE2_ROUTE else source_network,
             "wallet_address": wallet_identity["address"],
@@ -509,6 +521,12 @@ def _squid_destination_context(value: str) -> tuple[str, str, str, str]:
 def _squid_source_asset(value: str, source_network: str) -> str:
     if _is_squid_native_asset_for_context(value, chain="ethereum", network=source_network):
         return SQUID_NATIVE_TOKEN_ADDRESS
+    normalized = value.strip().lower()
+    if re.fullmatch(r"0x[a-fA-F0-9]{40}", value.strip()):
+        return value.strip()
+    token_address = SQUID_EVM_SOURCE_ASSETS.get((source_network, normalized))
+    if token_address:
+        return token_address
     raise HTTPException(status_code=400, detail=SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER)
 
 
@@ -762,6 +780,7 @@ def _provider_semantic_gateway_fields(
     destination_chain: str | None,
     destination_asset: str,
     destination_venue: str | None,
+    source_asset_decimals: int | str | None = None,
 ) -> dict[str, str]:
     if provider != SQUID_ROUTER_ROUTE:
         return {}
@@ -774,6 +793,8 @@ def _provider_semantic_gateway_fields(
         fields["destination_chain"] = destination_chain
     if destination_venue:
         fields["destination_venue"] = destination_venue
+    if source_asset_decimals not in (None, ""):
+        fields["source_asset_decimals"] = str(source_asset_decimals)
     return fields
 
 
@@ -785,6 +806,7 @@ def _stored_provider_semantic_gateway_fields(stored: dict[str, str]) -> dict[str
         destination_chain=stored.get("destination_chain") or None,
         destination_asset=stored.get("destination_asset") or SUPPORTED_ASSET,
         destination_venue=stored.get("destination_venue") or None,
+        source_asset_decimals=stored.get("source_asset_decimals") or None,
     )
 
 

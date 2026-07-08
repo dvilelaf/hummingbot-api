@@ -644,6 +644,7 @@ class GatewayClient:
         source_chain: str = "ethereum",
         source_network: str = "arbitrum",
         source_asset: str = "USDC",
+        source_asset_decimals: Optional[str] = None,
         destination_chain: Optional[str] = None,
         destination_network: Optional[str] = None,
         destination_asset: str = "USDC",
@@ -664,6 +665,8 @@ class GatewayClient:
         }
         if destination_chain is not None:
             payload["destinationChain"] = destination_chain
+        if source_asset_decimals is not None:
+            payload["sourceAssetDecimals"] = source_asset_decimals
         if destination_venue is not None:
             payload["destinationVenue"] = destination_venue
         elif provider == "hyperliquid_bridge2":
@@ -683,6 +686,7 @@ class GatewayClient:
         source_chain: str = "ethereum",
         source_network: str = "arbitrum",
         source_asset: str = "USDC",
+        source_asset_decimals: Optional[str] = None,
         destination_chain: Optional[str] = None,
         destination_network: Optional[str] = None,
         destination_asset: str = "USDC",
@@ -705,6 +709,8 @@ class GatewayClient:
         }
         if destination_chain is not None:
             payload["destinationChain"] = destination_chain
+        if source_asset_decimals is not None:
+            payload["sourceAssetDecimals"] = source_asset_decimals
         if destination_venue is not None:
             payload["destinationVenue"] = destination_venue
         elif provider == "hyperliquid_bridge2":
