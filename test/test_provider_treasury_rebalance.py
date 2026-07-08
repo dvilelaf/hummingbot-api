@@ -99,7 +99,7 @@ class FakeGatewayClient:
         self.build_calls.append(kwargs)
         result = {
             "idempotencyKey": kwargs["idempotency_key"],
-            "provider": "hyperliquid_bridge2",
+            "provider": kwargs["provider"],
         }
         if kwargs.get("destination_network") == "solana":
             result["destinationNetwork"] = "mainnet-beta"
@@ -136,16 +136,20 @@ class FakeAccountsService:
         address="0x1111111111111111111111111111111111111111",
         arbitrum_address=None,
         network_addresses=None,
+        unsupported_contexts=None,
         wallet_ref="arbitrum:mainnet:evm_gateway",
     ):
         self.gateway_client = FakeGatewayClient()
         self.address = address
         self.arbitrum_address = arbitrum_address or address
         self.network_addresses = network_addresses or {}
+        self.unsupported_contexts = unsupported_contexts or set()
         self.wallet_ref = wallet_ref
 
     def _marlin_gateway_wallet_identity(self, *, chain, network):
         if self.address is None:
+            return None
+        if (chain, network) in self.unsupported_contexts:
             return None
         wallet_ref = self.wallet_ref
         if wallet_ref == "auto":
@@ -153,6 +157,7 @@ class FakeAccountsService:
                 "arbitrum-mainnet": "arbitrum",
                 "avalanche": "avalanche",
                 "base": "base",
+                "bsc": "bsc",
                 "codex": "codex",
                 "cronos": "cronos",
                 "edge": "edge",
@@ -172,11 +177,14 @@ class FakeAccountsService:
                 "solana": "solana",
                 "unichain": "unichain",
                 "world-chain": "world-chain",
+                "xrpl": "xrpl",
                 "xdc": "xdc",
             }.get(network, network)
             wallet_ref = (
                 "solana:mainnet-beta:solana_gateway"
                 if chain == "solana"
+                else "xrpl:mainnet:xrpl_gateway"
+                if chain == "xrpl"
                 else f"{wallet_ref_network}:mainnet:evm_gateway"
             )
         address = self.network_addresses.get(
@@ -209,6 +217,24 @@ def _hyperliquid_bridge2_request(module, **overrides):
         "amount": "25.5",
         "route": "hyperliquid_bridge2",
         "idempotency_key": "rebalance-idem-001",
+    }
+    data.update(overrides)
+    return module.ProviderTreasuryRebalanceRequest(**data)
+
+
+def _squid_router_request(module, **overrides):
+    data = {
+        "account_name": "master_account",
+        "source_venue": "gateway",
+        "source_network": "base-mainnet",
+        "source_asset": "ETH",
+        "destination_venue": "gateway",
+        "destination_network": "arbitrum-mainnet",
+        "destination_asset": "ETH",
+        "destination_account": "0x2222222222222222222222222222222222222222",
+        "amount": "0.25",
+        "route": "squid_router",
+        "idempotency_key": "squid-rebalance-idem-001",
     }
     data.update(overrides)
     return module.ProviderTreasuryRebalanceRequest(**data)
@@ -288,6 +314,279 @@ def test_hyperliquid_bridge2_identity_mismatch_fails_closed_with_exact_blocker(m
     assert service.gateway_client.build_calls == []
 
 
+def test_squid_router_rebalance_build_forwards_semantic_gateway_request(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(
+        address="0x1111111111111111111111111111111111111111",
+        network_addresses={"arbitrum-mainnet": "0x2222222222222222222222222222222222222222"},
+        wallet_ref="auto",
+    )
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    result = asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _squid_router_request(provider_treasury),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.id == "squid-rebalance-idem-001"
+    assert result.status == "built"
+    assert result.route == "squid_router"
+    assert service.gateway_client.wallet_calls == [
+        {
+            "address": "0x1111111111111111111111111111111111111111",
+            "chain": "ethereum",
+            "network": "base",
+            "wallet_ref": "base:mainnet:evm_gateway",
+        },
+        {
+            "address": "0x2222222222222222222222222222222222222222",
+            "chain": "ethereum",
+            "network": "arbitrum-mainnet",
+            "wallet_ref": "arbitrum:mainnet:evm_gateway",
+        },
+    ]
+    assert service.gateway_client.build_calls == [
+        {
+            "idempotency_key": "squid-rebalance-idem-001",
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "destination_address": "0x2222222222222222222222222222222222222222",
+            "amount": "0.25",
+            "provider": "squid_router",
+            "source_chain": "ethereum",
+            "source_network": "base",
+            "source_asset": provider_treasury.SQUID_NATIVE_TOKEN_ADDRESS,
+            "destination_chain": "ethereum",
+            "destination_network": "arbitrum",
+            "destination_asset": provider_treasury.SQUID_NATIVE_TOKEN_ADDRESS,
+            "destination_venue": "gateway",
+        }
+    ]
+
+
+def test_squid_router_non_gateway_context_fails_closed_before_gateway_side_effects(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(wallet_ref="auto")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    with pytest.raises(provider_treasury.HTTPException) as exc:
+        asyncio.run(
+            provider_treasury.create_provider_treasury_rebalance(
+                _squid_router_request(provider_treasury, destination_venue="binance"),
+                _authorized_request(),
+                service,
+            ),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == provider_treasury.SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER
+    assert service.gateway_client.wallet_calls == []
+    assert service.gateway_client.build_calls == []
+
+
+def test_squid_router_base_to_solana_forwards_non_evm_destination_semantics(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    solana_destination = "So11111111111111111111111111111111111111112"
+    service = FakeAccountsService(
+        address="0x1111111111111111111111111111111111111111",
+        network_addresses={"mainnet-beta": solana_destination},
+        wallet_ref="auto",
+    )
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    result = asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _squid_router_request(
+                provider_treasury,
+                destination_network="solana-mainnet-beta",
+                destination_account=solana_destination,
+                destination_asset="SOL",
+            ),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "built"
+    assert service.gateway_client.wallet_calls == [
+        {
+            "address": "0x1111111111111111111111111111111111111111",
+            "chain": "ethereum",
+            "network": "base",
+            "wallet_ref": "base:mainnet:evm_gateway",
+        },
+        {
+            "address": solana_destination,
+            "chain": "solana",
+            "network": "mainnet-beta",
+            "wallet_ref": "solana:mainnet-beta:solana_gateway",
+        },
+    ]
+    assert service.gateway_client.build_calls[0] == {
+        "idempotency_key": "squid-rebalance-idem-001",
+        "wallet_address": "0x1111111111111111111111111111111111111111",
+        "destination_address": solana_destination,
+        "amount": "0.25",
+        "provider": "squid_router",
+        "source_chain": "ethereum",
+        "source_network": "base",
+        "source_asset": provider_treasury.SQUID_NATIVE_TOKEN_ADDRESS,
+        "destination_chain": "solana",
+        "destination_network": "mainnet-beta",
+        "destination_asset": provider_treasury.SQUID_NATIVE_TOKEN_ADDRESS,
+        "destination_venue": "gateway",
+    }
+
+
+def test_squid_router_solana_destination_account_is_case_sensitive(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    solana_destination = "So11111111111111111111111111111111111111112"
+    service = FakeAccountsService(
+        address="0x1111111111111111111111111111111111111111",
+        network_addresses={"mainnet-beta": solana_destination},
+        wallet_ref="auto",
+    )
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    with pytest.raises(provider_treasury.HTTPException) as exc:
+        asyncio.run(
+            provider_treasury.create_provider_treasury_rebalance(
+                _squid_router_request(
+                    provider_treasury,
+                    destination_network="solana-mainnet-beta",
+                    destination_account=solana_destination.lower(),
+                    destination_asset="SOL",
+                ),
+                _authorized_request(),
+                service,
+            ),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == provider_treasury.SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER
+    assert service.gateway_client.build_calls == []
+
+
+def test_squid_router_xrpl_destination_fails_closed_without_wallet_identity(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(
+        address="0x1111111111111111111111111111111111111111",
+        unsupported_contexts={("xrpl", "mainnet")},
+        wallet_ref="auto",
+    )
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    with pytest.raises(provider_treasury.HTTPException) as exc:
+        asyncio.run(
+            provider_treasury.create_provider_treasury_rebalance(
+                _squid_router_request(
+                    provider_treasury,
+                    destination_network="xrpl-mainnet",
+                    destination_account="rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
+                    destination_asset="XRP",
+                ),
+                _authorized_request(),
+                service,
+            ),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == provider_treasury.SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER
+    assert service.gateway_client.wallet_calls == []
+    assert service.gateway_client.build_calls == []
+
+
+def test_squid_router_bsc_source_alias_forwards_when_wallet_identity_exists(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(
+        address="0x1111111111111111111111111111111111111111",
+        network_addresses={"arbitrum-mainnet": "0x2222222222222222222222222222222222222222"},
+        wallet_ref="auto",
+    )
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _squid_router_request(provider_treasury, source_network="ethereum-bsc-mainnet", source_asset="BNB"),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert service.gateway_client.wallet_calls[0] == {
+        "address": "0x1111111111111111111111111111111111111111",
+        "chain": "ethereum",
+        "network": "bsc",
+        "wallet_ref": "bsc:mainnet:evm_gateway",
+    }
+    assert service.gateway_client.build_calls[0]["source_network"] == "bsc"
+
+
+def test_squid_router_wrong_native_alias_for_source_network_fails_closed(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(wallet_ref="auto")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    with pytest.raises(provider_treasury.HTTPException) as exc:
+        asyncio.run(
+            provider_treasury.create_provider_treasury_rebalance(
+                _squid_router_request(provider_treasury, source_asset="BNB"),
+                _authorized_request(),
+                service,
+            ),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == provider_treasury.SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER
+    assert service.gateway_client.wallet_calls == []
+    assert service.gateway_client.build_calls == []
+
+
+def test_squid_router_bsc_source_alias_fails_closed_without_wallet_identity(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(
+        unsupported_contexts={("ethereum", "bsc")},
+        wallet_ref="auto",
+    )
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    with pytest.raises(provider_treasury.HTTPException) as exc:
+        asyncio.run(
+            provider_treasury.create_provider_treasury_rebalance(
+                _squid_router_request(provider_treasury, source_network="bsc-mainnet"),
+                _authorized_request(),
+                service,
+            ),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == provider_treasury.SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER
+    assert service.gateway_client.wallet_calls == []
+    assert service.gateway_client.build_calls == []
+
+
+def test_squid_router_rejects_non_evm_source_before_gateway_side_effects(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(wallet_ref="auto")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    with pytest.raises(provider_treasury.HTTPException) as exc:
+        asyncio.run(
+            provider_treasury.create_provider_treasury_rebalance(
+                _squid_router_request(provider_treasury, source_network="solana-mainnet-beta"),
+                _authorized_request(),
+                service,
+            ),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == provider_treasury.SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER
+    assert service.gateway_client.wallet_calls == []
+    assert service.gateway_client.build_calls == []
+
+
 def test_execute_and_status_forward_to_gateway_treasury_rebalance_endpoints(monkeypatch):
     provider_treasury = _provider_treasury_module()
     service = FakeAccountsService()
@@ -359,6 +658,145 @@ def test_execute_and_status_forward_to_gateway_treasury_rebalance_endpoints(monk
     assert service.gateway_client.status_calls == ["rebalance-idem-001", "rebalance-123"]
 
 
+def test_squid_router_execute_uses_treasury_authorization(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(
+        address="0x1111111111111111111111111111111111111111",
+        network_addresses={"arbitrum-mainnet": "0x2222222222222222222222222222222222222222"},
+        wallet_ref="auto",
+    )
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _squid_router_request(provider_treasury),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    asyncio.run(
+        provider_treasury.execute_provider_treasury_rebalance(
+            "squid-rebalance-idem-001",
+            provider_treasury.ProviderTreasuryRebalanceExecuteRequest(),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert service.gateway_client.execute_calls == [
+        {
+            "idempotency_key": "squid-rebalance-idem-001",
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "destination_address": "0x2222222222222222222222222222222222222222",
+            "amount": "0.25",
+            "provider": "squid_router",
+            "source_chain": "ethereum",
+            "source_network": "base",
+            "source_asset": provider_treasury.SQUID_NATIVE_TOKEN_ADDRESS,
+            "destination_chain": "ethereum",
+            "destination_network": "arbitrum",
+            "destination_asset": provider_treasury.SQUID_NATIVE_TOKEN_ADDRESS,
+            "destination_venue": "gateway",
+            "live_action_authorization": {
+                "action": "gateway_rebalance",
+                "connector_id": "treasury",
+                "destination_address": "0x2222222222222222222222222222222222222222",
+                "destination_network": "arbitrum",
+                "network": "base",
+                "notional": "0.25",
+                "scope": "provider_treasury",
+                "source": "marlin",
+                "wallet_address": "0x1111111111111111111111111111111111111111",
+            },
+            "marlin_provider_intent_authorized": True,
+        }
+    ]
+
+
+def test_gateway_client_squid_rebalance_payload_preserves_request_semantics(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    from services.gateway_client import GatewayClient
+
+    captured = []
+
+    async def fake_request(self, method, path, params=None, json=None, headers=None):
+        captured.append(
+            {
+                "method": method,
+                "path": path,
+                "params": params,
+                "json": json,
+                "headers": headers,
+            }
+        )
+        return {"idempotencyKey": json["idempotencyKey"], "status": "built"}
+
+    monkeypatch.setattr(GatewayClient, "_request", fake_request)
+    client = GatewayClient()
+
+    result = asyncio.run(
+        client.build_treasury_rebalance(
+            idempotency_key="squid-rebalance-idem-001",
+            wallet_address="0x1111111111111111111111111111111111111111",
+            destination_address="0x2222222222222222222222222222222222222222",
+            amount="0.25",
+            provider="squid_router",
+            source_chain="ethereum",
+            source_network="base",
+            source_asset=provider_treasury.SQUID_NATIVE_TOKEN_ADDRESS,
+            destination_chain="ethereum",
+            destination_network="arbitrum",
+            destination_asset=provider_treasury.SQUID_NATIVE_TOKEN_ADDRESS,
+            destination_venue="gateway",
+        )
+    )
+
+    assert result == {"idempotencyKey": "squid-rebalance-idem-001", "status": "built"}
+    assert captured == [
+        {
+            "method": "POST",
+            "path": "bridge/rebalance/build",
+            "params": None,
+            "json": {
+                "provider": "squid_router",
+                "idempotencyKey": "squid-rebalance-idem-001",
+                "mode": "mainnet",
+                "sourceChain": "ethereum",
+                "sourceNetwork": "base",
+                "sourceAsset": provider_treasury.SQUID_NATIVE_TOKEN_ADDRESS,
+                "destinationChain": "ethereum",
+                "destinationNetwork": "arbitrum",
+                "destinationAsset": provider_treasury.SQUID_NATIVE_TOKEN_ADDRESS,
+                "destinationVenue": "gateway",
+                "walletAddress": "0x1111111111111111111111111111111111111111",
+                "destinationAddress": "0x2222222222222222222222222222222222222222",
+                "amount": "0.25",
+            },
+            "headers": None,
+        }
+    ]
+
+
+def test_execute_rebalance_can_resume_stateless_gateway_owned_request(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    result = asyncio.run(
+        provider_treasury.execute_provider_treasury_rebalance(
+            "gateway-owned-rebalance-001",
+            provider_treasury.ProviderTreasuryRebalanceExecuteRequest(),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "confirmed"
+    assert result.transaction_hash == "0xstatus"
+    assert service.gateway_client.status_calls == ["gateway-owned-rebalance-001"]
+    assert service.gateway_client.execute_calls == []
+
+
 def test_rebalance_response_scrubs_provider_internal_metadata():
     provider_treasury = _provider_treasury_module()
 
@@ -372,6 +810,13 @@ def test_rebalance_response_scrubs_provider_internal_metadata():
                 "attestationBytes": "0xattestation",
                 "privateKey": "secret",
                 "mnemonic": "secret phrase",
+                "route": {
+                    "transactionRequest": {
+                        "data": "0xdeadbeef",
+                        "target": "0x00000000000000000000000000000000000000cc",
+                        "value": "0",
+                    }
+                },
             },
         }
     )

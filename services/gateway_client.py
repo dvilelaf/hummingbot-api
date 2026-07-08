@@ -641,23 +641,32 @@ class GatewayClient:
         destination_address: str,
         amount: str,
         provider: str = "hyperliquid_bridge2",
+        source_chain: str = "ethereum",
         source_network: str = "arbitrum",
+        source_asset: str = "USDC",
+        destination_chain: Optional[str] = None,
         destination_network: Optional[str] = None,
+        destination_asset: str = "USDC",
+        destination_venue: Optional[str] = None,
     ) -> Dict:
         """Build a provider-owned treasury rebalance through Gateway."""
         payload = {
             "provider": provider,
             "idempotencyKey": idempotency_key,
             "mode": "mainnet",
-            "sourceChain": "ethereum",
+            "sourceChain": source_chain,
             "sourceNetwork": source_network,
-            "sourceAsset": "USDC",
-            "destinationAsset": "USDC",
+            "sourceAsset": source_asset,
+            "destinationAsset": destination_asset,
             "walletAddress": wallet_address,
             "destinationAddress": destination_address,
             "amount": amount,
         }
-        if provider == "hyperliquid_bridge2":
+        if destination_chain is not None:
+            payload["destinationChain"] = destination_chain
+        if destination_venue is not None:
+            payload["destinationVenue"] = destination_venue
+        elif provider == "hyperliquid_bridge2":
             payload["destinationVenue"] = "hyperliquid"
         if destination_network is not None:
             payload["destinationNetwork"] = destination_network
@@ -671,8 +680,13 @@ class GatewayClient:
         destination_address: str,
         amount: str,
         provider: str = "hyperliquid_bridge2",
+        source_chain: str = "ethereum",
         source_network: str = "arbitrum",
+        source_asset: str = "USDC",
+        destination_chain: Optional[str] = None,
         destination_network: Optional[str] = None,
+        destination_asset: str = "USDC",
+        destination_venue: Optional[str] = None,
         live_action_authorization: Optional[Dict[str, Any]] = None,
         marlin_provider_intent_authorized: bool = False,
     ) -> Dict:
@@ -681,15 +695,19 @@ class GatewayClient:
             "provider": provider,
             "idempotencyKey": idempotency_key,
             "mode": "mainnet",
-            "sourceChain": "ethereum",
+            "sourceChain": source_chain,
             "sourceNetwork": source_network,
-            "sourceAsset": "USDC",
-            "destinationAsset": "USDC",
+            "sourceAsset": source_asset,
+            "destinationAsset": destination_asset,
             "walletAddress": wallet_address,
             "destinationAddress": destination_address,
             "amount": amount,
         }
-        if provider == "hyperliquid_bridge2":
+        if destination_chain is not None:
+            payload["destinationChain"] = destination_chain
+        if destination_venue is not None:
+            payload["destinationVenue"] = destination_venue
+        elif provider == "hyperliquid_bridge2":
             payload["destinationVenue"] = "hyperliquid"
         if destination_network is not None:
             payload["destinationNetwork"] = destination_network

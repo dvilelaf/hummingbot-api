@@ -26,6 +26,7 @@ MARLIN_PROVIDER_INTENT_TOKEN_HEADER = "x-marlin-provider-intent-token"
 HYPERLIQUID_BRIDGE2_ROUTE = "hyperliquid_bridge2"
 CCTP_USDC_ROUTE = "cctp_usdc"
 CCTP_BASE_ARBITRUM_USDC_ROUTE = "cctp_base_arbitrum_usdc"
+SQUID_ROUTER_ROUTE = "squid_router"
 CCTP_ROUTE_ALIASES = {CCTP_USDC_ROUTE, CCTP_BASE_ARBITRUM_USDC_ROUTE}
 SUPPORTED_SOURCE_NETWORK = "arbitrum-mainnet"
 GATEWAY_SOURCE_NETWORK = "arbitrum"
@@ -33,7 +34,8 @@ SUPPORTED_DESTINATION_NETWORK = "mainnet"
 SUPPORTED_ASSET = "USDC"
 UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER = (
     "unsupported treasury rebalance route: only Hyperliquid Bridge2 from Arbitrum "
-    "USDC to Hyperliquid and CCTP gateway-to-gateway USDC are supported"
+    "USDC to Hyperliquid, CCTP gateway-to-gateway USDC, and Squid gateway-to-gateway "
+    "treasury rebalances are supported"
 )
 HYPERLIQUID_BRIDGE2_IDENTITY_MISMATCH_BLOCKER = (
     "hyperliquid_bridge2 identity mismatch: Arbitrum sender must equal "
@@ -52,6 +54,11 @@ MARLIN_CCTP_IDENTITY_UNAVAILABLE_BLOCKER = (
 MARLIN_CCTP_SOURCE_IDENTITY_UNAVAILABLE_BLOCKER = (
     "Marlin EVM source wallet identity unavailable for CCTP treasury rebalance"
 )
+SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER = (
+    "Squid treasury rebalance requires mnemonic-derived Gateway source and destination "
+    "wallet identity; use provider-owned or external treasury rebalance"
+)
+SQUID_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 EVM_GATEWAY_NETWORK_ALIASES = {
     "arbitrum": "arbitrum-mainnet",
     "arbitrum-mainnet": "arbitrum-mainnet",
@@ -125,10 +132,19 @@ EVM_GATEWAY_NETWORK_ALIASES = {
     "xdc-mainnet": "xdc",
     "ethereum-xdc-mainnet": "xdc",
 }
+SQUID_EVM_GATEWAY_NETWORK_ALIASES = {
+    **EVM_GATEWAY_NETWORK_ALIASES,
+    "bnb": "bsc",
+    "bnb-mainnet": "bsc",
+    "bsc": "bsc",
+    "bsc-mainnet": "bsc",
+    "ethereum-bsc-mainnet": "bsc",
+}
 GATEWAY_NETWORK_TO_WALLET_NETWORK = {
     "arbitrum": "arbitrum-mainnet",
     "avalanche": "avalanche",
     "base": "base",
+    "bsc": "bsc",
     "codex": "codex",
     "cronos": "cronos",
     "edge": "edge",
@@ -153,6 +169,15 @@ NON_EVM_CCTP_DESTINATION_ALIASES = {
     "solana": "solana",
     "solana-mainnet": "solana",
     "solana-mainnet-beta": "solana",
+}
+SQUID_NON_EVM_DESTINATION_ALIASES = {
+    "solana": ("solana", "mainnet-beta"),
+    "solana-mainnet": ("solana", "mainnet-beta"),
+    "solana-mainnet-beta": ("solana", "mainnet-beta"),
+    "xrpl": ("xrpl", "mainnet"),
+    "xrpl-mainnet": ("xrpl", "mainnet"),
+    "xrp-ledger": ("xrpl", "mainnet"),
+    "xrp-ledger-mainnet": ("xrpl", "mainnet"),
 }
 GATEWAY_NETWORK_TO_WALLET_CONTEXT = {
     "solana": ("solana", "mainnet-beta"),
@@ -197,6 +222,40 @@ async def create_provider_treasury_rebalance(
             if not _addresses_equal(destination_identity["address"], body.destination_account):
                 raise HTTPException(status_code=400, detail=CCTP_IDENTITY_MISMATCH_BLOCKER)
             provider = CCTP_USDC_ROUTE
+            source_chain = "ethereum"
+            source_asset = SUPPORTED_ASSET
+            destination_chain = None
+            destination_asset = SUPPORTED_ASSET
+            destination_venue = None
+        elif route == SQUID_ROUTER_ROUTE:
+            source_network = _squid_evm_gateway_network(body.source_network)
+            destination_chain, destination_network, destination_wallet_chain, destination_wallet_network = (
+                _squid_destination_context(body.destination_network)
+            )
+            source_wallet_chain, source_wallet_network = _wallet_identity_context(source_network)
+            wallet_identity = _marlin_wallet_identity(
+                accounts_service,
+                chain=source_wallet_chain,
+                source_network=source_wallet_network,
+                blocker=SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER,
+            )
+            destination_identity = _marlin_wallet_identity(
+                accounts_service,
+                chain=destination_wallet_chain,
+                source_network=destination_wallet_network,
+                blocker=SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER,
+            )
+            if not _addresses_equal(destination_identity["address"], body.destination_account):
+                raise HTTPException(status_code=400, detail=SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER)
+            provider = SQUID_ROUTER_ROUTE
+            source_chain = source_wallet_chain
+            source_asset = _squid_source_asset(body.source_asset, source_network)
+            destination_asset = _squid_destination_asset(
+                body.destination_asset,
+                destination_chain=destination_chain,
+                destination_network=destination_network,
+            )
+            destination_venue = body.destination_venue.strip().lower()
         else:
             source_network = _source_network(body.source_network)
             destination_network = None
@@ -213,6 +272,11 @@ async def create_provider_treasury_rebalance(
             if not _addresses_equal(wallet_identity["address"], body.destination_account):
                 raise HTTPException(status_code=400, detail=HYPERLIQUID_BRIDGE2_IDENTITY_MISMATCH_BLOCKER)
             provider = HYPERLIQUID_BRIDGE2_ROUTE
+            source_chain = "ethereum"
+            source_asset = SUPPORTED_ASSET
+            destination_chain = None
+            destination_asset = SUPPORTED_ASSET
+            destination_venue = "hyperliquid"
 
         wallet_result = await accounts_service.gateway_client.set_marlin_default_wallet(
             chain=source_wallet_chain,
@@ -244,13 +308,26 @@ async def create_provider_treasury_rebalance(
             provider=provider,
             source_network=GATEWAY_SOURCE_NETWORK if provider == HYPERLIQUID_BRIDGE2_ROUTE else source_network,
             destination_network=destination_network,
+            **_provider_semantic_gateway_fields(
+                provider=provider,
+                source_chain=source_chain,
+                source_asset=source_asset,
+                destination_chain=destination_chain,
+                destination_asset=destination_asset,
+                destination_venue=destination_venue,
+            ),
         )
         built_destination_network = str(result.get("destinationNetwork") or destination_network or "").strip()
         _REBALANCE_REQUESTS[rebalance_id] = {
             "amount": _decimal_payload_value(body.amount),
             "destination_address": body.destination_account,
+            "destination_asset": destination_asset,
+            "destination_chain": destination_chain or "",
             "destination_network": built_destination_network,
+            "destination_venue": destination_venue or "",
             "provider": provider,
+            "source_asset": source_asset,
+            "source_chain": source_chain,
             "source_network": GATEWAY_SOURCE_NETWORK if provider == HYPERLIQUID_BRIDGE2_ROUTE else source_network,
             "wallet_address": wallet_identity["address"],
         }
@@ -282,7 +359,8 @@ async def execute_provider_treasury_rebalance(
         async with lock:
             stored = _REBALANCE_REQUESTS.get(rebalance_id)
             if stored is None:
-                raise HTTPException(status_code=404, detail="provider treasury rebalance request not found")
+                result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
+                return _rebalance_response(result, rebalance_id=rebalance_id)
             if stored.get("status") in {"pending", "submitted", "confirmed"}:
                 result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
                 return _rebalance_response(result, rebalance_id=rebalance_id)
@@ -296,6 +374,7 @@ async def execute_provider_treasury_rebalance(
                     provider=stored["provider"],
                     source_network=stored["source_network"],
                     destination_network=stored.get("destination_network") or None,
+                    **_stored_provider_semantic_gateway_fields(stored),
                     live_action_authorization=_marlin_gateway_rebalance_authorization(
                         destination_address=stored["destination_address"],
                         destination_network=stored.get("destination_network") or "",
@@ -364,6 +443,18 @@ def _assert_supported_treasury_rebalance(body: ProviderTreasuryRebalanceRequest)
         _cctp_evm_gateway_network(body.source_network)
         _cctp_gateway_network(body.destination_network)
         return
+    if route == SQUID_ROUTER_ROUTE:
+        if body.source_venue.strip().lower() != "gateway" or body.destination_venue.strip().lower() != "gateway":
+            raise HTTPException(status_code=400, detail=SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER)
+        source_network = _squid_evm_gateway_network(body.source_network)
+        destination_chain, destination_network, _, _ = _squid_destination_context(body.destination_network)
+        _squid_source_asset(body.source_asset, source_network)
+        _squid_destination_asset(
+            body.destination_asset,
+            destination_chain=destination_chain,
+            destination_network=destination_network,
+        )
+        return
     else:
         raise HTTPException(status_code=400, detail=UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER)
 
@@ -391,6 +482,62 @@ def _cctp_evm_gateway_network(value: str) -> str:
     if network is None:
         raise HTTPException(status_code=400, detail=UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER)
     return "arbitrum" if network == "arbitrum-mainnet" else network
+
+
+def _squid_evm_gateway_network(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    network = SQUID_EVM_GATEWAY_NETWORK_ALIASES.get(normalized)
+    if network is None:
+        raise HTTPException(status_code=400, detail=SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER)
+    return "arbitrum" if network == "arbitrum-mainnet" else network
+
+
+def _squid_destination_context(value: str) -> tuple[str, str, str, str]:
+    normalized = value.strip().lower().replace("_", "-")
+    network = SQUID_EVM_GATEWAY_NETWORK_ALIASES.get(normalized)
+    if network is not None:
+        gateway_network = "arbitrum" if network == "arbitrum-mainnet" else network
+        wallet_chain, wallet_network = _wallet_identity_context(gateway_network)
+        return wallet_chain, gateway_network, wallet_chain, wallet_network
+    non_evm_context = SQUID_NON_EVM_DESTINATION_ALIASES.get(normalized)
+    if non_evm_context is None:
+        raise HTTPException(status_code=400, detail=SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER)
+    chain, gateway_network = non_evm_context
+    return chain, gateway_network, chain, gateway_network
+
+
+def _squid_source_asset(value: str, source_network: str) -> str:
+    if _is_squid_native_asset_for_context(value, chain="ethereum", network=source_network):
+        return SQUID_NATIVE_TOKEN_ADDRESS
+    raise HTTPException(status_code=400, detail=SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER)
+
+
+def _squid_destination_asset(value: str, *, destination_chain: str, destination_network: str) -> str:
+    normalized = value.strip().lower()
+    if not normalized:
+        raise HTTPException(status_code=400, detail=SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER)
+    if _is_squid_native_asset_for_context(value, chain=destination_chain, network=destination_network):
+        return SQUID_NATIVE_TOKEN_ADDRESS
+    return value.strip()
+
+
+def _is_squid_native_asset_for_context(value: str, *, chain: str, network: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == SQUID_NATIVE_TOKEN_ADDRESS.lower():
+        return True
+    normalized_chain = chain.strip().lower()
+    normalized_network = network.strip().lower()
+    if normalized_chain == "solana":
+        return normalized == "sol"
+    if normalized_chain == "xrpl":
+        return normalized in {"xrp", "xrpl"}
+    if normalized_network == "bsc":
+        return normalized == "bnb"
+    if normalized_network == "polygon":
+        return normalized in {"matic", "pol"}
+    if normalized_network == "avalanche":
+        return normalized == "avax"
+    return normalized == "eth"
 
 
 def _wallet_identity_network(gateway_network: str) -> str:
@@ -492,14 +639,22 @@ _SENSITIVE_METADATA_KEYS = {
     "attestationbytes",
     "bearer",
     "calldata",
+    "data",
     "mnemonic",
     "privatekey",
     "rawcalldata",
+    "routepayload",
+    "routes",
     "secret",
     "secretkey",
     "signature",
+    "target",
     "token",
+    "to",
+    "transactionrequest",
+    "transaction_request",
     "txcalldata",
+    "value",
     "walletfile",
 }
 
@@ -510,7 +665,9 @@ def _safe_metadata(value: Any) -> dict[str, Any]:
     safe: dict[str, Any] = {}
     for key, item in value.items():
         normalized_key = str(key).replace("_", "").replace("-", "").lower()
-        if normalized_key in _SENSITIVE_METADATA_KEYS:
+        if normalized_key in _SENSITIVE_METADATA_KEYS or (
+            normalized_key == "route" and isinstance(item, (dict, list))
+        ):
             continue
         safe[str(key)] = _safe_metadata(item) if isinstance(item, dict) else item
     return safe
@@ -586,7 +743,7 @@ def _marlin_gateway_rebalance_authorization(
 ) -> dict[str, str]:
     return {
         "action": "gateway_rebalance",
-        "connector_id": "treasury" if provider in CCTP_ROUTE_ALIASES else "hyperliquid",
+        "connector_id": "hyperliquid" if provider == HYPERLIQUID_BRIDGE2_ROUTE else "treasury",
         "destination_address": destination_address,
         "destination_network": destination_network,
         "network": source_network,
@@ -595,6 +752,40 @@ def _marlin_gateway_rebalance_authorization(
         "source": "marlin",
         "wallet_address": wallet_address,
     }
+
+
+def _provider_semantic_gateway_fields(
+    *,
+    provider: str,
+    source_chain: str,
+    source_asset: str,
+    destination_chain: str | None,
+    destination_asset: str,
+    destination_venue: str | None,
+) -> dict[str, str]:
+    if provider != SQUID_ROUTER_ROUTE:
+        return {}
+    fields = {
+        "source_chain": source_chain,
+        "source_asset": source_asset,
+        "destination_asset": destination_asset,
+    }
+    if destination_chain:
+        fields["destination_chain"] = destination_chain
+    if destination_venue:
+        fields["destination_venue"] = destination_venue
+    return fields
+
+
+def _stored_provider_semantic_gateway_fields(stored: dict[str, str]) -> dict[str, str]:
+    return _provider_semantic_gateway_fields(
+        provider=stored["provider"],
+        source_chain=stored.get("source_chain") or "ethereum",
+        source_asset=stored.get("source_asset") or SUPPORTED_ASSET,
+        destination_chain=stored.get("destination_chain") or None,
+        destination_asset=stored.get("destination_asset") or SUPPORTED_ASSET,
+        destination_venue=stored.get("destination_venue") or None,
+    )
 
 
 def _addresses_equal(left: str, right: str) -> bool:
