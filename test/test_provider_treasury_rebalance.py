@@ -132,11 +132,13 @@ class FakeAccountsService:
         *,
         address="0x1111111111111111111111111111111111111111",
         arbitrum_address=None,
+        network_addresses=None,
         wallet_ref="arbitrum:mainnet:evm_gateway",
     ):
         self.gateway_client = FakeGatewayClient()
         self.address = address
         self.arbitrum_address = arbitrum_address or address
+        self.network_addresses = network_addresses or {}
         self.wallet_ref = wallet_ref
 
     def _marlin_gateway_wallet_identity(self, *, chain, network):
@@ -144,18 +146,30 @@ class FakeAccountsService:
             return None
         wallet_ref = self.wallet_ref
         if wallet_ref == "auto":
-            wallet_ref = (
-                "base:mainnet:evm_gateway"
-                if network == "base"
-                else "arbitrum:mainnet:evm_gateway"
-            )
-        address = self.arbitrum_address if network == "arbitrum-mainnet" else self.address
+            wallet_ref_network = {
+                "arbitrum-mainnet": "arbitrum",
+                "avalanche": "avalanche",
+                "base": "base",
+                "mainnet": "mainnet",
+                "optimism": "optimism",
+                "polygon": "polygon",
+            }.get(network, network)
+            wallet_ref = f"{wallet_ref_network}:mainnet:evm_gateway"
+        address = self.network_addresses.get(
+            network,
+            self.arbitrum_address if network == "arbitrum-mainnet" else self.address,
+        )
         return {
             "address": address,
             "chain": chain,
             "network": network,
             "wallet_ref": wallet_ref,
         }
+
+
+def _evm_wallet_ref(network: str) -> str:
+    wallet_ref_network = "arbitrum" if network == "arbitrum-mainnet" else network
+    return f"{wallet_ref_network}:mainnet:evm_gateway"
 
 
 def _hyperliquid_bridge2_request(module, **overrides):
@@ -341,6 +355,23 @@ def test_rebalance_response_scrubs_provider_internal_metadata():
     assert result.metadata == {"phase": "complete"}
 
 
+def test_rebalance_response_redacts_gateway_error_details():
+    provider_treasury = _provider_treasury_module()
+
+    with pytest.raises(provider_treasury.HTTPException) as exc:
+        provider_treasury._rebalance_response(
+            {
+                "error": "provider failed mnemonic abandon privateKey=abc token secret bearer xyz",
+                "status": 502,
+            }
+        )
+
+    assert "abandon" not in exc.value.detail
+    assert "abc" not in exc.value.detail
+    assert "secret" not in exc.value.detail
+    assert "[redacted]" in exc.value.detail
+
+
 def test_execute_rebalance_is_not_rebroadcast_with_new_execute_idempotency(monkeypatch):
     provider_treasury = _provider_treasury_module()
     service = FakeAccountsService()
@@ -435,11 +466,30 @@ def test_concurrent_execute_rebalance_marks_pending_before_gateway_submit(monkey
     assert service.gateway_client.status_calls == ["rebalance-idem-001", "rebalance-idem-001"]
 
 
-def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(monkeypatch):
+@pytest.mark.parametrize(
+    ("route", "source_network", "destination_network", "gateway_source", "gateway_destination"),
+    [
+        ("cctp_base_arbitrum_usdc", "base", "arbitrum-mainnet", "base", "arbitrum"),
+        ("cctp_usdc", "ethereum-mainnet", "base-mainnet", "mainnet", "base"),
+        ("cctp_usdc", "avalanche-mainnet", "optimism-mainnet", "avalanche", "optimism"),
+        ("cctp_usdc", "polygon-mainnet", "ethereum-mainnet", "polygon", "mainnet"),
+    ],
+)
+def test_cctp_rebalance_build_forwards_semantic_gateway_request(
+    monkeypatch,
+    route,
+    source_network,
+    destination_network,
+    gateway_source,
+    gateway_destination,
+):
     provider_treasury = _provider_treasury_module()
     service = FakeAccountsService(
         address="0x1111111111111111111111111111111111111111",
         arbitrum_address="0x2222222222222222222222222222222222222222",
+        network_addresses={
+            provider_treasury._wallet_identity_network(gateway_destination): "0x2222222222222222222222222222222222222222",
+        },
         wallet_ref="auto",
     )
     monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
@@ -448,10 +498,10 @@ def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(mo
         provider_treasury.create_provider_treasury_rebalance(
             _hyperliquid_bridge2_request(
                 provider_treasury,
-                route="cctp_base_arbitrum_usdc",
-                source_network="base",
+                route=route,
+                source_network=source_network,
                 destination_venue="gateway",
-                destination_network="arbitrum-mainnet",
+                destination_network=destination_network,
                 destination_account="0x2222222222222222222222222222222222222222",
                 amount="1.5",
             ),
@@ -461,19 +511,19 @@ def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(mo
     )
 
     assert result.status == "built"
-    assert result.route == "cctp_base_arbitrum_usdc"
+    assert result.route == "cctp_usdc"
     assert service.gateway_client.wallet_calls == [
         {
             "address": "0x1111111111111111111111111111111111111111",
             "chain": "ethereum",
-            "network": "base",
-            "wallet_ref": "base:mainnet:evm_gateway",
+            "network": provider_treasury._wallet_identity_network(gateway_source),
+            "wallet_ref": _evm_wallet_ref(provider_treasury._wallet_identity_network(gateway_source)),
         },
         {
             "address": "0x2222222222222222222222222222222222222222",
             "chain": "ethereum",
-            "network": "arbitrum-mainnet",
-            "wallet_ref": "arbitrum:mainnet:evm_gateway",
+            "network": provider_treasury._wallet_identity_network(gateway_destination),
+            "wallet_ref": _evm_wallet_ref(provider_treasury._wallet_identity_network(gateway_destination)),
         },
     ]
     assert service.gateway_client.build_calls == [
@@ -482,8 +532,96 @@ def test_cctp_base_arbitrum_rebalance_build_forwards_semantic_gateway_request(mo
             "wallet_address": "0x1111111111111111111111111111111111111111",
             "destination_address": "0x2222222222222222222222222222222222222222",
             "amount": "1.5",
-            "provider": "cctp_base_arbitrum_usdc",
-            "source_network": "base",
-            "destination_network": "arbitrum",
+            "provider": "cctp_usdc",
+            "source_network": gateway_source,
+            "destination_network": gateway_destination,
+        }
+    ]
+
+
+@pytest.mark.parametrize("bad_source,bad_destination", [("bsc", "base"), ("base", "linea")])
+def test_cctp_rebalance_rejects_unsupported_gateway_networks(monkeypatch, bad_source, bad_destination):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(wallet_ref="auto")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    with pytest.raises(provider_treasury.HTTPException) as exc:
+        asyncio.run(
+            provider_treasury.create_provider_treasury_rebalance(
+                _hyperliquid_bridge2_request(
+                    provider_treasury,
+                    route="cctp_usdc",
+                    source_network=bad_source,
+                    destination_venue="gateway",
+                    destination_network=bad_destination,
+                    destination_account="0x2222222222222222222222222222222222222222",
+                    amount="1.5",
+                ),
+                _authorized_request(),
+                service,
+            ),
+        )
+
+    assert exc.value.status_code == 400
+    assert "unsupported treasury rebalance route" in exc.value.detail
+    assert service.gateway_client.wallet_calls == []
+    assert service.gateway_client.build_calls == []
+
+
+def test_cctp_rebalance_execute_authorization_uses_source_and_destination_networks(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(
+        address="0x1111111111111111111111111111111111111111",
+        arbitrum_address="0x2222222222222222222222222222222222222222",
+        network_addresses={"base": "0x2222222222222222222222222222222222222222"},
+        wallet_ref="auto",
+    )
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _hyperliquid_bridge2_request(
+                provider_treasury,
+                route="cctp_usdc",
+                source_network="ethereum-mainnet",
+                destination_venue="gateway",
+                destination_network="base-mainnet",
+                destination_account="0x2222222222222222222222222222222222222222",
+                amount="1.5",
+            ),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    asyncio.run(
+        provider_treasury.execute_provider_treasury_rebalance(
+            "rebalance-idem-001",
+            provider_treasury.ProviderTreasuryRebalanceExecuteRequest(),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert service.gateway_client.execute_calls == [
+        {
+            "idempotency_key": "rebalance-idem-001",
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "destination_address": "0x2222222222222222222222222222222222222222",
+            "amount": "1.5",
+            "provider": "cctp_usdc",
+            "source_network": "mainnet",
+            "destination_network": "base",
+            "live_action_authorization": {
+                "action": "gateway_rebalance",
+                "connector_id": "treasury",
+                "destination_address": "0x2222222222222222222222222222222222222222",
+                "destination_network": "base",
+                "network": "mainnet",
+                "notional": "1.5",
+                "scope": "provider_treasury",
+                "source": "marlin",
+                "wallet_address": "0x1111111111111111111111111111111111111111",
+            },
+            "marlin_provider_intent_authorized": True,
         }
     ]

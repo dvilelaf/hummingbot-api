@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import secrets
 import asyncio
 from decimal import Decimal
@@ -23,17 +24,16 @@ router = APIRouter(tags=["Provider Treasury"], prefix="/provider/treasury")
 MARLIN_PROVIDER_INTENT_TOKEN_HEADER = "x-marlin-provider-intent-token"
 
 HYPERLIQUID_BRIDGE2_ROUTE = "hyperliquid_bridge2"
+CCTP_USDC_ROUTE = "cctp_usdc"
 CCTP_BASE_ARBITRUM_USDC_ROUTE = "cctp_base_arbitrum_usdc"
+CCTP_ROUTE_ALIASES = {CCTP_USDC_ROUTE, CCTP_BASE_ARBITRUM_USDC_ROUTE}
 SUPPORTED_SOURCE_NETWORK = "arbitrum-mainnet"
 GATEWAY_SOURCE_NETWORK = "arbitrum"
-CCTP_SOURCE_NETWORK = "base"
-CCTP_DESTINATION_NETWORK = "arbitrum-mainnet"
-CCTP_GATEWAY_DESTINATION_NETWORK = "arbitrum"
 SUPPORTED_DESTINATION_NETWORK = "mainnet"
 SUPPORTED_ASSET = "USDC"
 UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER = (
     "unsupported treasury rebalance route: only Hyperliquid Bridge2 from Arbitrum "
-    "USDC to Hyperliquid and CCTP Base USDC to Arbitrum USDC are supported"
+    "USDC to Hyperliquid and CCTP gateway-to-gateway USDC are supported"
 )
 HYPERLIQUID_BRIDGE2_IDENTITY_MISMATCH_BLOCKER = (
     "hyperliquid_bridge2 identity mismatch: Arbitrum sender must equal "
@@ -43,12 +43,43 @@ MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER = (
     "Marlin Arbitrum wallet identity unavailable for Hyperliquid Bridge2 rebalance"
 )
 CCTP_IDENTITY_MISMATCH_BLOCKER = (
-    "cctp_base_arbitrum_usdc identity mismatch: destination_account must be the "
-    "mnemonic-derived Arbitrum EVM address"
+    "CCTP identity mismatch: destination_account must be the mnemonic-derived "
+    "destination EVM address"
 )
-MARLIN_BASE_IDENTITY_UNAVAILABLE_BLOCKER = (
-    "Marlin Base wallet identity unavailable for CCTP treasury rebalance"
+MARLIN_CCTP_IDENTITY_UNAVAILABLE_BLOCKER = (
+    "Marlin EVM wallet identity unavailable for CCTP treasury rebalance"
 )
+EVM_GATEWAY_NETWORK_ALIASES = {
+    "arbitrum": "arbitrum-mainnet",
+    "arbitrum-mainnet": "arbitrum-mainnet",
+    "arbitrum-one": "arbitrum-mainnet",
+    "ethereum-arbitrum-mainnet": "arbitrum-mainnet",
+    "avalanche": "avalanche",
+    "avalanche-mainnet": "avalanche",
+    "ethereum-avalanche-mainnet": "avalanche",
+    "base": "base",
+    "base-mainnet": "base",
+    "ethereum-base-mainnet": "base",
+    "ethereum": "mainnet",
+    "ethereum-mainnet": "mainnet",
+    "mainnet": "mainnet",
+    "optimism": "optimism",
+    "optimism-mainnet": "optimism",
+    "op-mainnet": "optimism",
+    "ethereum-optimism-mainnet": "optimism",
+    "polygon": "polygon",
+    "polygon-mainnet": "polygon",
+    "polygon-pos": "polygon",
+    "ethereum-polygon-mainnet": "polygon",
+}
+GATEWAY_NETWORK_TO_WALLET_NETWORK = {
+    "arbitrum": "arbitrum-mainnet",
+    "avalanche": "avalanche",
+    "base": "base",
+    "mainnet": "mainnet",
+    "optimism": "optimism",
+    "polygon": "polygon",
+}
 _REBALANCE_REQUESTS: dict[str, dict[str, str]] = {}
 _REBALANCE_LOCKS: dict[str, asyncio.Lock] = {}
 
@@ -67,28 +98,32 @@ async def create_provider_treasury_rebalance(
             raise HTTPException(status_code=503, detail="Gateway service is not available")
         _assert_provider_treasury_authorized(request)
 
-        if route == CCTP_BASE_ARBITRUM_USDC_ROUTE:
-            source_network = CCTP_SOURCE_NETWORK
-            destination_network = CCTP_GATEWAY_DESTINATION_NETWORK
+        if route in CCTP_ROUTE_ALIASES:
+            source_network = _cctp_gateway_network(body.source_network)
+            destination_network = _cctp_gateway_network(body.destination_network)
+            source_wallet_network = _wallet_identity_network(source_network)
+            destination_wallet_network = _wallet_identity_network(destination_network)
             wallet_identity = _marlin_evm_wallet_identity(
                 accounts_service,
-                source_network=source_network,
-                blocker=MARLIN_BASE_IDENTITY_UNAVAILABLE_BLOCKER,
+                source_network=source_wallet_network,
+                blocker=MARLIN_CCTP_IDENTITY_UNAVAILABLE_BLOCKER,
             )
             destination_identity = _marlin_evm_wallet_identity(
                 accounts_service,
-                source_network=CCTP_DESTINATION_NETWORK,
-                blocker=MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER,
+                source_network=destination_wallet_network,
+                blocker=MARLIN_CCTP_IDENTITY_UNAVAILABLE_BLOCKER,
             )
             if not _addresses_equal(destination_identity["address"], body.destination_account):
                 raise HTTPException(status_code=400, detail=CCTP_IDENTITY_MISMATCH_BLOCKER)
-            provider = CCTP_BASE_ARBITRUM_USDC_ROUTE
+            provider = CCTP_USDC_ROUTE
         else:
             source_network = _source_network(body.source_network)
             destination_network = None
+            source_wallet_network = source_network
+            destination_wallet_network = None
             wallet_identity = _marlin_evm_wallet_identity(
                 accounts_service,
-                source_network=source_network,
+                source_network=source_wallet_network,
                 blocker=MARLIN_ARBITRUM_IDENTITY_UNAVAILABLE_BLOCKER,
             )
             if not _addresses_equal(wallet_identity["address"], body.destination_account):
@@ -97,16 +132,16 @@ async def create_provider_treasury_rebalance(
 
         wallet_result = await accounts_service.gateway_client.set_marlin_default_wallet(
             chain="ethereum",
-            network=source_network,
+            network=source_wallet_network,
             address=wallet_identity["address"],
             wallet_ref=wallet_identity["wallet_ref"],
         )
         if isinstance(wallet_result, dict) and wallet_result.get("error"):
             raise HTTPException(status_code=400, detail=f"Failed to set default wallet: {wallet_result.get('error')}")
-        if route == CCTP_BASE_ARBITRUM_USDC_ROUTE:
+        if destination_wallet_network is not None:
             destination_wallet_result = await accounts_service.gateway_client.set_marlin_default_wallet(
                 chain="ethereum",
-                network=CCTP_DESTINATION_NETWORK,
+                network=destination_wallet_network,
                 address=destination_identity["address"],
                 wallet_ref=destination_identity["wallet_ref"],
             )
@@ -141,8 +176,9 @@ async def create_provider_treasury_rebalance(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("Provider treasury rebalance build failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Provider treasury rebalance build failed: {exc}")
+        redacted = _redact_provider_error(exc)
+        logger.error("Provider treasury rebalance build failed: %s", redacted)
+        raise HTTPException(status_code=500, detail=f"Provider treasury rebalance build failed: {redacted}")
 
 
 @router.post("/rebalances/{rebalance_id}/execute", response_model=ProviderTreasuryRebalanceResponse)
@@ -199,8 +235,9 @@ async def execute_provider_treasury_rebalance(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("Provider treasury rebalance execute failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Provider treasury rebalance execute failed: {exc}")
+        redacted = _redact_provider_error(exc)
+        logger.error("Provider treasury rebalance execute failed: %s", redacted)
+        raise HTTPException(status_code=500, detail=f"Provider treasury rebalance execute failed: {redacted}")
 
 
 @router.get("/rebalances/{rebalance_id}", response_model=ProviderTreasuryRebalanceResponse)
@@ -217,8 +254,9 @@ async def get_provider_treasury_rebalance(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("Provider treasury rebalance status failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Provider treasury rebalance status failed: {exc}")
+        redacted = _redact_provider_error(exc)
+        logger.error("Provider treasury rebalance status failed: %s", redacted)
+        raise HTTPException(status_code=500, detail=f"Provider treasury rebalance status failed: {redacted}")
 
 
 def _assert_supported_treasury_rebalance(body: ProviderTreasuryRebalanceRequest) -> None:
@@ -232,14 +270,14 @@ def _assert_supported_treasury_rebalance(body: ProviderTreasuryRebalanceRequest)
         and body.destination_asset.strip().upper() == SUPPORTED_ASSET
     ):
         return
-    if route == CCTP_BASE_ARBITRUM_USDC_ROUTE and (
+    if route in CCTP_ROUTE_ALIASES and (
         body.source_venue.strip().lower() == "gateway"
-        and _source_network(body.source_network) == CCTP_SOURCE_NETWORK
         and body.source_asset.strip().upper() == SUPPORTED_ASSET
         and body.destination_venue.strip().lower() == "gateway"
-        and _source_network(body.destination_network) == CCTP_DESTINATION_NETWORK
         and body.destination_asset.strip().upper() == SUPPORTED_ASSET
     ):
+        _cctp_gateway_network(body.source_network)
+        _cctp_gateway_network(body.destination_network)
         return
     else:
         raise HTTPException(status_code=400, detail=UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER)
@@ -249,9 +287,19 @@ def _source_network(value: str) -> str:
     normalized = value.strip().lower().replace("_", "-")
     if normalized in {"arbitrum", "arbitrum-one", "arbitrum-mainnet", "ethereum-arbitrum-mainnet"}:
         return SUPPORTED_SOURCE_NETWORK
-    if normalized in {"base", "base-mainnet", "ethereum-base-mainnet"}:
-        return CCTP_SOURCE_NETWORK
     return normalized
+
+
+def _cctp_gateway_network(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    network = EVM_GATEWAY_NETWORK_ALIASES.get(normalized)
+    if network is None:
+        raise HTTPException(status_code=400, detail=UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER)
+    return "arbitrum" if network == "arbitrum-mainnet" else network
+
+
+def _wallet_identity_network(gateway_network: str) -> str:
+    return GATEWAY_NETWORK_TO_WALLET_NETWORK.get(gateway_network, gateway_network)
 
 
 def _marlin_evm_wallet_identity(
@@ -283,7 +331,7 @@ def _rebalance_response(
     if result is None:
         raise HTTPException(status_code=502, detail="Gateway treasury rebalance returned no response")
     if result.get("error"):
-        raise HTTPException(status_code=_gateway_error_status(result), detail=str(result.get("error")))
+        raise HTTPException(status_code=_gateway_error_status(result), detail=_redact_provider_error(result.get("error")))
     response_id = str(result.get("id") or result.get("rebalanceId") or result.get("idempotencyKey") or rebalance_id or "")
     if not response_id:
         raise HTTPException(status_code=502, detail="Gateway treasury rebalance response missing id")
@@ -355,6 +403,24 @@ def _decimal_payload_value(value: Decimal) -> str:
     return format(value, "f")
 
 
+def _redact_provider_error(error: Any) -> str:
+    raw = str(error)
+    raw = re.sub(r"0x[a-fA-F0-9]{80,}", "[redacted-hex]", raw)
+    raw = re.sub(
+        r"([?&](?:api_?key|token|signature|attestation)=)[^&\s]+",
+        r"\1[redacted]",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    raw = re.sub(
+        r"\b(token|api[-_]?key|signature|attestation|secret|mnemonic|private_?key|wallet_?file|bearer)\b[:=\s]+[^\s&]+",
+        r"\1 [redacted]",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    return raw[:300]
+
+
 def _rebalance_id(body: ProviderTreasuryRebalanceRequest) -> str:
     return f"{body.account_name}:{body.route}:{body.destination_account}:{_decimal_payload_value(body.amount)}"
 
@@ -403,7 +469,7 @@ def _marlin_gateway_rebalance_authorization(
 ) -> dict[str, str]:
     return {
         "action": "gateway_rebalance",
-        "connector_id": "treasury" if provider == CCTP_BASE_ARBITRUM_USDC_ROUTE else "hyperliquid",
+        "connector_id": "treasury" if provider in CCTP_ROUTE_ALIASES else "hyperliquid",
         "destination_address": destination_address,
         "destination_network": destination_network,
         "network": source_network,
