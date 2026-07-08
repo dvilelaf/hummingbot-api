@@ -349,3 +349,37 @@ def test_marlin_scoped_default_wallet_route_rejects_non_derived_address(
 
     assert response.status_code == 403
     assert "MARLIN_MNEMONIC-derived" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("network", "account_index"),
+    [
+        ("unichain", 40),
+        ("linea", 41),
+        ("codex", 42),
+        ("sonic", 43),
+        ("world-chain", 44),
+        ("monad", 45),
+        ("sei", 46),
+        ("xdc", 47),
+        ("hyperevm", 48),
+        ("ink", 49),
+        ("plume", 50),
+        ("edge", 51),
+        ("injective", 52),
+        ("morph", 53),
+        ("pharos", 54),
+        ("cronos", 55),
+    ],
+)
+def test_cctp_evm_gateway_wallet_policies_cover_added_networks(network: str, account_index: int) -> None:
+    canonical = marlin_runtime._canonical_gateway_wallet_context(
+        chain="ethereum",
+        network=f"{network}-mainnet",
+    )
+    derivation_path, wallet_ref, coin = marlin_runtime.GATEWAY_WALLET_POLICIES[canonical]
+
+    assert canonical == (network, "mainnet")
+    assert derivation_path == f"m/44'/60'/{account_index}'/0/0"
+    assert wallet_ref == f"{network}:mainnet:evm_gateway"
+    assert coin is marlin_runtime.Bip44Coins.ETHEREUM

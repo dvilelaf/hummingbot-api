@@ -60,25 +60,91 @@ EVM_GATEWAY_NETWORK_ALIASES = {
     "base": "base",
     "base-mainnet": "base",
     "ethereum-base-mainnet": "base",
+    "codex": "codex",
+    "codex-mainnet": "codex",
+    "ethereum-codex-mainnet": "codex",
+    "cronos": "cronos",
+    "cronos-mainnet": "cronos",
+    "ethereum-cronos-mainnet": "cronos",
+    "edge": "edge",
+    "edge-mainnet": "edge",
+    "ethereum-edge-mainnet": "edge",
     "ethereum": "mainnet",
     "ethereum-mainnet": "mainnet",
     "mainnet": "mainnet",
+    "hyperevm": "hyperevm",
+    "hyperevm-mainnet": "hyperevm",
+    "ethereum-hyperevm-mainnet": "hyperevm",
+    "ink": "ink",
+    "ink-mainnet": "ink",
+    "ethereum-ink-mainnet": "ink",
+    "injective": "injective",
+    "injective-mainnet": "injective",
+    "ethereum-injective-mainnet": "injective",
+    "linea": "linea",
+    "linea-mainnet": "linea",
+    "ethereum-linea-mainnet": "linea",
+    "monad": "monad",
+    "monad-mainnet": "monad",
+    "ethereum-monad-mainnet": "monad",
+    "morph": "morph",
+    "morph-mainnet": "morph",
+    "ethereum-morph-mainnet": "morph",
     "optimism": "optimism",
     "optimism-mainnet": "optimism",
     "op-mainnet": "optimism",
     "ethereum-optimism-mainnet": "optimism",
+    "pharos": "pharos",
+    "pharos-mainnet": "pharos",
+    "ethereum-pharos-mainnet": "pharos",
+    "plume": "plume",
+    "plume-mainnet": "plume",
+    "ethereum-plume-mainnet": "plume",
     "polygon": "polygon",
     "polygon-mainnet": "polygon",
     "polygon-pos": "polygon",
     "ethereum-polygon-mainnet": "polygon",
+    "sei": "sei",
+    "sei-mainnet": "sei",
+    "ethereum-sei-mainnet": "sei",
+    "sonic": "sonic",
+    "sonic-mainnet": "sonic",
+    "ethereum-sonic-mainnet": "sonic",
+    "unichain": "unichain",
+    "unichain-mainnet": "unichain",
+    "ethereum-unichain-mainnet": "unichain",
+    "world-chain": "world-chain",
+    "world-chain-mainnet": "world-chain",
+    "worldchain": "world-chain",
+    "worldchain-mainnet": "world-chain",
+    "ethereum-world-chain-mainnet": "world-chain",
+    "xdc": "xdc",
+    "xdc-mainnet": "xdc",
+    "ethereum-xdc-mainnet": "xdc",
 }
 GATEWAY_NETWORK_TO_WALLET_NETWORK = {
     "arbitrum": "arbitrum-mainnet",
     "avalanche": "avalanche",
     "base": "base",
+    "codex": "codex",
+    "cronos": "cronos",
+    "edge": "edge",
+    "hyperevm": "hyperevm",
+    "ink": "ink",
+    "injective": "injective",
+    "linea": "linea",
     "mainnet": "mainnet",
+    "monad": "monad",
+    "morph": "morph",
     "optimism": "optimism",
+    "pharos": "pharos",
+    "plume": "plume",
     "polygon": "polygon",
+    "sei": "sei",
+    "sonic": "sonic",
+    "unichain": "unichain",
+    "world-chain": "world-chain",
+    "xdc": "xdc",
 }
 _REBALANCE_REQUESTS: dict[str, dict[str, str]] = {}
 _REBALANCE_LOCKS: dict[str, asyncio.Lock] = {}
@@ -101,6 +167,8 @@ async def create_provider_treasury_rebalance(
         if route in CCTP_ROUTE_ALIASES:
             source_network = _cctp_gateway_network(body.source_network)
             destination_network = _cctp_gateway_network(body.destination_network)
+            if source_network == destination_network:
+                raise HTTPException(status_code=400, detail="CCTP source and destination networks must differ")
             source_wallet_network = _wallet_identity_network(source_network)
             destination_wallet_network = _wallet_identity_network(destination_network)
             wallet_identity = _marlin_evm_wallet_identity(
@@ -378,25 +446,33 @@ def _optional_text(value: Any) -> str | None:
 
 
 _SENSITIVE_METADATA_KEYS = {
+    "apikey",
     "attestation",
     "attestationbytes",
+    "bearer",
     "calldata",
     "mnemonic",
     "privatekey",
     "rawcalldata",
+    "secret",
+    "secretkey",
     "signature",
+    "token",
     "txcalldata",
+    "walletfile",
 }
 
 
 def _safe_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    return {
-        str(key): item
-        for key, item in value.items()
-        if str(key).replace("_", "").lower() not in _SENSITIVE_METADATA_KEYS
-    }
+    safe: dict[str, Any] = {}
+    for key, item in value.items():
+        normalized_key = str(key).replace("_", "").replace("-", "").lower()
+        if normalized_key in _SENSITIVE_METADATA_KEYS:
+            continue
+        safe[str(key)] = _safe_metadata(item) if isinstance(item, dict) else item
+    return safe
 
 
 def _decimal_payload_value(value: Decimal) -> str:

@@ -150,9 +150,25 @@ class FakeAccountsService:
                 "arbitrum-mainnet": "arbitrum",
                 "avalanche": "avalanche",
                 "base": "base",
+                "codex": "codex",
+                "cronos": "cronos",
+                "edge": "edge",
+                "hyperevm": "hyperevm",
+                "ink": "ink",
+                "injective": "injective",
+                "linea": "linea",
                 "mainnet": "mainnet",
+                "monad": "monad",
+                "morph": "morph",
                 "optimism": "optimism",
+                "pharos": "pharos",
+                "plume": "plume",
                 "polygon": "polygon",
+                "sei": "sei",
+                "sonic": "sonic",
+                "unichain": "unichain",
+                "world-chain": "world-chain",
+                "xdc": "xdc",
             }.get(network, network)
             wallet_ref = f"{wallet_ref_network}:mainnet:evm_gateway"
         address = self.network_addresses.get(
@@ -473,6 +489,9 @@ def test_concurrent_execute_rebalance_marks_pending_before_gateway_submit(monkey
         ("cctp_usdc", "ethereum-mainnet", "base-mainnet", "mainnet", "base"),
         ("cctp_usdc", "avalanche-mainnet", "optimism-mainnet", "avalanche", "optimism"),
         ("cctp_usdc", "polygon-mainnet", "ethereum-mainnet", "polygon", "mainnet"),
+        ("cctp_usdc", "linea-mainnet", "unichain-mainnet", "linea", "unichain"),
+        ("cctp_usdc", "edge-mainnet", "sonic-mainnet", "edge", "sonic"),
+        ("cctp_usdc", "worldchain-mainnet", "hyperevm-mainnet", "world-chain", "hyperevm"),
     ],
 )
 def test_cctp_rebalance_build_forwards_semantic_gateway_request(
@@ -539,7 +558,15 @@ def test_cctp_rebalance_build_forwards_semantic_gateway_request(
     ]
 
 
-@pytest.mark.parametrize("bad_source,bad_destination", [("bsc", "base"), ("base", "linea")])
+@pytest.mark.parametrize(
+    "bad_source,bad_destination",
+    [
+        ("bsc", "base"),
+        ("base", "solana"),
+        ("base", "starknet"),
+        ("base", "stellar"),
+    ],
+)
 def test_cctp_rebalance_rejects_unsupported_gateway_networks(monkeypatch, bad_source, bad_destination):
     provider_treasury = _provider_treasury_module()
     service = FakeAccountsService(wallet_ref="auto")
@@ -566,6 +593,91 @@ def test_cctp_rebalance_rejects_unsupported_gateway_networks(monkeypatch, bad_so
     assert "unsupported treasury rebalance route" in exc.value.detail
     assert service.gateway_client.wallet_calls == []
     assert service.gateway_client.build_calls == []
+
+
+def test_cctp_rebalance_rejects_same_network_before_wallet_defaults(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService(wallet_ref="auto")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    with pytest.raises(provider_treasury.HTTPException) as exc:
+        asyncio.run(
+            provider_treasury.create_provider_treasury_rebalance(
+                _hyperliquid_bridge2_request(
+                    provider_treasury,
+                    route="cctp_usdc",
+                    source_network="base",
+                    destination_venue="gateway",
+                    destination_network="base-mainnet",
+                    destination_account="0x2222222222222222222222222222222222222222",
+                    amount="1.5",
+                ),
+                _authorized_request(),
+                service,
+            ),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "CCTP source and destination networks must differ"
+    assert service.gateway_client.wallet_calls == []
+    assert service.gateway_client.build_calls == []
+
+
+@pytest.mark.parametrize(
+    ("alias", "gateway_network", "wallet_network"),
+    [
+        ("arbitrum-one", "arbitrum", "arbitrum-mainnet"),
+        ("ethereum-avalanche-mainnet", "avalanche", "avalanche"),
+        ("ethereum-base-mainnet", "base", "base"),
+        ("ethereum-codex-mainnet", "codex", "codex"),
+        ("ethereum-cronos-mainnet", "cronos", "cronos"),
+        ("ethereum-edge-mainnet", "edge", "edge"),
+        ("ethereum-mainnet", "mainnet", "mainnet"),
+        ("ethereum-hyperevm-mainnet", "hyperevm", "hyperevm"),
+        ("ethereum-ink-mainnet", "ink", "ink"),
+        ("ethereum-injective-mainnet", "injective", "injective"),
+        ("ethereum-linea-mainnet", "linea", "linea"),
+        ("ethereum-monad-mainnet", "monad", "monad"),
+        ("ethereum-morph-mainnet", "morph", "morph"),
+        ("ethereum-optimism-mainnet", "optimism", "optimism"),
+        ("ethereum-pharos-mainnet", "pharos", "pharos"),
+        ("ethereum-plume-mainnet", "plume", "plume"),
+        ("polygon-pos", "polygon", "polygon"),
+        ("ethereum-sei-mainnet", "sei", "sei"),
+        ("ethereum-sonic-mainnet", "sonic", "sonic"),
+        ("ethereum-unichain-mainnet", "unichain", "unichain"),
+        ("worldchain-mainnet", "world-chain", "world-chain"),
+        ("ethereum-world-chain-mainnet", "world-chain", "world-chain"),
+        ("ethereum-xdc-mainnet", "xdc", "xdc"),
+    ],
+)
+def test_cctp_gateway_network_aliases_map_to_wallet_networks(alias, gateway_network, wallet_network):
+    provider_treasury = _provider_treasury_module()
+
+    assert provider_treasury._cctp_gateway_network(alias) == gateway_network
+    assert provider_treasury._wallet_identity_network(gateway_network) == wallet_network
+
+
+def test_cctp_rebalance_response_redacts_sensitive_metadata():
+    provider_treasury = _provider_treasury_module()
+
+    response = provider_treasury._rebalance_response(
+        {
+            "id": "rebalance-idem-001",
+            "status": "built",
+            "metadata": {
+                "phase": "built",
+                "wallet_file": "/tmp/wallet.json",
+                "api_key": "secret",
+                "nested": {
+                    "token": "secret",
+                    "route": "cctp_usdc",
+                },
+            },
+        },
+    )
+
+    assert response.metadata == {"phase": "built", "nested": {"route": "cctp_usdc"}}
 
 
 def test_cctp_rebalance_execute_authorization_uses_source_and_destination_networks(monkeypatch):
