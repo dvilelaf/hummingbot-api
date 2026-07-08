@@ -587,6 +587,16 @@ class GatewayClient:
             token = self._marlin_gateway_provider_intent_token()
             if token:
                 headers = {"x-marlin-gateway-provider-intent-token": token}
+        if marlin_provider_intent_authorized:
+            logger.warning(
+                "Marlin Gateway swap auth forwarding: connector=%s network=%s "
+                "authorization_present=%s gateway_token_present=%s headers_present=%s",
+                connector,
+                network,
+                live_action_authorization is not None,
+                bool(self._marlin_gateway_provider_intent_token()),
+                headers is not None,
+            )
         route_type = self._swap_route_type(connector, pool_address)
         return await self._request(
             "POST",
