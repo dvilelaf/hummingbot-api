@@ -689,6 +689,20 @@ def test_build_cowswap_runtime_with_mocked_imports(tmp_path):
     assert captured.config.env == "staging"
 
 
+def test_build_cowswap_runtime_forwards_partner_api_key(tmp_path):
+    importer, _, _, captured = _build_runtime_importer()
+
+    build_cowswap_runtime(
+        gateway_url="http://localhost:15888",
+        owner_address="0x00000000000000000000000000000000000000ab",
+        data_dir=tmp_path / "data",
+        partner_api_key="partner-secret",
+        import_module=importer,
+    )
+
+    assert captured.config.partner_api_key == "partner-secret"
+
+
 def test_build_cowswap_runtime_default_map_exposes_bidirectional_base_weth_usdc(tmp_path):
     importer, _, _, captured = _build_runtime_importer()
 

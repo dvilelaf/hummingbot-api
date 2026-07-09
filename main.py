@@ -61,6 +61,19 @@ def env_text(name: str, default: str) -> str:
     return value if value else default
 
 
+def env_text_or_file(name: str, default: str = "") -> str:
+    value = os.environ.get(name)
+    if value:
+        return value
+    file_path = os.environ.get(f"{name}_FILE")
+    if not file_path:
+        return default
+    try:
+        return Path(file_path).read_text(encoding="utf-8").strip() or default
+    except OSError:
+        return default
+
+
 def env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     return int(value) if value else default
@@ -265,6 +278,7 @@ async def lifespan(app: FastAPI):
                     env=env_text("COWSWAP_ENV", "staging"),
                     app_data=env_text("COWSWAP_APP_DATA", "0x" + "00" * 32),
                     slippage_bps=env_int("COWSWAP_SLIPPAGE_BPS", 50),
+                    partner_api_key=env_text_or_file("COWSWAP_PARTNER_API_KEY"),
                     token_map=cowswap_token_map_from_json(os.environ.get("COWSWAP_TOKEN_MAP_JSON")),
                 )
                 accounts_service.configure_cowswap_runtime(
