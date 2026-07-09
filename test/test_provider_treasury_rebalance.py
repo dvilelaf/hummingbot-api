@@ -240,6 +240,25 @@ def _squid_router_request(module, **overrides):
     return module.ProviderTreasuryRebalanceRequest(**data)
 
 
+def _same_chain_swap_request(module, **overrides):
+    data = {
+        "account_name": "master_account",
+        "source_venue": "gateway",
+        "source_network": "arbitrum-mainnet",
+        "source_asset": "ETH",
+        "source_asset_decimals": 18,
+        "destination_venue": "gateway",
+        "destination_network": "arbitrum-mainnet",
+        "destination_asset": "USDC",
+        "destination_account": "0x1111111111111111111111111111111111111111",
+        "amount": "0.002",
+        "route": "provider_treasury_same_chain_swap",
+        "idempotency_key": "same-chain-swap-idem-001",
+    }
+    data.update(overrides)
+    return module.ProviderTreasuryRebalanceRequest(**data)
+
+
 def test_hyperliquid_bridge2_rebalance_build_forwards_semantic_gateway_request(monkeypatch):
     provider_treasury = _provider_treasury_module()
     service = FakeAccountsService()
@@ -566,6 +585,82 @@ def test_squid_router_arbitrum_usdc_destination_forwards_token_address(monkeypat
     assert service.gateway_client.build_calls[0]["destination_asset"] == "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 
 
+def test_same_chain_swap_build_forwards_arbitrum_eth_to_usdc(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    result = asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _same_chain_swap_request(provider_treasury),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.route == "provider_treasury_same_chain_swap"
+    assert service.gateway_client.wallet_calls == [
+        {
+            "address": "0x1111111111111111111111111111111111111111",
+            "chain": "ethereum",
+            "network": "arbitrum-mainnet",
+            "wallet_ref": "arbitrum:mainnet:evm_gateway",
+        },
+        {
+            "address": "0x1111111111111111111111111111111111111111",
+            "chain": "ethereum",
+            "network": "arbitrum-mainnet",
+            "wallet_ref": "arbitrum:mainnet:evm_gateway",
+        },
+    ]
+    assert service.gateway_client.build_calls == [
+        {
+            "idempotency_key": "same-chain-swap-idem-001",
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "destination_address": "0x1111111111111111111111111111111111111111",
+            "amount": "0.002",
+            "provider": "provider_treasury_same_chain_swap",
+            "source_chain": "ethereum",
+            "source_network": "arbitrum",
+            "source_asset": "ETH",
+            "source_asset_decimals": "18",
+            "destination_chain": "ethereum",
+            "destination_network": "arbitrum",
+            "destination_asset": "USDC",
+            "destination_venue": "gateway",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("override", "value"),
+    [
+        ("source_network", "base-mainnet"),
+        ("destination_network", "base-mainnet"),
+        ("source_asset", "SOL"),
+        ("destination_asset", "ETH"),
+        ("destination_venue", "hyperliquid"),
+    ],
+)
+def test_same_chain_swap_rejects_non_arbitrum_eth_to_usdc(override, value, monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    with pytest.raises(provider_treasury.HTTPException) as exc:
+        asyncio.run(
+            provider_treasury.create_provider_treasury_rebalance(
+                _same_chain_swap_request(provider_treasury, **{override: value}),
+                _authorized_request(),
+                service,
+            ),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == provider_treasury.SAME_CHAIN_SWAP_BLOCKER
+    assert service.gateway_client.build_calls == []
+
+
 def test_squid_router_wrong_native_alias_for_source_network_fails_closed(monkeypatch):
     provider_treasury = _provider_treasury_module()
     service = FakeAccountsService(wallet_ref="auto")
@@ -779,6 +874,58 @@ def test_squid_router_execute_uses_treasury_authorization(monkeypatch):
                 "destination_network": "arbitrum",
                 "network": "base",
                 "notional": "0.25",
+                "scope": "provider_treasury",
+                "source": "marlin",
+                "wallet_address": "0x1111111111111111111111111111111111111111",
+            },
+            "marlin_provider_intent_authorized": True,
+        }
+    ]
+
+
+def test_same_chain_swap_execute_uses_treasury_authorization(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _same_chain_swap_request(provider_treasury),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    asyncio.run(
+        provider_treasury.execute_provider_treasury_rebalance(
+            "same-chain-swap-idem-001",
+            provider_treasury.ProviderTreasuryRebalanceExecuteRequest(),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert service.gateway_client.execute_calls == [
+        {
+            "idempotency_key": "same-chain-swap-idem-001",
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "destination_address": "0x1111111111111111111111111111111111111111",
+            "amount": "0.002",
+            "provider": "provider_treasury_same_chain_swap",
+            "source_chain": "ethereum",
+            "source_network": "arbitrum",
+            "source_asset": "ETH",
+            "source_asset_decimals": "18",
+            "destination_chain": "ethereum",
+            "destination_network": "arbitrum",
+            "destination_asset": "USDC",
+            "destination_venue": "gateway",
+            "live_action_authorization": {
+                "action": "gateway_rebalance",
+                "connector_id": "treasury",
+                "destination_address": "0x1111111111111111111111111111111111111111",
+                "destination_network": "arbitrum",
+                "network": "arbitrum",
+                "notional": "0.002",
                 "scope": "provider_treasury",
                 "source": "marlin",
                 "wallet_address": "0x1111111111111111111111111111111111111111",

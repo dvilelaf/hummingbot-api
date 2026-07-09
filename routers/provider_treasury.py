@@ -27,6 +27,7 @@ HYPERLIQUID_BRIDGE2_ROUTE = "hyperliquid_bridge2"
 CCTP_USDC_ROUTE = "cctp_usdc"
 CCTP_BASE_ARBITRUM_USDC_ROUTE = "cctp_base_arbitrum_usdc"
 SQUID_ROUTER_ROUTE = "squid_router"
+PROVIDER_TREASURY_SAME_CHAIN_SWAP_ROUTE = "provider_treasury_same_chain_swap"
 CCTP_ROUTE_ALIASES: set[str] = set()
 SUPPORTED_SOURCE_NETWORK = "arbitrum-mainnet"
 GATEWAY_SOURCE_NETWORK = "arbitrum"
@@ -34,7 +35,8 @@ SUPPORTED_DESTINATION_NETWORK = "mainnet"
 SUPPORTED_ASSET = "USDC"
 UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER = (
     "unsupported treasury rebalance route: only Hyperliquid Bridge2 from Arbitrum "
-    "USDC to Hyperliquid and Squid gateway-to-gateway "
+    "USDC to Hyperliquid, Squid gateway-to-gateway, and Arbitrum same-chain "
+    "provider treasury swaps "
     "treasury rebalances are supported"
 )
 HYPERLIQUID_BRIDGE2_IDENTITY_MISMATCH_BLOCKER = (
@@ -57,6 +59,10 @@ MARLIN_CCTP_SOURCE_IDENTITY_UNAVAILABLE_BLOCKER = (
 SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER = (
     "Squid treasury rebalance requires mnemonic-derived Gateway source and destination "
     "wallet identity; use provider-owned or external treasury rebalance"
+)
+SAME_CHAIN_SWAP_BLOCKER = (
+    "provider_treasury_same_chain_swap requires mnemonic-derived Arbitrum source and "
+    "destination wallet identity for gateway Arbitrum ETH/WETH to USDC"
 )
 SQUID_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 SQUID_EVM_USDC_ASSETS = {
@@ -266,6 +272,35 @@ async def create_provider_treasury_rebalance(
                 destination_network=destination_network,
             )
             destination_venue = body.destination_venue.strip().lower()
+        elif route == PROVIDER_TREASURY_SAME_CHAIN_SWAP_ROUTE:
+            source_network = _same_chain_swap_network(body.source_network)
+            destination_network = _same_chain_swap_network(body.destination_network)
+            source_wallet_chain, source_wallet_network = _wallet_identity_context(source_network)
+            destination_wallet_chain, destination_wallet_network = _wallet_identity_context(destination_network)
+            wallet_identity = _marlin_wallet_identity(
+                accounts_service,
+                chain=source_wallet_chain,
+                source_network=source_wallet_network,
+                blocker=SAME_CHAIN_SWAP_BLOCKER,
+            )
+            destination_identity = _marlin_wallet_identity(
+                accounts_service,
+                chain=destination_wallet_chain,
+                source_network=destination_wallet_network,
+                blocker=SAME_CHAIN_SWAP_BLOCKER,
+            )
+            if not _addresses_equal(wallet_identity["address"], body.destination_account) or not _addresses_equal(
+                destination_identity["address"],
+                body.destination_account,
+            ):
+                raise HTTPException(status_code=400, detail=SAME_CHAIN_SWAP_BLOCKER)
+            provider = PROVIDER_TREASURY_SAME_CHAIN_SWAP_ROUTE
+            source_chain = source_wallet_chain
+            source_asset = body.source_asset.strip().upper()
+            source_asset_decimals = body.source_asset_decimals
+            destination_chain = destination_wallet_chain
+            destination_asset = body.destination_asset.strip().upper()
+            destination_venue = body.destination_venue.strip().lower()
         else:
             source_network = _source_network(body.source_network)
             destination_network = None
@@ -469,6 +504,18 @@ def _assert_supported_treasury_rebalance(body: ProviderTreasuryRebalanceRequest)
             destination_network=destination_network,
         )
         return
+    if route == PROVIDER_TREASURY_SAME_CHAIN_SWAP_ROUTE:
+        if body.source_venue.strip().lower() != "gateway" or body.destination_venue.strip().lower() != "gateway":
+            raise HTTPException(status_code=400, detail=SAME_CHAIN_SWAP_BLOCKER)
+        source_network = _same_chain_swap_network(body.source_network)
+        destination_network = _same_chain_swap_network(body.destination_network)
+        if source_network != destination_network:
+            raise HTTPException(status_code=400, detail=SAME_CHAIN_SWAP_BLOCKER)
+        if body.source_asset.strip().upper() not in {"ETH", "WETH"}:
+            raise HTTPException(status_code=400, detail=SAME_CHAIN_SWAP_BLOCKER)
+        if body.destination_asset.strip().upper() != SUPPORTED_ASSET:
+            raise HTTPException(status_code=400, detail=SAME_CHAIN_SWAP_BLOCKER)
+        return
     else:
         raise HTTPException(status_code=400, detail=UNSUPPORTED_TREASURY_REBALANCE_ROUTE_BLOCKER)
 
@@ -504,6 +551,14 @@ def _squid_evm_gateway_network(value: str) -> str:
     if network is None:
         raise HTTPException(status_code=400, detail=SQUID_PROVIDER_OR_EXTERNAL_TREASURY_BLOCKER)
     return "arbitrum" if network == "arbitrum-mainnet" else network
+
+
+def _same_chain_swap_network(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    network = SQUID_EVM_GATEWAY_NETWORK_ALIASES.get(normalized)
+    if network in {"arbitrum-mainnet", "arbitrum"}:
+        return "arbitrum"
+    raise HTTPException(status_code=400, detail=SAME_CHAIN_SWAP_BLOCKER)
 
 
 def _squid_destination_context(value: str) -> tuple[str, str, str, str]:
@@ -788,7 +843,7 @@ def _provider_semantic_gateway_fields(
     destination_venue: str | None,
     source_asset_decimals: int | str | None = None,
 ) -> dict[str, str]:
-    if provider != SQUID_ROUTER_ROUTE:
+    if provider not in {SQUID_ROUTER_ROUTE, PROVIDER_TREASURY_SAME_CHAIN_SWAP_ROUTE}:
         return {}
     fields = {
         "source_chain": source_chain,
