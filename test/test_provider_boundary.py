@@ -106,7 +106,7 @@ def _install_provider_boundary_stubs():
     cowswap_runtime = types.ModuleType("services.cowswap_runtime")
     cowswap_runtime.COWSWAP_CONNECTOR_NAME = "cowswap"
     cowswap_runtime.cowswap_order_submission_blocker = lambda *args, **kwargs: COWSWAP_BLOCKER
-    cowswap_runtime.cowswap_runtime_prices = _fake_cowswap_runtime_prices
+    cowswap_runtime.cowswap_runtime_prices = _unexpected_cowswap_runtime_prices
     cowswap_runtime.cowswap_supported_order_types = lambda: ["MARKET"]
     sys.modules["services.cowswap_runtime"] = cowswap_runtime
 
@@ -171,8 +171,8 @@ def _async_return(value):
     return _inner
 
 
-async def _fake_cowswap_runtime_prices(*, runtime, trading_pairs):  # noqa: ARG001
-    return {pair: 2500.0 for pair in trading_pairs}
+async def _unexpected_cowswap_runtime_prices(*, runtime, trading_pairs):  # noqa: ARG001
+    raise AssertionError("CowSwap provider snapshots must not call quote/prices")
 
 
 class FakeCowSwapEvmReader:
@@ -491,8 +491,10 @@ def test_cowswap_provider_snapshot_exposes_order_actions_when_runtime_ready():
     assert result.order_types == ["MARKET"]
     assert result.provider_actions == ["order", "cancel"]
     assert "provider actions missing: cowswap" not in result.operator_issues
+    assert service._cowswap_runtime._connector.quote_sell_calls == []
+    assert service._cowswap_runtime._connector.quote_buy_calls == []
     rows = result.portfolio["master_account"]["cowswap"]
-    assert {"available_units": 0.0, "price": 2500.0, "token": "WETH", "units": 0.0, "value": 0.0} in rows
+    assert {"available_units": 0.0, "token": "WETH", "units": 0.0, "value": 0.0} in rows
     assert {"available_units": 5.0, "price": 1.0, "token": "USDC", "units": 5.0, "value": 5.0} in rows
 
 
@@ -525,13 +527,14 @@ def test_cowswap_provider_snapshot_exposes_reverse_pair_gateway_balances():
         }
     ]
     rows = result.portfolio["master_account"]["cowswap"]
-    assert {"available_units": 5.0, "price": 2500.0, "token": "USDC", "units": 5.0, "value": 12500.0} in rows
+    assert service._cowswap_runtime._connector.quote_sell_calls == []
+    assert service._cowswap_runtime._connector.quote_buy_calls == []
+    assert {"available_units": 5.0, "price": 1.0, "token": "USDC", "units": 5.0, "value": 5.0} in rows
     assert {"available_units": 0.0, "token": "WETH", "units": 0.0, "value": 0.0} in rows
 
 
-def test_cowswap_provider_snapshot_keeps_gateway_balances_when_quote_price_unavailable():
+def test_cowswap_provider_snapshot_stablecoin_rows_get_obvious_price_value():
     provider_boundary = _provider_boundary_module()
-    provider_boundary.cowswap_runtime_prices = _async_return({"error": "rate limited"})  # noqa: SLF001
     service = FakeAccountsService()
     service.accounts_state["master_account"]["cowswap"] = []
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
@@ -549,10 +552,12 @@ def test_cowswap_provider_snapshot_keeps_gateway_balances_when_quote_price_unava
     )
 
     assert result.status == "available"
+    assert service._cowswap_runtime._connector.quote_sell_calls == []
+    assert service._cowswap_runtime._connector.quote_buy_calls == []
     assert result.portfolio == {
         "master_account": {
             "cowswap": [
-                {"available_units": 5.0, "token": "USDC", "units": 5.0, "value": 0.0},
+                {"available_units": 5.0, "price": 1.0, "token": "USDC", "units": 5.0, "value": 5.0},
                 {"available_units": 0.0, "token": "WETH", "units": 0.0, "value": 0.0},
             ],
         },

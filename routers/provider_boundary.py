@@ -23,7 +23,6 @@ from services.accounts_service import AccountsService
 from services.cowswap_runtime import (
     COWSWAP_CONNECTOR_NAME,
     cowswap_order_submission_blocker,
-    cowswap_runtime_prices,
     cowswap_supported_order_types,
 )
 from services.live_trading_gate import (
@@ -1067,25 +1066,16 @@ async def _portfolio_with_cowswap_quote_prices(
         runtime=runtime,
         trading_pair=request.trading_pair,
     )
-    prices = await cowswap_runtime_prices(
-        runtime=runtime,
-        trading_pairs=[request.trading_pair],
-    )
-    price = prices.get(request.trading_pair) if "error" not in prices else None
-    try:
-        base_price = Decimal(str(price)) if price is not None else None
-    except Exception:
-        base_price = None
 
     base_asset, quote_asset = _split_pair(request.trading_pair)
     account_portfolio: dict[str, Any] = dict(portfolio or {})
     account_rows = dict(account_portfolio.get(request.account_name) or {})
     if not connector_rows:
         connector_rows = list(account_rows.get(COWSWAP_CONNECTOR_NAME) or [])
-    if base_price is not None and base_price > 0:
-        connector_rows = _upsert_price_row(connector_rows, token=base_asset, price=base_price)
     if quote_asset.upper() in {"DAI", "USDC", "USDT", "USD"}:
         connector_rows = _upsert_price_row(connector_rows, token=quote_asset, price=Decimal("1"))
+    if base_asset.upper() in {"DAI", "USDC", "USDT", "USD"}:
+        connector_rows = _upsert_price_row(connector_rows, token=base_asset, price=Decimal("1"))
     account_rows[COWSWAP_CONNECTOR_NAME] = connector_rows
     account_portfolio[request.account_name] = account_rows
     return account_portfolio
