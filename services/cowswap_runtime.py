@@ -205,7 +205,6 @@ def build_cowswap_runtime(
     receiver_address: str | None = None,
     app_data: str = "0x" + "00" * 32,
     slippage_bps: int = 50,
-    partner_api_key: str = "",
     token_map: Mapping[str, tuple[Mapping[str, Any], Mapping[str, Any]]] | None = None,
     import_module: ImportModule = importlib.import_module,
 ) -> tuple[Any, CowSwapRuntimeDependencies]:
@@ -232,7 +231,6 @@ def build_cowswap_runtime(
         app_data=app_data,
         slippage_bps=slippage_bps,
         env=env,
-        partner_api_key=partner_api_key or None,
     )
     store_path = Path(data_dir) / "cowswap-orders.json"
     store_path.parent.mkdir(parents=True, exist_ok=True)
