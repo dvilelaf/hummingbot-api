@@ -1462,3 +1462,46 @@ def test_base_swap_provider_intent_accepts_gateway_network_identity_alias(monkey
     assert LIVE_GATE_CALLS[0]["network"] == "base"
     assert EXECUTE_SWAP_CALLS[0]["network"] == "base"
     assert EXECUTE_SWAP_CALLS[0]["connector"] == "aerodrome"
+
+
+def test_base_swap_provider_intent_buy_executes_as_gateway_sell(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    LIVE_GATE_CALLS.clear()
+    EXECUTE_SWAP_CALLS.clear()
+    SET_DEFAULT_WALLET_CALLS.clear()
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="swap",
+        connector_name="aerodrome",
+        correlation_id="swap-base-buy-001",
+        market_id="AERO-USDC",
+        mode="mainnet",
+        quantity="0.00005",
+        risk_metadata={"network": "ethereum-base"},
+        side="BUY",
+        wallet_identity={
+            "address": "0x1111111111111111111111111111111111111111",
+            "chain": "ethereum",
+            "network": "ethereum-base",
+            "wallet_ref": "base:mainnet:evm_gateway",
+        },
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.provider_error == "Insufficient funds for transaction."
+    assert LIVE_GATE_CALLS[0]["expected_instrument"] == "AERO-USDC"
+    assert LIVE_GATE_CALLS[0]["expected_notional"] == provider_boundary.Decimal("0.00005")
+    assert EXECUTE_SWAP_CALLS[0]["base_asset"] == "USDC"
+    assert EXECUTE_SWAP_CALLS[0]["quote_asset"] == "AERO"
+    assert EXECUTE_SWAP_CALLS[0]["amount"] == provider_boundary.Decimal("0.00005")
+    assert EXECUTE_SWAP_CALLS[0]["side"] == "SELL"

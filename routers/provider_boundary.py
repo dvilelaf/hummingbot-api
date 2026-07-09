@@ -783,15 +783,15 @@ async def _submit_swap_intent(
                 provider_status="preflight_accepted",
                 submitted_quantity=body.quantity,
             )
-        base, quote = body.market_id.split("-", 1)
+        base, quote, amount, side = _gateway_swap_execution_terms(body)
         result = await accounts_service.gateway_client.execute_swap(
             connector=body.connector_name,
             network=network,
             wallet_address=wallet_address,
             base_asset=base,
             quote_asset=quote,
-            amount=body.quantity,
-            side=body.side,
+            amount=amount,
+            side=side,
             slippage_pct=float(slippage_pct),
             pool_address=body.risk_metadata.get("pool_address"),
             live_action_authorization=_marlin_gateway_swap_authorization(
@@ -840,6 +840,15 @@ async def _submit_swap_intent(
         submitted_quantity=body.quantity,
         provider_status=str(result.get("status", "")),
     )
+
+
+def _gateway_swap_execution_terms(
+    body: ProviderIntentRequest,
+) -> tuple[str, str, Decimal, str]:
+    base, quote = body.market_id.split("-", 1)
+    if body.side == "BUY":
+        return quote, base, body.quantity, "SELL"
+    return base, quote, body.quantity, body.side
 
 
 async def _provider_available(accounts_service: AccountsService, connector_name: str) -> bool:
