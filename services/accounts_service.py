@@ -11,6 +11,7 @@ from urllib import request as urllib_request
 from fastapi import HTTPException
 from hummingbot.client.config.config_crypt import ETHKeyFileSecretManger
 from hummingbot.connector.connector_base import ConnectorBase
+from hummingbot.core.data_type.in_flight_order import OrderState
 from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, TradeType
 
 from config import settings
@@ -51,6 +52,8 @@ COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}
 SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_perpetual_testnet", "hyperliquid_testnet"}
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HYPERLIQUID_TESTNET_INFO_URL = "https://api.hyperliquid-testnet.xyz/info"
+ORDER_TRACKING_CONFIRM_TIMEOUT_SECONDS = 5
+ORDER_TRACKING_CONFIRM_POLL_SECONDS = 0.2
 
 
 def _gateway_chain_network_filters(connector_names: Optional[List[str]]) -> Optional[tuple[str, ...]]:
@@ -1837,6 +1840,12 @@ class AccountsService:
                     position_action=position_action
                 )
 
+            await self._confirm_connector_order_tracked(
+                connector=connector,
+                connector_name=connector_name,
+                order_id=order_id,
+                trading_pair=trading_pair,
+            )
             logger.info(f"Placed {trade_type} order for {amount} {trading_pair} on {connector_name} (Account: {account_name}). Order ID: {order_id}")
             return order_id
             
@@ -1846,6 +1855,40 @@ class AccountsService:
         except Exception as e:
             logger.error(f"Failed to place {trade_type} order: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to place trade: {str(e)}")
+
+    async def _confirm_connector_order_tracked(
+        self,
+        *,
+        connector,
+        connector_name: str,
+        order_id: str,
+        trading_pair: str,
+    ) -> None:
+        """Fail closed when Hummingbot returns an id but does not track the order."""
+        deadline = time.monotonic() + ORDER_TRACKING_CONFIRM_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            in_flight_orders = getattr(connector, "in_flight_orders", {})
+            order = in_flight_orders.get(order_id)
+            if order is not None and (
+                getattr(order, "exchange_order_id", None)
+                or getattr(order, "current_state", None) is not OrderState.PENDING_CREATE
+            ):
+                return
+            await asyncio.sleep(ORDER_TRACKING_CONFIRM_POLL_SECONDS)
+
+        logger.error(
+            "Connector %s returned order id %s for %s but did not confirm exchange acceptance",
+            connector_name,
+            order_id,
+            trading_pair,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Connector {connector_name} returned order id {order_id} "
+                f"for {trading_pair} but did not confirm exchange acceptance"
+            ),
+        )
 
     async def _ensure_trading_pair_rules_loaded(
         self,
