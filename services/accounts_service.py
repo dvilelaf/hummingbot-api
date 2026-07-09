@@ -49,6 +49,7 @@ GATEWAY_PRICE_CONNECTORS = {
 GATEWAY_PRICE_FETCH_TIMEOUT_SECONDS = 2
 COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}
 SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_perpetual_testnet", "hyperliquid_testnet"}
+HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HYPERLIQUID_TESTNET_INFO_URL = "https://api.hyperliquid-testnet.xyz/info"
 
 
@@ -63,11 +64,11 @@ def _gateway_chain_network_filters(connector_names: Optional[List[str]]) -> Opti
     )
 
 
-async def _fetch_hyperliquid_testnet_clearinghouse_state(address: str) -> dict[str, Any]:
-    """Fetch public testnet margin state for a Hyperliquid user address."""
+async def _fetch_hyperliquid_clearinghouse_state(address: str, *, testnet: bool = False) -> dict[str, Any]:
+    """Fetch public margin state for a Hyperliquid user address."""
     payload = json.dumps({"type": "clearinghouseState", "user": address}).encode()
     req = urllib_request.Request(
-        HYPERLIQUID_TESTNET_INFO_URL,
+        HYPERLIQUID_TESTNET_INFO_URL if testnet else HYPERLIQUID_INFO_URL,
         data=payload,
         headers={"Content-Type": "application/json"},
     )
@@ -77,6 +78,36 @@ async def _fetch_hyperliquid_testnet_clearinghouse_state(address: str) -> dict[s
             return json.loads(response.read().decode())
 
     return await asyncio.to_thread(_read)
+
+
+async def _fetch_hyperliquid_testnet_clearinghouse_state(address: str) -> dict[str, Any]:
+    """Fetch public testnet margin state for a Hyperliquid user address."""
+    return await _fetch_hyperliquid_clearinghouse_state(address, testnet=True)
+
+
+def _hyperliquid_address(connector: Any, connector_name: str) -> Optional[str]:
+    mainnet_first = (
+        "hyperliquid_address",
+        "account_address",
+        "_account_address",
+        "wallet_address",
+        "_wallet_address",
+        "hyperliquid_testnet_address",
+    )
+    testnet_first = (
+        "hyperliquid_testnet_address",
+        "hyperliquid_address",
+        "account_address",
+        "_account_address",
+        "wallet_address",
+        "_wallet_address",
+    )
+    attr_names = testnet_first if connector_name == "hyperliquid_testnet" else mainnet_first
+    for attr_name in attr_names:
+        value = getattr(connector, attr_name, None)
+        if isinstance(value, str) and value.startswith("0x"):
+            return value
+    return None
 
 
 def _hyperliquid_testnet_address(connector: Any) -> Optional[str]:
@@ -94,14 +125,17 @@ def _hyperliquid_testnet_address(connector: Any) -> Optional[str]:
     return None
 
 
-async def _hyperliquid_testnet_collateral_token_info(connector: Any) -> Optional[dict[str, float | str]]:
-    address = _hyperliquid_testnet_address(connector)
+async def _hyperliquid_collateral_token_info(connector: Any, connector_name: str) -> Optional[dict[str, float | str]]:
+    address = _hyperliquid_address(connector, connector_name)
     if not address:
         return None
     try:
-        state = await _fetch_hyperliquid_testnet_clearinghouse_state(address)
+        state = await _fetch_hyperliquid_clearinghouse_state(
+            address,
+            testnet=connector_name == "hyperliquid_testnet",
+        )
     except Exception as exc:
-        logger.warning("Failed to fetch Hyperliquid testnet collateral state: %s", exc)
+        logger.warning("Failed to fetch %s collateral state: %s", connector_name, exc)
         return None
     amount = Decimal(str(state.get("withdrawable") or state.get("marginSummary", {}).get("accountValue") or "0"))
     if amount <= 0:
@@ -113,6 +147,10 @@ async def _hyperliquid_testnet_collateral_token_info(connector: Any) -> Optional
         "value": float(amount),
         "available_units": float(amount),
     }
+
+
+async def _hyperliquid_testnet_collateral_token_info(connector: Any) -> Optional[dict[str, float | str]]:
+    return await _hyperliquid_collateral_token_info(connector, "hyperliquid_testnet")
 
 
 class AccountTradingInterface:
@@ -988,8 +1026,8 @@ class AccountsService:
 
         balances = [{"token": key, "units": value} for key, value in connector.get_all_balances().items() if
                     value != Decimal("0") and key not in settings.banned_tokens]
-        if not balances and connector_name == "hyperliquid_testnet":
-            collateral_info = await _hyperliquid_testnet_collateral_token_info(connector)
+        if not balances and connector_name in {"hyperliquid", "hyperliquid_testnet"}:
+            collateral_info = await _hyperliquid_collateral_token_info(connector, connector_name)
             if collateral_info is not None:
                 return [collateral_info]
 
