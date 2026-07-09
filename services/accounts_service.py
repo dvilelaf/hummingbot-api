@@ -86,6 +86,10 @@ async def _fetch_hyperliquid_testnet_clearinghouse_state(address: str) -> dict[s
 
 
 def _hyperliquid_address(connector: Any, connector_name: str) -> Optional[str]:
+    if connector_name == "hyperliquid":
+        bridge2_address = _hyperliquid_bridge2_wallet_address()
+        if bridge2_address:
+            return bridge2_address
     mainnet_first = (
         "hyperliquid_address",
         "account_address",
@@ -108,6 +112,18 @@ def _hyperliquid_address(connector: Any, connector_name: str) -> Optional[str]:
         if isinstance(value, str) and value.startswith("0x"):
             return value
     return None
+
+
+def _hyperliquid_bridge2_wallet_address() -> Optional[str]:
+    policy = GATEWAY_WALLET_POLICIES.get(("arbitrum", "mainnet"))
+    if policy is None:
+        return None
+    derivation_path, _, coin = policy
+    try:
+        return _derive_marlin_public_address(derivation_path=derivation_path, coin=coin)
+    except Exception as exc:
+        logger.warning("Failed to derive Hyperliquid Bridge2 wallet address: %s", exc)
+        return None
 
 
 def _hyperliquid_testnet_address(connector: Any) -> Optional[str]:

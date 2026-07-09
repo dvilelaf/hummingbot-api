@@ -172,6 +172,51 @@ class TestBalanceRefresh:
             }
         ]
 
+    @pytest.mark.asyncio
+    async def test_hyperliquid_mainnet_derives_bridge2_address_when_connector_hides_credentials(
+        self, accounts_service, mock_connector, monkeypatch
+    ):
+        """Hyperliquid mainnet collateral falls back to the Bridge2 credited wallet."""
+        import services.accounts_service as accounts_module
+
+        calls = []
+
+        async def fake_fetch(address, *, testnet=False):
+            calls.append((address, testnet))
+            return {
+                "withdrawable": "5.0",
+                "marginSummary": {"accountValue": "5.0"},
+            }
+
+        mock_connector.get_all_balances.return_value = {}
+        mock_connector.get_available_balance.return_value = Decimal("0")
+        mock_connector.hyperliquid_address = "0x0000000000000000000000000000000000000001"
+        monkeypatch.setattr(
+            accounts_module,
+            "_derive_marlin_public_address",
+            lambda **_kwargs: "0x6394Bd277f792E6A6CDE7B6f9D075f7cfAbB5ff4",
+        )
+        monkeypatch.setattr(
+            accounts_module,
+            "_fetch_hyperliquid_clearinghouse_state",
+            fake_fetch,
+        )
+
+        result = await accounts_service._get_connector_tokens_info(
+            mock_connector, "hyperliquid"
+        )
+
+        assert calls == [("0x6394Bd277f792E6A6CDE7B6f9D075f7cfAbB5ff4", False)]
+        assert result == [
+            {
+                "token": "USDC",
+                "units": 5.0,
+                "price": 1.0,
+                "value": 5.0,
+                "available_units": 5.0,
+            }
+        ]
+
 
 class TestGatewayRefreshSelection:
     """Tests for Gateway balance refresh selection."""
