@@ -97,17 +97,22 @@ async def get_swap_quote(
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
 
-        # Parse trading pair
         base, quote = request.trading_pair.split("-")
+        gateway_base, gateway_quote, gateway_amount, gateway_side = _gateway_swap_terms(
+            base=base,
+            quote=quote,
+            amount=request.amount,
+            side=request.side,
+        )
 
         # Get quote from Gateway
         result = await accounts_service.gateway_client.quote_swap(
             connector=request.connector,
             network=network,
-            base_asset=base,
-            quote_asset=quote,
-            amount=request.amount,
-            side=request.side,
+            base_asset=gateway_base,
+            quote_asset=gateway_quote,
+            amount=gateway_amount,
+            side=gateway_side,
             slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0,
             pool_address=request.pool_address,
         )
@@ -143,6 +148,18 @@ async def get_swap_quote(
     except Exception as e:
         logger.error(f"Error getting swap quote: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error getting swap quote: {str(e)}")
+
+
+def _gateway_swap_terms(
+    *,
+    base: str,
+    quote: str,
+    amount: Decimal,
+    side: str,
+) -> tuple[str, str, Decimal, str]:
+    if side.upper() == "BUY":
+        return quote, base, amount, "SELL"
+    return base, quote, amount, side
 
 
 @router.post("/swap/execute", response_model=SwapExecuteResponse)

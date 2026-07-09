@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
@@ -42,3 +43,12 @@ def test_gateway_swap_positive_quote_is_accepted():
             "amountOut": "12.34",
         },
     )
+
+
+def test_gateway_swap_buy_quote_uses_inverted_sell_terms():
+    assert gateway_swap._gateway_swap_terms(
+        base="AERO",
+        quote="USDC",
+        amount=Decimal("0.00005"),
+        side="BUY",
+    ) == ("USDC", "AERO", Decimal("0.00005"), "SELL")
