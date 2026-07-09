@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -279,6 +280,12 @@ async def _preflight_order_intent(
     *,
     order_type: str,
 ) -> ProviderIntentResponse:
+    if body.connector_name == COWSWAP_CONNECTOR_NAME:
+        return await _preflight_cowswap_order_intent(
+            body,
+            accounts_service,
+            order_type=order_type,
+        )
     try:
         await accounts_service.update_account_state(
             account_names=[body.account_name],
@@ -322,6 +329,194 @@ async def _preflight_order_intent(
         submitted_quantity=body.quantity,
         submitted_notional=body.quantity * body.price if body.price is not None else None,
     )
+
+
+async def _preflight_cowswap_order_intent(
+    body: ProviderIntentRequest,
+    accounts_service: AccountsService,
+    *,
+    order_type: str,
+) -> ProviderIntentResponse:
+    if order_type != "MARKET":
+        return ProviderIntentResponse(
+            status="rejected",
+            correlation_id=body.correlation_id,
+            provider_error="CowSwap only supports MARKET orders",
+        )
+    runtime = getattr(accounts_service, "_cowswap_runtime", None)
+    runtime_dependencies = getattr(accounts_service, "_cowswap_runtime_dependencies", None)
+    blocker = cowswap_order_submission_blocker(
+        COWSWAP_CONNECTOR_NAME,
+        runtime_dependencies=runtime_dependencies,
+    )
+    if blocker:
+        return ProviderIntentResponse(
+            status="rejected",
+            correlation_id=body.correlation_id,
+            provider_error=_cowswap_provider_runtime_issue(blocker),
+        )
+    if runtime is None or runtime_dependencies is None:
+        return ProviderIntentResponse(
+            status="rejected",
+            correlation_id=body.correlation_id,
+            provider_error="CowSwap runtime bridge is not initialized",
+        )
+    try:
+        sell_token, buy_token = _cowswap_tokens_for_pair(runtime, body.market_id)
+        spend_token, spend_amount_atomic = await _cowswap_spend_requirement_atomic(
+            body,
+            runtime=runtime,
+            sell_token=sell_token,
+            buy_token=buy_token,
+        )
+        evm_reader = runtime_dependencies.evm_reader
+        owner = runtime_dependencies.owner_address
+        if evm_reader is None or not owner:
+            raise ValueError("CowSwap EVM reader or owner address missing")
+        balance_atomic = int(evm_reader.balance_of(spend_token, owner))
+        required_atomic = int(spend_amount_atomic)
+        if balance_atomic < required_atomic:
+            return ProviderIntentResponse(
+                status="rejected",
+                correlation_id=body.correlation_id,
+                provider_error=f"insufficient {spend_token.symbol} balance",
+            )
+        allowance_atomic = int(
+            evm_reader.allowance(
+                spend_token,
+                owner,
+                _cowswap_vault_relayer(runtime),
+            )
+        )
+        if allowance_atomic < required_atomic:
+            return ProviderIntentResponse(
+                status="rejected",
+                correlation_id=body.correlation_id,
+                provider_error=f"insufficient {spend_token.symbol} allowance for CoW VaultRelayer",
+            )
+    except Exception as exc:
+        return ProviderIntentResponse(
+            status="rejected",
+            correlation_id=body.correlation_id,
+            provider_error=_redact_secret_text(exc),
+        )
+    return ProviderIntentResponse(
+        status="accepted",
+        correlation_id=body.correlation_id,
+        provider_status=f"preflight_accepted:{order_type}",
+        submitted_quantity=body.quantity,
+        submitted_notional=body.quantity * body.price if body.price is not None else None,
+    )
+
+
+def _cowswap_tokens_for_pair(runtime: Any, trading_pair: str) -> tuple[Any, Any]:
+    tokens_for_pair = getattr(runtime, "_tokens_for_pair", None)
+    if not callable(tokens_for_pair):
+        raise ValueError("CowSwap runtime token map is unavailable")
+    try:
+        return tokens_for_pair(trading_pair)
+    except Exception as exc:
+        raise ValueError(f"unsupported CowSwap trading pair {trading_pair}: {exc}") from exc
+
+
+async def _cowswap_spend_requirement_atomic(
+    body: ProviderIntentRequest,
+    *,
+    runtime: Any,
+    sell_token: Any,
+    buy_token: Any,
+) -> tuple[Any, str]:
+    if body.side == "SELL":
+        _cowswap_amount_to_atomic(str(body.quantity), int(sell_token.decimals))
+        connector = getattr(runtime, "_connector", None)
+        quote_sell = getattr(connector, "quote_sell", None)
+        if not callable(quote_sell):
+            raise ValueError(f"preflight spend amount unavailable for SELL {body.market_id}")
+        try:
+            quote, _minimum_buy_amount = await quote_sell(
+                sell_token,
+                buy_token,
+                str(body.quantity),
+            )
+        except Exception as exc:
+            raise ValueError(f"preflight CowSwap SELL quote unavailable: {exc}") from exc
+        _validate_cowswap_preflight_quote(quote)
+        return sell_token, _cowswap_order_sell_amount(runtime, quote)
+    if body.side == "BUY":
+        connector = getattr(runtime, "_connector", None)
+        quote_buy = getattr(connector, "quote_buy", None)
+        if not callable(quote_buy):
+            raise ValueError(f"preflight spend amount unavailable for BUY {body.market_id}")
+        try:
+            _quote, maximum_sell_amount = await quote_buy(
+                sell_token,
+                buy_token,
+                str(body.quantity),
+            )
+        except Exception as exc:
+            raise ValueError(f"preflight CowSwap BUY quote unavailable: {exc}") from exc
+        _validate_cowswap_preflight_quote(_quote)
+        return sell_token, str(maximum_sell_amount)
+    raise ValueError("CowSwap side must be BUY or SELL")
+
+
+def _cowswap_amount_to_atomic(amount: str, decimals: int) -> str:
+    parsed = Decimal(str(amount))
+    if parsed <= 0:
+        raise ValueError("amount must be positive")
+    scale = Decimal(10) ** decimals
+    atomic = parsed * scale
+    if atomic != atomic.to_integral_value():
+        raise ValueError(f"amount has more precision than token decimals: {amount}")
+    return str(int(atomic))
+
+
+def _atomic_amount_to_human(amount: str, decimals: int) -> Decimal:
+    return Decimal(str(amount)) / (Decimal(10) ** decimals)
+
+
+def _cowswap_vault_relayer(runtime: Any) -> str:
+    from hummingbot_cowswap.chain_config import chain_config
+
+    connector = getattr(runtime, "_connector", None)
+    config = getattr(connector, "config", None)
+    if config is None:
+        raise ValueError("CowSwap connector config is unavailable")
+    return chain_config(int(config.chain_id), str(config.env)).vault_relayer
+
+
+def _cowswap_order_sell_amount(runtime: Any, quote: Any) -> str:
+    connector = getattr(runtime, "_connector", None)
+    config = getattr(connector, "config", None)
+    env = str(getattr(config, "env", "")).lower()
+    sell_amount = int(_cow_quote_field(quote, "sellAmount"))
+    if env == "staging":
+        return str(sell_amount)
+    return str(sell_amount + int(_cow_quote_field(quote, "feeAmount")))
+
+
+def _validate_cowswap_preflight_quote(quote: Any) -> None:
+    if _object_field(quote, "verified", False) is not True:
+        raise ValueError("CoW quote is not verified")
+    valid_to = int(_cow_quote_field(quote, "validTo"))
+    if valid_to <= int(time.time()):
+        raise ValueError(f"stale CoW quote valid_to={valid_to}")
+
+
+def _cow_quote_field(quote: Any, field_name: str) -> str:
+    payload = _object_field(quote, "quote", None)
+    if payload is None:
+        raise ValueError("CowSwap quote payload missing quote")
+    value = _object_field(payload, field_name, None)
+    if value is None:
+        raise ValueError(f"CowSwap quote payload missing {field_name}")
+    return str(_object_field(value, "root", value))
+
+
+def _object_field(value: Any, field_name: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(field_name, default)
+    return getattr(value, field_name, default)
 
 
 def _preflight_order_refresh_blocker(
@@ -867,30 +1062,73 @@ async def _portfolio_with_cowswap_quote_prices(
     request: ProviderSnapshotRequest,
 ) -> dict[str, Any] | None:
     runtime = getattr(accounts_service, "_cowswap_runtime", None)
+    connector_rows = _cowswap_balance_rows(
+        accounts_service,
+        runtime=runtime,
+        trading_pair=request.trading_pair,
+    )
     prices = await cowswap_runtime_prices(
         runtime=runtime,
         trading_pairs=[request.trading_pair],
     )
     price = prices.get(request.trading_pair) if "error" not in prices else None
-    if price is None:
-        return portfolio
     try:
-        base_price = Decimal(str(price))
+        base_price = Decimal(str(price)) if price is not None else None
     except Exception:
-        return portfolio
-    if base_price <= 0:
-        return portfolio
+        base_price = None
 
     base_asset, quote_asset = _split_pair(request.trading_pair)
     account_portfolio: dict[str, Any] = dict(portfolio or {})
     account_rows = dict(account_portfolio.get(request.account_name) or {})
-    connector_rows = list(account_rows.get(COWSWAP_CONNECTOR_NAME) or [])
-    connector_rows = _upsert_price_row(connector_rows, token=base_asset, price=base_price)
+    if not connector_rows:
+        connector_rows = list(account_rows.get(COWSWAP_CONNECTOR_NAME) or [])
+    if base_price is not None and base_price > 0:
+        connector_rows = _upsert_price_row(connector_rows, token=base_asset, price=base_price)
     if quote_asset.upper() in {"DAI", "USDC", "USDT", "USD"}:
         connector_rows = _upsert_price_row(connector_rows, token=quote_asset, price=Decimal("1"))
     account_rows[COWSWAP_CONNECTOR_NAME] = connector_rows
     account_portfolio[request.account_name] = account_rows
     return account_portfolio
+
+
+def _cowswap_balance_rows(
+    accounts_service: AccountsService,
+    *,
+    runtime: Any,
+    trading_pair: str,
+) -> list[dict[str, Any]]:
+    runtime_dependencies = getattr(accounts_service, "_cowswap_runtime_dependencies", None)
+    evm_reader = getattr(runtime_dependencies, "evm_reader", None)
+    owner = getattr(runtime_dependencies, "owner_address", "")
+    if runtime is None or evm_reader is None or not owner:
+        return []
+    try:
+        tokens = _cowswap_tokens_for_pair(runtime, trading_pair)
+    except Exception:
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for token in tokens:
+        symbol = str(getattr(token, "symbol", "")).upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        try:
+            units = _atomic_amount_to_human(
+                evm_reader.balance_of(token, owner),
+                int(getattr(token, "decimals")),
+            )
+        except Exception:
+            continue
+        rows.append(
+            {
+                "available_units": float(units),
+                "token": symbol,
+                "units": float(units),
+                "value": 0.0,
+            }
+        )
+    return rows
 
 
 def _split_pair(trading_pair: str) -> tuple[str, str]:
@@ -912,6 +1150,11 @@ def _upsert_price_row(rows: list[Any], *, token: str, price: Decimal) -> list[An
             continue
         patched = dict(row)
         patched["price"] = float(price)
+        units = patched.get("available_units", patched.get("units", 0))
+        try:
+            patched["value"] = float(Decimal(str(units)) * price)
+        except Exception:
+            patched["value"] = 0.0
         updated.append(patched)
         found = True
     if not found:

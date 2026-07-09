@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import sys
 import types
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +29,8 @@ STUBBED_MODULES = (
     "services.cowswap_runtime",
     "services.live_trading_gate",
     "services.marlin_runtime",
+    "hummingbot_cowswap",
+    "hummingbot_cowswap.chain_config",
 )
 
 
@@ -107,6 +110,16 @@ def _install_provider_boundary_stubs():
     cowswap_runtime.cowswap_supported_order_types = lambda: ["MARKET"]
     sys.modules["services.cowswap_runtime"] = cowswap_runtime
 
+    hummingbot_cowswap = types.ModuleType("hummingbot_cowswap")
+    sys.modules["hummingbot_cowswap"] = hummingbot_cowswap
+    chain_config = types.ModuleType("hummingbot_cowswap.chain_config")
+    chain_config.chain_config = lambda chain_id, env: SimpleNamespace(
+        chain_id=chain_id,
+        env=env,
+        vault_relayer="0xvaultrelayer",
+    )
+    sys.modules["hummingbot_cowswap.chain_config"] = chain_config
+
     live_trading_gate = types.ModuleType("services.live_trading_gate")
     live_trading_gate.assert_live_gateway_mutation_allowed = (
         lambda *args, **kwargs: LIVE_GATE_CALLS.append(kwargs)
@@ -162,6 +175,90 @@ async def _fake_cowswap_runtime_prices(*, runtime, trading_pairs):  # noqa: ARG0
     return {pair: 2500.0 for pair in trading_pairs}
 
 
+class FakeCowSwapEvmReader:
+    def __init__(self):
+        self.balances = {
+            "WETH": "0",
+            "USDC": "5000000",
+        }
+        self.allowances = {
+            "WETH": "0",
+            "USDC": "5000000",
+        }
+        self.balance_calls = []
+        self.allowance_calls = []
+
+    def balance_of(self, token, owner):
+        self.balance_calls.append((token.symbol, owner))
+        return self.balances.get(token.symbol, "0")
+
+    def allowance(self, token, owner, spender):
+        self.allowance_calls.append((token.symbol, owner, spender))
+        return self.allowances.get(token.symbol, "0")
+
+
+class FakeCowSwapConnector:
+    def __init__(self):
+        self.config = SimpleNamespace(chain_id=8453, env="prod")
+        self.quote_sell_calls = []
+        self.quote_buy_calls = []
+        self.maximum_sell_amount = "2500"
+        self.sell_fee_amount = "10"
+        self.verified = True
+        self.valid_to = 9999999999
+
+    async def quote_sell(self, sell_token, buy_token, amount):
+        self.quote_sell_calls.append((sell_token.symbol, buy_token.symbol, amount))
+        sell_amount = str(int(Decimal(str(amount)) * (Decimal(10) ** sell_token.decimals)))
+        return SimpleNamespace(
+            verified=self.verified,
+            quote=SimpleNamespace(
+                sellAmount=SimpleNamespace(root=sell_amount),
+                feeAmount=SimpleNamespace(root=self.sell_fee_amount),
+                validTo=SimpleNamespace(root=str(self.valid_to)),
+            ),
+        ), "0"
+
+    async def quote_buy(self, sell_token, buy_token, amount):
+        self.quote_buy_calls.append((sell_token.symbol, buy_token.symbol, amount))
+        return SimpleNamespace(
+            verified=self.verified,
+            quote=SimpleNamespace(validTo=SimpleNamespace(root=str(self.valid_to))),
+        ), self.maximum_sell_amount
+
+
+class FakeCowSwapRuntime:
+    def __init__(self):
+        self._connector = FakeCowSwapConnector()
+        self.trading_rules = {
+            "WETH-USDC": SimpleNamespace(
+                min_base_amount_increment=0,
+                min_order_size=0,
+                min_price_increment=0,
+            ),
+            "USDC-WETH": SimpleNamespace(
+                min_base_amount_increment=0,
+                min_order_size=0,
+                min_price_increment=0,
+            ),
+        }
+        self.tokens = {
+            "WETH-USDC": (
+                SimpleNamespace(symbol="WETH", decimals=18),
+                SimpleNamespace(symbol="USDC", decimals=6),
+            ),
+            "USDC-WETH": (
+                SimpleNamespace(symbol="USDC", decimals=6),
+                SimpleNamespace(symbol="WETH", decimals=18),
+            ),
+        }
+
+    def _tokens_for_pair(self, trading_pair):
+        if trading_pair not in self.tokens:
+            raise ValueError(f"unsupported trading_pair for CoW shim: {trading_pair}")
+        return self.tokens[trading_pair]
+
+
 class FakeGatewayClient:
     async def ping(self):
         return True
@@ -195,14 +292,14 @@ class FakeAccountsService:
         self.gateway_client = FakeGatewayClient()
         self.update_calls = []
         self.balance_refresh_errors = {}
-        self._cowswap_runtime = SimpleNamespace(
-            trading_rules={
-                "WETH-USDC": SimpleNamespace(
-                    min_base_amount_increment=0,
-                    min_order_size=0,
-                    min_price_increment=0,
-                )
-            }
+        self.cowswap_evm_reader = FakeCowSwapEvmReader()
+        self._cowswap_runtime = FakeCowSwapRuntime()
+        self._cowswap_runtime_dependencies = SimpleNamespace(
+            evm_reader=self.cowswap_evm_reader,
+            owner_address="0xowner",
+            token_map=self._cowswap_runtime.tokens,
+            order_store=object(),
+            signer_provider=object(),
         )
         self.accounts_state = {
             "master_account": {
@@ -396,7 +493,265 @@ def test_cowswap_provider_snapshot_exposes_order_actions_when_runtime_ready():
     assert "provider actions missing: cowswap" not in result.operator_issues
     rows = result.portfolio["master_account"]["cowswap"]
     assert {"available_units": 0.0, "price": 2500.0, "token": "WETH", "units": 0.0, "value": 0.0} in rows
-    assert {"available_units": 0.0, "price": 1.0, "token": "USDC", "units": 0.0, "value": 0.0} in rows
+    assert {"available_units": 5.0, "price": 1.0, "token": "USDC", "units": 5.0, "value": 5.0} in rows
+
+
+def test_cowswap_provider_snapshot_exposes_reverse_pair_gateway_balances():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["cowswap"] = []
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                trading_pair="USDC-WETH",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "available"
+    assert result.trading_rule is not None
+    assert service.update_calls == [
+        {
+            "account_names": ["master_account"],
+            "connector_names": ["cowswap"],
+            "skip_gateway": True,
+            "tokens_by_chain_network": None,
+        }
+    ]
+    rows = result.portfolio["master_account"]["cowswap"]
+    assert {"available_units": 5.0, "price": 2500.0, "token": "USDC", "units": 5.0, "value": 12500.0} in rows
+    assert {"available_units": 0.0, "token": "WETH", "units": 0.0, "value": 0.0} in rows
+
+
+def test_cowswap_provider_snapshot_keeps_gateway_balances_when_quote_price_unavailable():
+    provider_boundary = _provider_boundary_module()
+    provider_boundary.cowswap_runtime_prices = _async_return({"error": "rate limited"})  # noqa: SLF001
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["cowswap"] = []
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                trading_pair="USDC-WETH",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "available"
+    assert result.portfolio == {
+        "master_account": {
+            "cowswap": [
+                {"available_units": 5.0, "token": "USDC", "units": 5.0, "value": 0.0},
+                {"available_units": 0.0, "token": "WETH", "units": 0.0, "value": 0.0},
+            ],
+        },
+    }
+
+
+def test_cowswap_order_provider_preflight_accepts_runtime_gateway_balance_and_allowance(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-sell-funded",
+        market_id="USDC-WETH",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=True,
+        quantity="0.00005",
+        side="SELL",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "accepted"
+    assert result.provider_status == "preflight_accepted:MARKET"
+    assert service.update_calls == []
+    assert service._cowswap_runtime._connector.quote_sell_calls == [("USDC", "WETH", "0.00005")]
+    assert service.cowswap_evm_reader.balance_calls == [("USDC", "0xowner")]
+    assert service.cowswap_evm_reader.allowance_calls == [("USDC", "0xowner", "0xvaultrelayer")]
+
+
+def test_cowswap_sell_preflight_checks_quoted_sell_amount_with_fee(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.balances["USDC"] = "50"
+    service.cowswap_evm_reader.allowances["USDC"] = "60"
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-sell-fee-blocked",
+        market_id="USDC-WETH",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=True,
+        quantity="0.00005",
+        side="SELL",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert result.provider_error == "insufficient USDC balance"
+    assert service._cowswap_runtime._connector.quote_sell_calls == [("USDC", "WETH", "0.00005")]
+
+
+def test_cowswap_preflight_rejects_unverified_quote_before_balance_checks(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service._cowswap_runtime._connector.verified = False
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-sell-unverified-quote",
+        market_id="USDC-WETH",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=True,
+        quantity="0.00005",
+        side="SELL",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert result.provider_error == "CoW quote is not verified"
+    assert service.cowswap_evm_reader.balance_calls == []
+    assert service.cowswap_evm_reader.allowance_calls == []
+
+
+def test_cowswap_order_provider_preflight_rejects_insufficient_allowance(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-sell-no-allowance",
+        market_id="USDC-WETH",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=True,
+        quantity="0.00005",
+        side="SELL",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert result.provider_error == "insufficient USDC allowance for CoW VaultRelayer"
+
+
+def test_cowswap_buy_preflight_uses_quote_buy_for_spend_amount(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-buy-funded",
+        market_id="USDC-WETH",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=True,
+        quantity="0.000000001",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "accepted"
+    assert service._cowswap_runtime._connector.quote_buy_calls == [("USDC", "WETH", "1E-9")]
+    assert service.cowswap_evm_reader.balance_calls == [("USDC", "0xowner")]
+    assert service.cowswap_evm_reader.allowance_calls == [("USDC", "0xowner", "0xvaultrelayer")]
+
+
+def test_cowswap_preflight_rejects_unsupported_pair_before_balance_checks(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-unsupported",
+        market_id="UNI-USDC",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=True,
+        quantity="1",
+        side="SELL",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert "unsupported CowSwap trading pair UNI-USDC" in result.provider_error
+    assert service.cowswap_evm_reader.balance_calls == []
+    assert service.cowswap_evm_reader.allowance_calls == []
 
 
 def test_xrpl_provider_snapshot_reports_account_activation_blocker():
