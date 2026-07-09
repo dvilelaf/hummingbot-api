@@ -52,3 +52,4 @@ class ProviderIntentResponse(BaseModel):
     submitted_notional: Optional[Decimal] = None
     provider_status: Optional[str] = None
     provider_error: Optional[str] = None
+    retry_after_seconds: Optional[int] = Field(default=None, ge=1)

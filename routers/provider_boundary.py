@@ -40,6 +40,7 @@ GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS = {
     "jupiter": "solana-mainnet-beta",
     "orca": "solana-mainnet-beta",
 }
+COWSWAP_DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS = 1800
 
 
 @router.post("/snapshot", response_model=ProviderSnapshotResponse)
@@ -251,17 +252,21 @@ async def _submit_order_intent(
             marlin_provider_intent_authorized=provider_intent_authorized,
         )
     except HTTPException as exc:
+        redacted = _redact_secret_text(exc.detail)
         return ProviderIntentResponse(
             status="rejected" if exc.status_code < 500 else "failed",
             correlation_id=body.correlation_id,
-            provider_error=_redact_secret_text(exc.detail),
+            provider_error=redacted,
+            retry_after_seconds=_intent_retry_after_seconds(body, redacted),
         )
     except Exception as exc:
+        redacted = _redact_secret_text(exc)
         logger.error("Provider order intent failed: %s", _redact_secret_text(exc))
         return ProviderIntentResponse(
             status="failed",
             correlation_id=body.correlation_id,
-            provider_error=_redact_secret_text(exc),
+            provider_error=redacted,
+            retry_after_seconds=_intent_retry_after_seconds(body, redacted),
         )
     return ProviderIntentResponse(
         status="submitted",
@@ -394,10 +399,12 @@ async def _preflight_cowswap_order_intent(
                 provider_error=f"insufficient {spend_token.symbol} allowance for CoW VaultRelayer",
             )
     except Exception as exc:
+        redacted = _redact_secret_text(exc)
         return ProviderIntentResponse(
             status="rejected",
             correlation_id=body.correlation_id,
-            provider_error=_redact_secret_text(exc),
+            provider_error=redacted,
+            retry_after_seconds=_cowswap_retry_after_seconds(redacted),
         )
     return ProviderIntentResponse(
         status="accepted",
@@ -457,6 +464,36 @@ async def _cowswap_spend_requirement_atomic(
         _validate_cowswap_preflight_quote(_quote)
         return sell_token, str(maximum_sell_amount)
     raise ValueError("CowSwap side must be BUY or SELL")
+
+
+def _cowswap_retry_after_seconds(error: object) -> int | None:
+    text = str(error)
+    normalized = text.lower()
+    if not (
+        "rate-limited" in normalized
+        or "rate limited" in normalized
+        or "rate-limit" in normalized
+        or "rate limit" in normalized
+        or "http error 429" in normalized
+        or "429 client error" in normalized
+        or "429 too many requests" in normalized
+        or "too many requests" in normalized
+    ):
+        return None
+    for pattern in (
+        r"\bretry_after_seconds\b\s*[:=]\s*(\d+)",
+        r"\bretry[-_ ]after(?:[-_ ]seconds)?\b\s*[:= ]+(\d+)",
+    ):
+        explicit = re.search(pattern, text, re.IGNORECASE)
+        if explicit is not None:
+            return max(1, int(explicit.group(1)))
+    return COWSWAP_DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS
+
+
+def _intent_retry_after_seconds(body: ProviderIntentRequest, error: object) -> int | None:
+    if body.connector_name != COWSWAP_CONNECTOR_NAME:
+        return None
+    return _cowswap_retry_after_seconds(error)
 
 
 def _cowswap_amount_to_atomic(amount: str, decimals: int) -> str:

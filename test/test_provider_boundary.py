@@ -206,9 +206,12 @@ class FakeCowSwapConnector:
         self.sell_fee_amount = "10"
         self.verified = True
         self.valid_to = 9999999999
+        self.sell_error = None
 
     async def quote_sell(self, sell_token, buy_token, amount):
         self.quote_sell_calls.append((sell_token.symbol, buy_token.symbol, amount))
+        if self.sell_error is not None:
+            raise self.sell_error
         sell_amount = str(int(Decimal(str(amount)) * (Decimal(10) ** sell_token.decimals)))
         return SimpleNamespace(
             verified=self.verified,
@@ -306,6 +309,7 @@ class FakeAccountsService:
                 "jupiter": [{"token": "SOL", "units": "0"}],
             }
         }
+        self.place_trade_error = None
 
     async def update_account_state(self, **kwargs):
         self.update_calls.append(kwargs)
@@ -326,6 +330,11 @@ class FakeAccountsService:
 
     def connector_balance_refresh_error(self, connector_name):
         return self.balance_refresh_errors.get(connector_name)
+
+    async def place_trade(self, **_kwargs):
+        if self.place_trade_error is not None:
+            raise self.place_trade_error
+        return "order-1"
 
 
 def test_swap_provider_snapshot_uses_gateway_chain_network_portfolio():
@@ -662,6 +671,149 @@ def test_cowswap_preflight_rejects_unverified_quote_before_balance_checks(monkey
     assert result.provider_error == "CoW quote is not verified"
     assert service.cowswap_evm_reader.balance_calls == []
     assert service.cowswap_evm_reader.allowance_calls == []
+
+
+def test_cowswap_preflight_rate_limit_rejection_defaults_retry_after(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service._cowswap_runtime._connector.sell_error = RuntimeError(
+        "rate-limited by CoW Order Book API: HTTP error 429; retry after provider cooldown"
+    )
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-sell-rate-limited-default",
+        market_id="USDC-WETH",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=True,
+        quantity="0.00005",
+        side="SELL",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert "rate-limited by CoW Order Book API" in result.provider_error
+    assert result.retry_after_seconds == 1800
+    assert service.cowswap_evm_reader.balance_calls == []
+    assert service.cowswap_evm_reader.allowance_calls == []
+
+
+def test_cowswap_preflight_rate_limit_rejection_preserves_explicit_retry_after(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service._cowswap_runtime._connector.sell_error = RuntimeError(
+        "rate-limited by CoW Order Book API: HTTP error 429; retry-after: 47"
+    )
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-sell-rate-limited-explicit",
+        market_id="USDC-WETH",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=True,
+        quantity="0.00005",
+        side="SELL",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert "HTTP error 429" in result.provider_error
+    assert result.retry_after_seconds == 47
+    assert service.cowswap_evm_reader.balance_calls == []
+    assert service.cowswap_evm_reader.allowance_calls == []
+
+
+def test_cowswap_preflight_quote_failure_without_rate_limit_has_no_retry_after(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service._cowswap_runtime._connector.sell_error = RuntimeError("CoW quote temporarily unavailable")
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-sell-quote-error",
+        market_id="USDC-WETH",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=True,
+        quantity="0.00005",
+        side="SELL",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert "CoW quote temporarily unavailable" in result.provider_error
+    assert result.retry_after_seconds is None
+    assert service.cowswap_evm_reader.balance_calls == []
+    assert service.cowswap_evm_reader.allowance_calls == []
+
+
+def test_cowswap_submit_rate_limit_rejection_returns_retry_after(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"SELL": "SELL"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"MARKET": "MARKET"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.place_trade_error = RuntimeError(
+        "429 Too Many Requests; retry-after: 47"
+    )
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-submit-rate-limited",
+        market_id="USDC-WETH",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=False,
+        quantity="0.00005",
+        side="SELL",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "failed"
+    assert "429 Too Many Requests" in result.provider_error
+    assert result.retry_after_seconds == 47
 
 
 def test_cowswap_order_provider_preflight_rejects_insufficient_allowance(monkeypatch):
