@@ -398,6 +398,7 @@ async def execute_provider_treasury_rebalance(
                     ),
                     marlin_provider_intent_authorized=True,
                 )
+                _rebalance_response(result, rebalance_id=rebalance_id)
                 status_result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
                 status_result.setdefault("id", rebalance_id)
                 status_result.setdefault("route", stored["provider"])

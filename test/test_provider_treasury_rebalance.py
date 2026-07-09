@@ -700,6 +700,39 @@ def test_execute_and_status_forward_to_gateway_treasury_rebalance_endpoints(monk
     assert service.gateway_client.status_calls == ["rebalance-idem-001", "rebalance-123"]
 
 
+def test_execute_surfaces_gateway_rebalance_error_before_status_poll(monkeypatch):
+    provider_treasury = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        provider_treasury.create_provider_treasury_rebalance(
+            _hyperliquid_bridge2_request(provider_treasury),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    async def execute_error(**kwargs):
+        service.gateway_client.execute_calls.append(kwargs)
+        return {"error": "Squid route lookup failed with HTTP 429", "status": 500}
+
+    service.gateway_client.execute_treasury_rebalance = execute_error
+
+    with pytest.raises(provider_treasury.HTTPException) as exc:
+        asyncio.run(
+            provider_treasury.execute_provider_treasury_rebalance(
+                "rebalance-idem-001",
+                provider_treasury.ProviderTreasuryRebalanceExecuteRequest(),
+                _authorized_request(),
+                service,
+            ),
+        )
+
+    assert exc.value.status_code == 502
+    assert exc.value.detail == "Squid route lookup failed with HTTP 429"
+    assert service.gateway_client.status_calls == []
+
+
 def test_squid_router_execute_uses_treasury_authorization(monkeypatch):
     provider_treasury = _provider_treasury_module()
     service = FakeAccountsService(
