@@ -215,7 +215,10 @@ def build_cowswap_runtime(
     HummingbotCoWAdapter = import_module("hummingbot_cowswap.hummingbot_adapter").HummingbotCoWAdapter
     JsonOrderStore = import_module("hummingbot_cowswap.persistence").JsonOrderStore
 
-    normalized_token_map = token_map or {"WETH-USDC": (BASE_WETH, BASE_USDC)}
+    normalized_token_map = token_map or {
+        "WETH-USDC": (BASE_WETH, BASE_USDC),
+        "USDC-WETH": (BASE_USDC, BASE_WETH),
+    }
     tokens_by_pair = {
         pair: (CoWToken(**base_token), CoWToken(**quote_token))
         for pair, (base_token, quote_token) in normalized_token_map.items()

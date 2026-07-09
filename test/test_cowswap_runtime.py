@@ -612,6 +612,8 @@ def _counted_ctor(returned, name):
 
 
 def _build_runtime_importer():
+    captured = SimpleNamespace(config=None, tokens_by_pair=None)
+
     def models_ctor(**kwargs):
         return SimpleNamespace(**kwargs)
 
@@ -621,7 +623,12 @@ def _build_runtime_importer():
     def connector_ctor(*args, **kwargs):
         return connector_instance
 
-    def adapter_ctor(*args, **kwargs):
+    def config_ctor(**kwargs):
+        captured.config = SimpleNamespace(**kwargs)
+        return captured.config
+
+    def adapter_ctor(connector, tokens_by_pair):
+        captured.tokens_by_pair = tokens_by_pair
         return adapter_instance
 
     order_store_path = None
@@ -633,7 +640,7 @@ def _build_runtime_importer():
 
     modules = {
         "hummingbot_cowswap.models": SimpleNamespace(
-            CoWConfig=models_ctor,
+            CoWConfig=config_ctor,
             CoWToken=models_ctor,
         ),
         "hummingbot_cowswap.connector": SimpleNamespace(
@@ -652,11 +659,11 @@ def _build_runtime_importer():
             return modules[name]
         raise ModuleNotFoundError(name)
 
-    return importer, connector_instance, adapter_instance
+    return importer, connector_instance, adapter_instance, captured
 
 
 def test_build_cowswap_runtime_with_mocked_imports(tmp_path):
-    importer, _, _ = _build_runtime_importer()
+    importer, _, _, captured = _build_runtime_importer()
     data_dir = tmp_path / "data"
 
     runtime, dependencies = build_cowswap_runtime(
@@ -679,6 +686,46 @@ def test_build_cowswap_runtime_with_mocked_imports(tmp_path):
     assert dependencies.order_store is not None
     assert dependencies.owner_address == "0x00000000000000000000000000000000000000ab"
     assert (data_dir / "cowswap-orders.json").parent.exists()
+    assert captured.config.env == "staging"
+
+
+def test_build_cowswap_runtime_default_map_exposes_bidirectional_base_weth_usdc(tmp_path):
+    importer, _, _, captured = _build_runtime_importer()
+
+    build_cowswap_runtime(
+        gateway_url="http://localhost:15888",
+        owner_address="0x00000000000000000000000000000000000000ab",
+        data_dir=tmp_path / "data",
+        env="prod",
+        import_module=importer,
+    )
+
+    assert captured.config.env == "prod"
+    assert set(captured.tokens_by_pair) == {"WETH-USDC", "USDC-WETH"}
+    weth_base, usdc_quote = captured.tokens_by_pair["WETH-USDC"]
+    usdc_base, weth_quote = captured.tokens_by_pair["USDC-WETH"]
+    assert (weth_base.symbol, weth_base.address, weth_base.decimals) == (
+        "WETH",
+        "0x4200000000000000000000000000000000000006",
+        18,
+    )
+    assert (usdc_quote.symbol, usdc_quote.address, usdc_quote.decimals) == (
+        "USDC",
+        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        6,
+    )
+    assert (usdc_base.symbol, usdc_base.address, usdc_base.decimals) == (
+        "USDC",
+        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        6,
+    )
+    assert (weth_quote.symbol, weth_quote.address, weth_quote.decimals) == (
+        "WETH",
+        "0x4200000000000000000000000000000000000006",
+        18,
+    )
+    assert "UNI-USDC" not in captured.tokens_by_pair
+    assert "UNI-WETH" not in captured.tokens_by_pair
 
 
 def test_cowswap_default_dependencies_are_specific_not_unwired():
