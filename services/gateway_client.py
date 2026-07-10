@@ -577,7 +577,7 @@ class GatewayClient:
         destination_asset: str,
         destination_address: str,
         amount: str,
-        max_cost_bps: Optional[int] = None,
+        max_cost_bps: Optional[str] = None,
     ) -> Dict:
         """Create a destination-only treasury target through Gateway."""
         payload = {

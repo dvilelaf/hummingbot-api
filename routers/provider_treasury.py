@@ -64,7 +64,7 @@ async def create_provider_treasury_rebalance(
             "destination_chain": destination_chain,
             "destination_network": destination_network,
             "destination_wallet_ref": destination_identity["wallet_ref"],
-            "max_cost_bps": body.max_cost_bps,
+            "max_cost_bps": _decimal_payload_value(body.max_cost_bps),
             "route_id": body.route_id.strip(),
         }
         database_manager = _database_manager(request, db_manager)
@@ -103,7 +103,7 @@ async def create_provider_treasury_rebalance(
             destination_asset=body.destination_asset.strip(),
             destination_address=destination_identity["address"],
             amount=_decimal_payload_value(body.amount),
-            max_cost_bps=body.max_cost_bps,
+            max_cost_bps=_decimal_payload_value(body.max_cost_bps),
         )
         if isinstance(result, dict):
             result.setdefault("id", body.idempotency_key)
@@ -132,7 +132,8 @@ async def execute_provider_treasury_rebalance(
     db_manager=Depends(get_database_manager),
 ) -> ProviderTreasuryRebalanceResponse:
     """Execute Gateway's durable selection for a previously created target."""
-    del body
+    if body.idempotency_key != rebalance_id:
+        raise HTTPException(status_code=409, detail=IDEMPOTENCY_KEY_CONFLICT_BLOCKER)
     try:
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")

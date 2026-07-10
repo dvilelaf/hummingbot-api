@@ -14,12 +14,14 @@ class ProviderTreasuryRebalanceRequest(BaseModel):
     destination_wallet_ref: str = Field(min_length=1)
     amount: Decimal = Field(gt=0)
     route_id: str = Field(min_length=1)
-    max_cost_bps: int = Field(ge=0)
+    max_cost_bps: Decimal = Field(ge=Decimal("0"))
     idempotency_key: str = Field(min_length=1)
 
 
 class ProviderTreasuryRebalanceExecuteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1)
 
 
 class ProviderTreasuryRebalanceResponse(BaseModel):

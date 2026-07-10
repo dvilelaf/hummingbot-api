@@ -3,6 +3,7 @@ import importlib.util
 import sys
 import types
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,7 @@ class FakeProviderTreasuryRebalanceRepository:
 
 class FakeGatewayClient:
     def __init__(self):
+        self.ping_calls = 0
         self.target_calls = []
         self.execute_calls = []
         self.status_calls = []
@@ -154,6 +156,7 @@ class FakeGatewayClient:
         self.target_result = {"idempotencyKey": "target-funding-1", "status": "built"}
 
     async def ping(self):
+        self.ping_calls += 1
         return True
 
     async def set_marlin_default_wallet(self, **kwargs):
@@ -252,6 +255,25 @@ def test_request_contract_accepts_only_neutral_destination_fields():
         module.ProviderTreasuryRebalanceRequest(**body.model_dump(), destination_address="0xcaller")
 
 
+def test_execute_request_accepts_idempotency_key_and_forbids_extra_fields():
+    module = _provider_treasury_module()
+
+    body = module.ProviderTreasuryRebalanceExecuteRequest(
+        idempotency_key="target-funding-1",
+    )
+
+    assert body.model_dump(exclude_none=True) == {
+        "idempotency_key": "target-funding-1",
+    }
+    with pytest.raises(ValidationError):
+        module.ProviderTreasuryRebalanceExecuteRequest()
+    with pytest.raises(ValidationError):
+        module.ProviderTreasuryRebalanceExecuteRequest(
+            idempotency_key="target-funding-1",
+            provider="squid_router",
+        )
+
+
 def test_create_derives_destination_identity_and_forwards_only_target(monkeypatch):
     module = _provider_treasury_module()
     service = FakeAccountsService()
@@ -287,7 +309,7 @@ def test_create_derives_destination_identity_and_forwards_only_target(monkeypatc
             "destination_chain": "ethereum",
             "destination_network": "base",
             "idempotency_key": "target-funding-1",
-            "max_cost_bps": 100,
+            "max_cost_bps": "100",
         }
     ]
     assert service.gateway_client.statuses_at_target == ["built"]
@@ -300,9 +322,26 @@ def test_create_derives_destination_identity_and_forwards_only_target(monkeypatc
         "destination_chain": "ethereum",
         "destination_network": "base",
         "destination_wallet_ref": "base:mainnet:evm_gateway",
-        "max_cost_bps": 100,
+        "max_cost_bps": "100",
         "route_id": "base-aero",
     }
+
+
+def test_create_forwards_fractional_max_cost_bps_without_precision_loss(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    asyncio.run(
+        module.create_provider_treasury_rebalance(
+            _neutral_request(module, max_cost_bps=Decimal("12.375")),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert service.gateway_client.target_calls[0]["max_cost_bps"] == "12.375"
+    assert _REBALANCE_RECORDS["target-funding-1"].request_payload["max_cost_bps"] == "12.375"
 
 
 def test_hyperliquid_target_uses_mnemonic_derived_arbitrum_identity(monkeypatch):
@@ -332,7 +371,7 @@ def test_hyperliquid_target_uses_mnemonic_derived_arbitrum_identity(monkeypatch)
         "destination_chain": "hyperliquid",
         "destination_network": "mainnet",
         "idempotency_key": "target-funding-1",
-        "max_cost_bps": 100,
+        "max_cost_bps": "100",
     }
 
 
@@ -481,7 +520,9 @@ def test_execute_claims_durable_record_once_and_forwards_only_id(monkeypatch):
     )
 
     async def execute_twice():
-        body = module.ProviderTreasuryRebalanceExecuteRequest()
+        body = module.ProviderTreasuryRebalanceExecuteRequest(
+            idempotency_key="target-funding-1",
+        )
         return await asyncio.gather(
             module.execute_provider_treasury_rebalance(
                 "target-funding-1",
@@ -506,6 +547,30 @@ def test_execute_claims_durable_record_once_and_forwards_only_id(monkeypatch):
     assert _REBALANCE_RECORDS["target-funding-1"].status == "confirmed"
 
 
+def test_execute_rejects_idempotency_key_mismatch_before_gateway(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    with pytest.raises(module.HTTPException) as exc:
+        asyncio.run(
+            module.execute_provider_treasury_rebalance(
+                "target-funding-1",
+                module.ProviderTreasuryRebalanceExecuteRequest(
+                    idempotency_key="different-target",
+                ),
+                _authorized_request(),
+                service,
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "idempotency_key_conflict"
+    assert service.gateway_client.ping_calls == 0
+    assert service.gateway_client.execute_calls == []
+    assert service.gateway_client.status_calls == []
+
+
 @pytest.mark.parametrize("durable_status", ["pending", "confirmed"])
 def test_execute_retry_reconciles_ambiguous_or_terminal_record_without_resubmit(
     monkeypatch,
@@ -528,7 +593,9 @@ def test_execute_retry_reconciles_ambiguous_or_terminal_record_without_resubmit(
     result = asyncio.run(
         recreated_module.execute_provider_treasury_rebalance(
             "target-funding-1",
-            recreated_module.ProviderTreasuryRebalanceExecuteRequest(),
+            recreated_module.ProviderTreasuryRebalanceExecuteRequest(
+                idempotency_key="target-funding-1",
+            ),
             _authorized_request(),
             recreated_service,
         )
@@ -616,7 +683,7 @@ def test_gateway_client_uses_exact_target_paths_and_payload(monkeypatch):
             destination_asset="USDC",
             destination_address="0x00000000000000000000000000000000000000B1",
             amount="6",
-            max_cost_bps=100,
+            max_cost_bps="100",
         )
     )
     asyncio.run(client.execute_treasury_rebalance_target("target-funding-1"))
@@ -634,7 +701,7 @@ def test_gateway_client_uses_exact_target_paths_and_payload(monkeypatch):
                     "destinationChain": "ethereum",
                     "destinationNetwork": "base",
                     "idempotencyKey": "target-funding-1",
-                    "maxCostBps": 100,
+                    "maxCostBps": "100",
                     "mode": "mainnet",
                 }
             },
