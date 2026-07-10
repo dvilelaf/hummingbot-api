@@ -247,29 +247,6 @@ class GatewayClient:
             logger.error(f"Error getting all wallet addresses: {e}")
             return {}
 
-    async def add_wallet(self, chain: str, private_key: str, set_default: bool = True) -> Dict:
-        """Add a wallet to Gateway"""
-        return await self._request("POST", "wallet/add", json={
-            "chain": chain,
-            "privateKey": private_key,
-            "setDefault": set_default
-        })
-
-    async def create_wallet(self, chain: str, set_default: bool = True) -> Dict:
-        """Create a new wallet in Gateway"""
-        return await self._request("POST", "wallet/create", json={
-            "chain": chain,
-            "setDefault": set_default
-        })
-
-    async def show_private_key(self, chain: str, address: str, passphrase: str) -> Dict:
-        """Show private key for a wallet"""
-        return await self._request("POST", "wallet/show-private-key", json={
-            "chain": chain,
-            "address": address,
-            "passphrase": passphrase
-        })
-
     async def sign_typed_data(
         self,
         chain: str,
@@ -307,20 +284,6 @@ class GatewayClient:
             "amount": amount,
         }
         return await self._request("POST", "wallet/send", json=payload)
-
-    async def remove_wallet(self, chain: str, address: str) -> Dict:
-        """Remove a wallet from Gateway"""
-        return await self._request("DELETE", "wallet/remove", json={
-            "chain": chain,
-            "address": address
-        })
-
-    async def set_default_wallet(self, chain: str, address: str) -> Dict:
-        """Set the default wallet for a chain in Gateway"""
-        return await self._request("POST", "wallet/setDefault", json={
-            "chain": chain,
-            "address": address
-        })
 
     async def set_marlin_default_wallet(
         self,

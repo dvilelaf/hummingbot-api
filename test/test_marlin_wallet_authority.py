@@ -107,31 +107,18 @@ def test_marlin_runtime_blocks_connector_wallet_secret_config_updates(
         assert_gateway_config_update_allowed(namespace=namespace, updates=updates)
 
 
-def test_wallet_admin_routes_are_guarded_before_gateway_calls() -> None:
+def test_wallet_admin_routes_are_absent() -> None:
     accounts_source = (ROOT / "routers" / "accounts.py").read_text()
     gateway_source = (ROOT / "routers" / "gateway.py").read_text()
 
-    for function_name, surface in [
-        ("add_gateway_wallet", "Gateway wallet add"),
-        ("set_default_gateway_wallet", "Gateway wallet set-default"),
-        ("remove_gateway_wallet", "Gateway wallet remove"),
-    ]:
-        function_source = accounts_source[accounts_source.index(f"async def {function_name}") :]
-        assert f'assert_not_marlin_wallet_authority_surface("{surface}")' in function_source
-        assert function_source.index("assert_not_marlin_wallet_authority_surface(") < function_source.index(
-            "gateway_client" if function_name == "set_default_gateway_wallet" else "accounts_service.",
-        )
-
-    for function_name, surface in [
-        ("create_wallet", "Gateway wallet create"),
-        ("show_private_key", "Gateway wallet show-private-key"),
-        ("send_transaction", "Gateway wallet send"),
-    ]:
-        function_source = gateway_source[gateway_source.index(f"async def {function_name}") :]
-        assert f'assert_not_marlin_wallet_authority_surface("{surface}")' in function_source
-        assert function_source.index("assert_not_marlin_wallet_authority_surface(") < function_source.index(
-            "gateway_client",
-        )
+    for function_name in (
+        "add_gateway_wallet",
+        "set_default_gateway_wallet",
+        "remove_gateway_wallet",
+    ):
+        assert f"async def {function_name}" not in accounts_source
+    for function_name in ("create_wallet", "show_private_key"):
+        assert f"async def {function_name}" not in gateway_source
 
 
 def test_marlin_scoped_default_wallet_endpoint_is_public_identity_only() -> None:

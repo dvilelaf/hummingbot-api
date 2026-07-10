@@ -2673,65 +2673,6 @@ class AccountsService:
             logger.error(f"Error getting Gateway wallets: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get wallets: {str(e)}")
 
-    async def add_gateway_wallet(self, chain: str, private_key: str, set_default: bool = True) -> Dict:
-        """
-        Add a wallet to Gateway. Gateway handles encryption internally.
-
-        Args:
-            chain: Blockchain chain (e.g., 'solana', 'ethereum')
-            private_key: Wallet private key
-            set_default: Set as default wallet for this chain (default: True)
-
-        Returns:
-            Dictionary with wallet information from Gateway
-        """
-        if not await self.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
-        try:
-            result = await self.gateway_client.add_wallet(chain, private_key, set_default=set_default)
-
-            if "error" in result:
-                raise HTTPException(status_code=400, detail=f"Gateway error: {result['error']}")
-
-            logger.info(f"Added {chain} wallet {result.get('address')} to Gateway")
-            return result
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Error adding Gateway wallet: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to add wallet: {str(e)}")
-
-    async def remove_gateway_wallet(self, chain: str, address: str) -> Dict:
-        """
-        Remove a wallet from Gateway.
-
-        Args:
-            chain: Blockchain chain
-            address: Wallet address to remove
-
-        Returns:
-            Success message
-        """
-        if not await self.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
-        try:
-            result = await self.gateway_client.remove_wallet(chain, address)
-
-            if "error" in result:
-                raise HTTPException(status_code=400, detail=f"Gateway error: {result['error']}")
-
-            logger.info(f"Removed {chain} wallet {address} from Gateway")
-            return {"success": True, "message": f"Successfully removed {chain} wallet"}
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Error removing Gateway wallet: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to remove wallet: {str(e)}")
-
     async def get_gateway_balances(self, chain: str, address: str, network: Optional[str] = None, tokens: Optional[List[str]] = None) -> List[Dict]:
         """
         Get Gateway wallet balances with pricing from rate sources.

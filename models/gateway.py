@@ -28,19 +28,6 @@ class GatewayStatus(BaseModel):
 # Wallet Management Models
 # ============================================
 
-class CreateWalletRequest(BaseModel):
-    """Request to create a new wallet in Gateway"""
-    chain: str = Field(description="Blockchain chain (e.g., 'solana', 'ethereum')")
-    set_default: bool = Field(default=True, description="Set as default wallet for this chain")
-
-
-class ShowPrivateKeyRequest(BaseModel):
-    """Request to show private key for a wallet"""
-    chain: str = Field(description="Blockchain chain (e.g., 'solana', 'ethereum')")
-    address: str = Field(description="Wallet address")
-    passphrase: str = Field(description="Gateway passphrase for decryption")
-
-
 class SendTransactionRequest(BaseModel):
     """Request to send a native token transaction"""
     chain: str = Field(description="Blockchain chain (e.g., 'solana', 'ethereum')")
@@ -62,24 +49,11 @@ class GatewayTransactionPollRequest(BaseModel):
     tx_hash: str = Field(description="Transaction hash/signature to poll")
 
 
-class GatewayWalletCredential(BaseModel):
-    """Credentials for adding an existing wallet to Gateway"""
-    chain: str = Field(description="Blockchain chain (e.g., 'solana', 'ethereum')")
-    private_key: str = Field(description="Wallet private key")
-    set_default: bool = Field(default=True, description="Set as default wallet for this chain")
-
-
 class GatewayWalletInfo(BaseModel):
     """Information about a connected Gateway wallet"""
     chain: str = Field(description="Blockchain chain")
     address: str = Field(description="Wallet address")
     network: str = Field(description="Network the wallet is configured for")
-
-
-class SetDefaultWalletRequest(BaseModel):
-    """Request to set the default wallet for a chain"""
-    chain: str = Field(description="Blockchain chain (e.g., 'solana', 'ethereum')")
-    address: str = Field(description="Wallet address to set as default")
 
 
 class MarlinDefaultWalletRequest(BaseModel):

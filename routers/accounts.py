@@ -4,11 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from starlette import status
 
 from deps import get_accounts_service
-from models import GatewayWalletCredential, MarlinDefaultWalletRequest, SetDefaultWalletRequest
+from models import MarlinDefaultWalletRequest
 from services.accounts_service import AccountsService
 from services.marlin_runtime import (
     assert_marlin_default_wallet_identity,
-    assert_not_marlin_wallet_authority_surface,
     is_marlin_runtime,
     sanitize_account_credential_update,
 )
@@ -173,90 +172,6 @@ async def list_gateway_wallets(accounts_service: AccountsService = Depends(get_a
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/gateway/add-wallet", status_code=status.HTTP_201_CREATED)
-async def add_gateway_wallet(
-    wallet_credential: GatewayWalletCredential,
-    accounts_service: AccountsService = Depends(get_accounts_service)
-):
-    """
-    Add an existing wallet to Gateway using its private key.
-    Gateway handles encryption and storage internally.
-
-    Args:
-        wallet_credential: Wallet credentials (chain, private_key, and optional set_default)
-
-    Returns:
-        Wallet information from Gateway including address
-
-    Raises:
-        HTTPException: 503 if Gateway unavailable, 400 on validation error
-    """
-    try:
-        assert_not_marlin_wallet_authority_surface("Gateway wallet add")
-        result = await accounts_service.add_gateway_wallet(
-            chain=wallet_credential.chain,
-            private_key=wallet_credential.private_key,
-            set_default=wallet_credential.set_default
-        )
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/gateway/wallet/set-default")
-async def set_default_gateway_wallet(
-    request: SetDefaultWalletRequest,
-    accounts_service: AccountsService = Depends(get_accounts_service)
-) -> Dict:
-    """
-    Set the default wallet for a chain in Gateway.
-
-    When multiple wallets are configured for a chain, this endpoint allows
-    switching which wallet is used as the default for operations.
-
-    Args:
-        request: Contains chain and wallet address to set as default
-
-    Returns:
-        Dict with success status and updated wallet info.
-
-    Example: POST /accounts/gateway/wallet/set-default
-    {
-        "chain": "solana",
-        "address": "82SggYRE2Vo4jN4a2pk3aQ4SET4ctafZJGbowmCqyHx5"
-    }
-    """
-    try:
-        assert_not_marlin_wallet_authority_surface("Gateway wallet set-default")
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
-        result = await accounts_service.gateway_client.set_default_wallet(
-            chain=request.chain,
-            address=request.address
-        )
-
-        if result is None:
-            raise HTTPException(status_code=502, detail="Failed to set default wallet: Gateway returned no response")
-
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=f"Failed to set default wallet: {result.get('error')}")
-
-        return {
-            "success": True,
-            "message": f"Set {request.address} as default wallet for {request.chain}",
-            "chain": request.chain,
-            "address": request.address
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error setting default wallet: {str(e)}")
-
-
 @router.post("/gateway/wallets/default")
 async def set_marlin_default_gateway_wallet(
     request: MarlinDefaultWalletRequest,
@@ -307,32 +222,3 @@ async def set_marlin_default_gateway_wallet(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error setting Marlin default wallet: {str(e)}")
-
-
-@router.delete("/gateway/{chain}/{address}")
-async def remove_gateway_wallet(
-    chain: str,
-    address: str,
-    accounts_service: AccountsService = Depends(get_accounts_service)
-):
-    """
-    Remove a wallet from Gateway.
-
-    Args:
-        chain: Blockchain chain (e.g., 'solana', 'ethereum')
-        address: Wallet address to remove
-
-    Returns:
-        Success message
-
-    Raises:
-        HTTPException: 503 if Gateway unavailable
-    """
-    try:
-        assert_not_marlin_wallet_authority_surface("Gateway wallet remove")
-        result = await accounts_service.remove_gateway_wallet(chain, address)
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))

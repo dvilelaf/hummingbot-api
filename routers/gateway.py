@@ -7,12 +7,10 @@ from deps import get_accounts_service, get_gateway_service
 from models import (
     AddPoolRequest,
     AddTokenRequest,
-    CreateWalletRequest,
     GatewayConfig,
     GatewayStatus,
     GatewayTransactionPollRequest,
     SendTransactionRequest,
-    ShowPrivateKeyRequest,
     UpdateApiKeysRequest,
 )
 from services.accounts_service import AccountsService
@@ -971,98 +969,6 @@ async def delete_network_pool(
 # ============================================
 # Wallet Management
 # ============================================
-
-@router.post("/wallets/create")
-async def create_wallet(
-    request: CreateWalletRequest,
-    accounts_service: AccountsService = Depends(get_accounts_service)
-) -> Dict:
-    """
-    Create a new wallet in Gateway.
-
-    Args:
-        request: Contains chain and set_default flag
-
-    Returns:
-        Dict with address and chain of the created wallet.
-
-    Example: POST /gateway/wallets/create
-    {
-        "chain": "solana",
-        "set_default": true
-    }
-    """
-    try:
-        assert_not_marlin_wallet_authority_surface("Gateway wallet create")
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
-        result = await accounts_service.gateway_client.create_wallet(
-            chain=request.chain,
-            set_default=request.set_default
-        )
-
-        if result is None:
-            raise HTTPException(status_code=502, detail="Failed to create wallet: Gateway returned no response")
-
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=f"Failed to create wallet: {result.get('error')}")
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error creating wallet: {str(e)}")
-
-
-@router.post("/wallets/show-private-key")
-async def show_private_key(
-    request: ShowPrivateKeyRequest,
-    accounts_service: AccountsService = Depends(get_accounts_service)
-) -> Dict:
-    """
-    Show private key for a wallet.
-
-    WARNING: This endpoint exposes sensitive information. Use with caution.
-
-    Args:
-        request: Contains chain, address, and passphrase
-
-    Returns:
-        Dict with privateKey field.
-
-    Example: POST /gateway/wallets/show-private-key
-    {
-        "chain": "solana",
-        "address": "<wallet-address>",
-        "passphrase": "<gateway-passphrase>"
-    }
-    """
-    try:
-        assert_not_marlin_wallet_authority_surface("Gateway wallet show-private-key")
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
-        result = await accounts_service.gateway_client.show_private_key(
-            chain=request.chain,
-            address=request.address,
-            passphrase=request.passphrase
-        )
-
-        if result is None:
-            raise HTTPException(status_code=502, detail="Failed to retrieve private key: Gateway returned no response")
-
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=f"Failed to retrieve private key: {result.get('error')}")
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error retrieving private key: {str(e)}")
-
 
 @router.post("/wallets/send")
 async def send_transaction(
