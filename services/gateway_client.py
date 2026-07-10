@@ -568,100 +568,48 @@ class GatewayClient:
             payload["liveActionAuthorization"] = live_action_authorization
         return await self._request("POST", "bridge/execute", json=payload)
 
-    async def build_treasury_rebalance(
+    async def create_treasury_rebalance_target(
         self,
         *,
         idempotency_key: str,
-        wallet_address: str,
+        destination_chain: str,
+        destination_network: str,
+        destination_asset: str,
         destination_address: str,
         amount: str,
-        provider: str = "hyperliquid_bridge2",
-        source_chain: str = "ethereum",
-        source_network: str = "arbitrum",
-        source_asset: str = "USDC",
-        source_asset_decimals: Optional[str] = None,
-        destination_chain: Optional[str] = None,
-        destination_network: Optional[str] = None,
-        destination_asset: str = "USDC",
-        destination_venue: Optional[str] = None,
+        max_cost_bps: Optional[int] = None,
     ) -> Dict:
-        """Build a provider-owned treasury rebalance through Gateway."""
+        """Create a destination-only treasury target through Gateway."""
         payload = {
-            "provider": provider,
             "idempotencyKey": idempotency_key,
             "mode": "mainnet",
-            "sourceChain": source_chain,
-            "sourceNetwork": source_network,
-            "sourceAsset": source_asset,
+            "destinationChain": destination_chain,
+            "destinationNetwork": destination_network,
             "destinationAsset": destination_asset,
-            "walletAddress": wallet_address,
             "destinationAddress": destination_address,
             "amount": amount,
         }
-        if destination_chain is not None:
-            payload["destinationChain"] = destination_chain
-        if source_asset_decimals is not None:
-            payload["sourceAssetDecimals"] = source_asset_decimals
-        if destination_venue is not None:
-            payload["destinationVenue"] = destination_venue
-        elif provider == "hyperliquid_bridge2":
-            payload["destinationVenue"] = "hyperliquid"
-        if destination_network is not None:
-            payload["destinationNetwork"] = destination_network
-        return await self._request("POST", "bridge/rebalance/build", json=payload)
+        if max_cost_bps is not None:
+            payload["maxCostBps"] = max_cost_bps
+        return await self._request("POST", "bridge/rebalance/targets", json=payload)
 
-    async def execute_treasury_rebalance(
+    async def execute_treasury_rebalance_target(
         self,
-        *,
-        idempotency_key: str,
-        wallet_address: str,
-        destination_address: str,
-        amount: str,
-        provider: str = "hyperliquid_bridge2",
-        source_chain: str = "ethereum",
-        source_network: str = "arbitrum",
-        source_asset: str = "USDC",
-        source_asset_decimals: Optional[str] = None,
-        destination_chain: Optional[str] = None,
-        destination_network: Optional[str] = None,
-        destination_asset: str = "USDC",
-        destination_venue: Optional[str] = None,
-        live_action_authorization: Optional[Dict[str, Any]] = None,
-        marlin_provider_intent_authorized: bool = False,
+        rebalance_id: str,
     ) -> Dict:
-        """Execute a provider-owned treasury rebalance through Gateway."""
-        payload = {
-            "provider": provider,
-            "idempotencyKey": idempotency_key,
-            "mode": "mainnet",
-            "sourceChain": source_chain,
-            "sourceNetwork": source_network,
-            "sourceAsset": source_asset,
-            "destinationAsset": destination_asset,
-            "walletAddress": wallet_address,
-            "destinationAddress": destination_address,
-            "amount": amount,
-        }
-        if destination_chain is not None:
-            payload["destinationChain"] = destination_chain
-        if source_asset_decimals is not None:
-            payload["sourceAssetDecimals"] = source_asset_decimals
-        if destination_venue is not None:
-            payload["destinationVenue"] = destination_venue
-        elif provider == "hyperliquid_bridge2":
-            payload["destinationVenue"] = "hyperliquid"
-        if destination_network is not None:
-            payload["destinationNetwork"] = destination_network
-        headers = None
-        if live_action_authorization is not None and marlin_provider_intent_authorized:
-            payload["liveActionAuthorization"] = live_action_authorization
-            token = self._marlin_gateway_provider_intent_token()
-            if token:
-                headers = {"x-marlin-gateway-provider-intent-token": token}
-        return await self._request("POST", "bridge/rebalance/execute", json=payload, headers=headers)
+        """Execute Gateway's durable selection for a treasury target."""
+        path = f"bridge/rebalance/targets/{rebalance_id}/execute"
+        token = self._marlin_gateway_provider_intent_token()
+        if not token:
+            return await self._request("POST", path)
+        return await self._request(
+            "POST",
+            path,
+            headers={"x-marlin-gateway-provider-intent-token": token},
+        )
 
     async def get_treasury_rebalance(self, rebalance_id: str) -> Dict:
-        """Fetch provider-owned treasury rebalance status from Gateway."""
+        """Fetch neutral treasury target status from Gateway."""
         return await self._request("GET", f"bridge/rebalance/{rebalance_id}")
 
     async def execute_quote(

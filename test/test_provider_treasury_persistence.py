@@ -19,7 +19,12 @@ def test_rebalance_repository_persists_and_claims_once_across_sessions(tmp_path)
             repository = ProviderTreasuryRebalanceRepository(session)
             await repository.create_built(
                 "rebalance-001",
-                {"provider": "hyperliquid_bridge2", "amount": "1"},
+                {
+                    "amount": "1",
+                    "destination_chain": "ethereum",
+                    "destination_network": "base",
+                    "destination_wallet_ref": "base:mainnet:evm_gateway",
+                },
                 {"id": "rebalance-001", "status": "built"},
             )
 
@@ -40,8 +45,10 @@ def test_rebalance_repository_persists_and_claims_once_across_sessions(tmp_path)
             restored = await repository.get_rebalance("rebalance-001")
             assert restored.status == "pending"
             assert restored.request_payload == {
-                "provider": "hyperliquid_bridge2",
                 "amount": "1",
+                "destination_chain": "ethereum",
+                "destination_network": "base",
+                "destination_wallet_ref": "base:mainnet:evm_gateway",
             }
             assert restored.response_payload == {"id": "rebalance-001", "status": "built"}
 
