@@ -17,6 +17,7 @@ spec.loader.exec_module(marlin_runtime)
 MARLIN_RUNTIME_PROFILE_ENV = marlin_runtime.MARLIN_RUNTIME_PROFILE_ENV
 assert_gateway_config_update_allowed = marlin_runtime.assert_gateway_config_update_allowed
 assert_not_marlin_wallet_authority_surface = marlin_runtime.assert_not_marlin_wallet_authority_surface
+sanitize_account_credential_update = marlin_runtime.sanitize_account_credential_update
 
 
 def _load_accounts_router(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
@@ -239,8 +240,10 @@ def test_account_credential_route_allows_marked_mnemonic_derived_credentials(
         "/accounts/add-credential/master_account/hyperliquid",
         json={
             "__marlin_mnemonic_derived__": True,
-            "hyperliquid_address": "0x0000000000000000000000000000000000000123",
-            "hyperliquid_secret_key": "0xsecret",
+            "hyperliquid_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
+            "hyperliquid_secret_key": (
+                "0x11a0c3518e4720ac640ee5bda16a5926cfac1edad0dcae96d1f32ab5a463c5f2"
+            ),
         },
     )
 
@@ -250,11 +253,44 @@ def test_account_credential_route_allows_marked_mnemonic_derived_credentials(
             "account_name": "master_account",
             "connector_name": "hyperliquid",
             "credentials": {
-                "hyperliquid_address": "0x0000000000000000000000000000000000000123",
-                "hyperliquid_secret_key": "0xsecret",
+                "hyperliquid_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
+                "hyperliquid_secret_key": (
+                    "0x11a0c3518e4720ac640ee5bda16a5926cfac1edad0dcae96d1f32ab5a463c5f2"
+                ),
             },
         },
     ]
+
+
+@pytest.mark.parametrize(
+    ("connector", "credentials"),
+    [
+        (
+            "hyperliquid",
+            {
+                "hyperliquid_address": "0x0000000000000000000000000000000000000123",
+                "hyperliquid_secret_key": "0xsecret",
+            },
+        ),
+        ("xrpl", {"xrpl_secret_key": "00" + ("0" * 64)}),
+    ],
+)
+def test_marked_wallet_credentials_must_match_fresh_mnemonic_derivation(
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    credentials: dict[str, str],
+) -> None:
+    monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, "marlin")
+    monkeypatch.setenv(
+        "MARLIN_MNEMONIC",
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    )
+
+    with pytest.raises(HTTPException, match="does not match MARLIN_MNEMONIC-derived"):
+        sanitize_account_credential_update(
+            connector_name=connector,
+            credentials={"__marlin_mnemonic_derived__": True, **credentials},
+        )
 
 
 def test_marlin_scoped_default_wallet_route_forwards_public_identity_only(

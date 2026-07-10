@@ -229,6 +229,26 @@ def sanitize_account_credential_update(
             if _wallet_authority_path(_normalize(str(key))) and str(key) not in expected_keys
         }
         if not forbidden_keys:
+            derived = _derive_marlin_credential_values(namespace_key)
+            if derived is not None:
+                for key, expected_value in derived.items():
+                    supplied_value = sanitized.get(key)
+                    if supplied_value is None:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Credential {key} does not match MARLIN_MNEMONIC-derived value",
+                        )
+                    if key.endswith("_address") and str(supplied_value).startswith("0x"):
+                        if not _addresses_equal(str(supplied_value), str(expected_value)):
+                            raise HTTPException(
+                                status_code=403,
+                                detail=f"Credential {key} does not match MARLIN_MNEMONIC-derived value",
+                            )
+                    elif str(supplied_value) != str(expected_value):
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Credential {key} does not match MARLIN_MNEMONIC-derived value",
+                        )
             return sanitized
     assert_gateway_config_update_allowed(namespace=connector_name, updates=sanitized)
     return sanitized
@@ -297,3 +317,44 @@ def _addresses_equal(left: str, right: str) -> bool:
     if left == right:
         return True
     return left.startswith("0x") and right.startswith("0x") and left.lower() == right.lower()
+
+
+def _derive_marlin_credential_values(namespace_key: str) -> dict[str, str] | None:
+    """Derive expected wallet credential values from MARLIN_MNEMONIC."""
+    if namespace_key == "hyperliquid":
+        return _derive_hyperliquid_mainnet_credentials()
+    if namespace_key in {"xrpl", "xrpledger", "xrp-ledger"}:
+        return _derive_xrpl_credentials()
+    return None
+
+
+def _derive_hyperliquid_mainnet_credentials() -> dict[str, str]:
+    seed_bytes = _marlin_seed_bytes()
+    wallet = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(20)
+    address = wallet.Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+    return {
+        "hyperliquid_address": str(address.PublicKey().ToAddress()),
+        "hyperliquid_secret_key": f"0x{address.PrivateKey().Raw().ToHex()}",
+    }
+
+
+def _derive_xrpl_credentials() -> dict[str, str]:
+    seed_bytes = _marlin_seed_bytes()
+    wallet = Bip44.FromSeed(seed_bytes, Bip44Coins.RIPPLE).Purpose().Coin().Account(0)
+    secret_hex = wallet.Change(Bip44Changes.CHAIN_EXT).AddressIndex(0).PrivateKey().Raw().ToHex()
+    return {"xrpl_secret_key": f"00{secret_hex}"}
+
+
+def _marlin_seed_bytes() -> bytes:
+    mnemonic = os.environ.get("MARLIN_MNEMONIC", "").strip()
+    if not mnemonic:
+        raise HTTPException(
+            status_code=500,
+            detail="MARLIN_MNEMONIC is required for credential verification",
+        )
+    if len(mnemonic) >= 2 and mnemonic[0] in {"'", '"'} and mnemonic[-1] == mnemonic[0]:
+        mnemonic = mnemonic[1:-1].strip()
+    try:
+        return Bip39SeedGenerator(mnemonic).Generate()
+    except (MnemonicChecksumError, ValueError):
+        raise HTTPException(status_code=500, detail="MARLIN_MNEMONIC is invalid") from None
