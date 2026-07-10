@@ -1,12 +1,10 @@
 import asyncio
-import json
 import logging
 import os
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set
-from urllib import request as urllib_request
 
 from fastapi import HTTPException
 from hummingbot.client.config.config_crypt import ETHKeyFileSecretManger
@@ -51,8 +49,6 @@ GATEWAY_PRICE_CONNECTORS = {
 GATEWAY_PRICE_FETCH_TIMEOUT_SECONDS = 2
 COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}
 SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_perpetual_testnet", "hyperliquid_testnet"}
-HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
-HYPERLIQUID_TESTNET_INFO_URL = "https://api.hyperliquid-testnet.xyz/info"
 ORDER_TRACKING_CONFIRM_TIMEOUT_SECONDS = 5
 ORDER_TRACKING_CONFIRM_POLL_SECONDS = 0.2
 
@@ -66,111 +62,6 @@ def _gateway_chain_network_filters(connector_names: Optional[List[str]]) -> Opti
         for connector_name in connector_names
         if connector_name.startswith(GATEWAY_CHAIN_PREFIXES)
     )
-
-
-async def _fetch_hyperliquid_clearinghouse_state(address: str, *, testnet: bool = False) -> dict[str, Any]:
-    """Fetch public margin state for a Hyperliquid user address."""
-    payload = json.dumps({"type": "clearinghouseState", "user": address}).encode()
-    req = urllib_request.Request(
-        HYPERLIQUID_TESTNET_INFO_URL if testnet else HYPERLIQUID_INFO_URL,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-    )
-
-    def _read() -> dict[str, Any]:
-        with urllib_request.urlopen(req, timeout=10) as response:
-            return json.loads(response.read().decode())
-
-    return await asyncio.to_thread(_read)
-
-
-async def _fetch_hyperliquid_testnet_clearinghouse_state(address: str) -> dict[str, Any]:
-    """Fetch public testnet margin state for a Hyperliquid user address."""
-    return await _fetch_hyperliquid_clearinghouse_state(address, testnet=True)
-
-
-def _hyperliquid_address(connector: Any, connector_name: str) -> Optional[str]:
-    if connector_name == "hyperliquid":
-        bridge2_address = _hyperliquid_bridge2_wallet_address()
-        if bridge2_address:
-            return bridge2_address
-    mainnet_first = (
-        "hyperliquid_address",
-        "account_address",
-        "_account_address",
-        "wallet_address",
-        "_wallet_address",
-        "hyperliquid_testnet_address",
-    )
-    testnet_first = (
-        "hyperliquid_testnet_address",
-        "hyperliquid_address",
-        "account_address",
-        "_account_address",
-        "wallet_address",
-        "_wallet_address",
-    )
-    attr_names = testnet_first if connector_name == "hyperliquid_testnet" else mainnet_first
-    for attr_name in attr_names:
-        value = getattr(connector, attr_name, None)
-        if isinstance(value, str) and value.startswith("0x"):
-            return value
-    return None
-
-
-def _hyperliquid_bridge2_wallet_address() -> Optional[str]:
-    policy = GATEWAY_WALLET_POLICIES.get(("arbitrum", "mainnet"))
-    if policy is None:
-        return None
-    derivation_path, _, coin = policy
-    try:
-        return _derive_marlin_public_address(derivation_path=derivation_path, coin=coin)
-    except Exception as exc:
-        logger.warning("Failed to derive Hyperliquid Bridge2 wallet address: %s", exc)
-        return None
-
-
-def _hyperliquid_testnet_address(connector: Any) -> Optional[str]:
-    for attr_name in (
-        "hyperliquid_testnet_address",
-        "hyperliquid_address",
-        "account_address",
-        "_account_address",
-        "wallet_address",
-        "_wallet_address",
-    ):
-        value = getattr(connector, attr_name, None)
-        if isinstance(value, str) and value.startswith("0x"):
-            return value
-    return None
-
-
-async def _hyperliquid_collateral_token_info(connector: Any, connector_name: str) -> Optional[dict[str, float | str]]:
-    address = _hyperliquid_address(connector, connector_name)
-    if not address:
-        return None
-    try:
-        state = await _fetch_hyperliquid_clearinghouse_state(
-            address,
-            testnet=connector_name == "hyperliquid_testnet",
-        )
-    except Exception as exc:
-        logger.warning("Failed to fetch %s collateral state: %s", connector_name, exc)
-        return None
-    amount = Decimal(str(state.get("withdrawable") or state.get("marginSummary", {}).get("accountValue") or "0"))
-    if amount <= 0:
-        return None
-    return {
-        "token": "USDC",
-        "units": float(amount),
-        "price": 1.0,
-        "value": float(amount),
-        "available_units": float(amount),
-    }
-
-
-async def _hyperliquid_testnet_collateral_token_info(connector: Any) -> Optional[dict[str, float | str]]:
-    return await _hyperliquid_collateral_token_info(connector, "hyperliquid_testnet")
 
 
 class AccountTradingInterface:
@@ -1046,11 +937,6 @@ class AccountsService:
 
         balances = [{"token": key, "units": value} for key, value in connector.get_all_balances().items() if
                     value != Decimal("0") and key not in settings.banned_tokens]
-        if not balances and connector_name in {"hyperliquid", "hyperliquid_testnet"}:
-            collateral_info = await _hyperliquid_collateral_token_info(connector, connector_name)
-            if collateral_info is not None:
-                return [collateral_info]
-
         tokens_info = []
         missing_pairs = []  # trading pairs the oracle can't price
         missing_indices = []  # indices into tokens_info that need patching
@@ -1844,6 +1730,7 @@ class AccountsService:
 
             await self._confirm_connector_order_tracked(
                 connector=connector,
+                account_name=account_name,
                 connector_name=connector_name,
                 order_id=order_id,
                 trading_pair=trading_pair,
@@ -1862,21 +1749,50 @@ class AccountsService:
         self,
         *,
         connector,
+        account_name: str,
         connector_name: str,
         order_id: str,
         trading_pair: str,
     ) -> None:
-        """Fail closed when Hummingbot returns an id but does not track the order."""
+        """Confirm acceptance, preserving an authoritative terminal rejection."""
         deadline = time.monotonic() + ORDER_TRACKING_CONFIRM_TIMEOUT_SECONDS
+        saw_terminal_failure = False
         while time.monotonic() < deadline:
             in_flight_orders = getattr(connector, "in_flight_orders", {})
             order = in_flight_orders.get(order_id)
-            if order is not None and (
+            order_state = getattr(order, "current_state", None)
+            if order_state is OrderState.FAILED:
+                saw_terminal_failure = True
+            elif order is not None and (
                 getattr(order, "exchange_order_id", None)
-                or getattr(order, "current_state", None) is not OrderState.PENDING_CREATE
+                or order_state is not OrderState.PENDING_CREATE
             ):
                 return
+
+            failed, reason = await self._persisted_order_failure(
+                account_name=account_name,
+                connector_name=connector_name,
+                order_id=order_id,
+            )
+            if failed:
+                self._raise_terminal_order_rejection(
+                    connector_name=connector_name,
+                    order_id=order_id,
+                    reason=reason,
+                )
             await asyncio.sleep(ORDER_TRACKING_CONFIRM_POLL_SECONDS)
+
+        failed, reason = await self._persisted_order_failure(
+            account_name=account_name,
+            connector_name=connector_name,
+            order_id=order_id,
+        )
+        if failed or saw_terminal_failure:
+            self._raise_terminal_order_rejection(
+                connector_name=connector_name,
+                order_id=order_id,
+                reason=reason,
+            )
 
         logger.error(
             "Connector %s returned order id %s for %s but did not confirm exchange acceptance",
@@ -1891,6 +1807,42 @@ class AccountsService:
                 f"for {trading_pair} but did not confirm exchange acceptance"
             ),
         )
+
+    async def _persisted_order_failure(
+        self,
+        *,
+        account_name: str,
+        connector_name: str,
+        order_id: str,
+    ) -> tuple[bool, Optional[str]]:
+        """Return a recorder-confirmed failure without treating lookup errors as truth."""
+        if not self.db_manager:
+            return False, None
+        try:
+            async with self.db_manager.get_session_context() as session:
+                order = await OrderRepository(session).get_order_by_client_id(order_id)
+        except Exception as exc:
+            logger.warning("Could not inspect order %s confirmation state: %s", order_id, exc)
+            return False, None
+
+        if (
+            order is None
+            or order.status != "FAILED"
+            or order.account_name != account_name
+            or order.connector_name != connector_name
+        ):
+            return False, None
+        return True, order.error_message
+
+    @staticmethod
+    def _raise_terminal_order_rejection(
+        *,
+        connector_name: str,
+        order_id: str,
+        reason: Optional[str],
+    ) -> None:
+        detail = reason or f"Connector {connector_name} rejected order {order_id}"
+        raise HTTPException(status_code=400, detail=detail)
 
     async def _ensure_trading_pair_rules_loaded(
         self,

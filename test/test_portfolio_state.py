@@ -98,122 +98,40 @@ class TestBalanceRefresh:
         assert result[0]["units"] == 500.0
 
     @pytest.mark.asyncio
-    async def test_hyperliquid_testnet_uses_public_collateral_when_balances_are_empty(
-        self, accounts_service, mock_connector, monkeypatch
+    @pytest.mark.parametrize("connector_name", ["hyperliquid", "hyperliquid_testnet"])
+    async def test_hyperliquid_spot_does_not_expose_perpetual_margin_as_usdc(
+        self, accounts_service, mock_connector, connector_name
     ):
-        """Hyperliquid testnet margin collateral is usable quote balance."""
-        import services.accounts_service as accounts_module
-
-        mock_connector.get_all_balances.return_value = {}
-        mock_connector.get_available_balance.return_value = Decimal("0")
-        mock_connector.hyperliquid_testnet_address = "0x043F9e880763576c15eBCB7d4f0D7453F2Db1708"
-        monkeypatch.setattr(
-            accounts_module,
-            "_fetch_hyperliquid_testnet_clearinghouse_state",
-            AsyncMock(
-                return_value={
-                    "withdrawable": "999.0",
-                    "marginSummary": {"accountValue": "999.0"},
-                }
-            ),
-        )
-
-        result = await accounts_service._get_connector_tokens_info(
-            mock_connector, "hyperliquid_testnet"
-        )
-
-        assert result == [
-            {
-                "token": "USDC",
-                "units": 999.0,
-                "price": 1.0,
-                "value": 999.0,
-                "available_units": 999.0,
-            }
-        ]
-
-    @pytest.mark.asyncio
-    async def test_hyperliquid_mainnet_uses_public_collateral_when_balances_are_empty(
-        self, accounts_service, mock_connector, monkeypatch
-    ):
-        """Hyperliquid mainnet Bridge2 collateral is usable quote balance."""
-        import services.accounts_service as accounts_module
-
-        calls = []
-
-        async def fake_fetch(address, *, testnet=False):
-            calls.append((address, testnet))
-            return {
-                "withdrawable": "5.0",
-                "marginSummary": {"accountValue": "5.0"},
-            }
-
+        """An empty spot account must not inherit clearinghouse margin collateral."""
         mock_connector.get_all_balances.return_value = {}
         mock_connector.get_available_balance.return_value = Decimal("0")
         mock_connector.hyperliquid_address = "0x6394Bd277f792E6A6CDE7B6f9D075f7cfAbB5ff4"
-        monkeypatch.setattr(
-            accounts_module,
-            "_fetch_hyperliquid_clearinghouse_state",
-            fake_fetch,
-        )
 
         result = await accounts_service._get_connector_tokens_info(
-            mock_connector, "hyperliquid"
+            mock_connector, connector_name
         )
 
-        assert calls == [("0x6394Bd277f792E6A6CDE7B6f9D075f7cfAbB5ff4", False)]
-        assert result == [
-            {
-                "token": "USDC",
-                "units": 5.0,
-                "price": 1.0,
-                "value": 5.0,
-                "available_units": 5.0,
-            }
-        ]
+        assert result == []
 
     @pytest.mark.asyncio
-    async def test_hyperliquid_mainnet_derives_bridge2_address_when_connector_hides_credentials(
-        self, accounts_service, mock_connector, monkeypatch
+    async def test_hyperliquid_perpetual_exposes_connector_margin_balance(
+        self, accounts_service, mock_connector
     ):
-        """Hyperliquid mainnet collateral falls back to the Bridge2 credited wallet."""
-        import services.accounts_service as accounts_module
-
-        calls = []
-
-        async def fake_fetch(address, *, testnet=False):
-            calls.append((address, testnet))
-            return {
-                "withdrawable": "5.0",
-                "marginSummary": {"accountValue": "5.0"},
-            }
-
-        mock_connector.get_all_balances.return_value = {}
-        mock_connector.get_available_balance.return_value = Decimal("0")
-        mock_connector.hyperliquid_address = "0x0000000000000000000000000000000000000001"
-        monkeypatch.setattr(
-            accounts_module,
-            "_derive_marlin_public_address",
-            lambda **_kwargs: "0x6394Bd277f792E6A6CDE7B6f9D075f7cfAbB5ff4",
-        )
-        monkeypatch.setattr(
-            accounts_module,
-            "_fetch_hyperliquid_clearinghouse_state",
-            fake_fetch,
-        )
+        """Perpetual collateral remains visible through its owning connector."""
+        mock_connector.get_all_balances.return_value = {"USD": Decimal("15")}
+        mock_connector.get_available_balance.return_value = Decimal("15")
 
         result = await accounts_service._get_connector_tokens_info(
-            mock_connector, "hyperliquid"
+            mock_connector, "hyperliquid_perpetual"
         )
 
-        assert calls == [("0x6394Bd277f792E6A6CDE7B6f9D075f7cfAbB5ff4", False)]
         assert result == [
             {
-                "token": "USDC",
-                "units": 5.0,
+                "token": "USD",
+                "units": 15.0,
                 "price": 1.0,
-                "value": 5.0,
-                "available_units": 5.0,
+                "value": 15.0,
+                "available_units": 15.0,
             }
         ]
 
