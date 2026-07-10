@@ -245,7 +245,14 @@ def test_gateway_cow_signer_uses_marlin_scoped_gateway_route(monkeypatch):
                     "connector_id": "cowswap",
                     "network": "base",
                     "payload_hash": cowswap_runtime._canonical_payload_hash(
-                        {"sellToken": "0x4200000000000000000000000000000000000006"},
+                        {
+                            "domain": {
+                                "chainId": 8453,
+                                "verifyingContract": "0x9008d19f58aabd9ed0d60971565aa8510560ab41",
+                            },
+                            "types": {"Order": [{"name": "sellToken", "type": "address"}]},
+                            "value": {"sellToken": "0x4200000000000000000000000000000000000006"},
+                        },
                     ),
                     "scope": "provider_intent",
                     "signing_type": "Order",

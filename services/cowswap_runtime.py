@@ -140,7 +140,13 @@ class GatewayCowSigner:
                 "action": "cowswap_sign_typed_data",
                 "connector_id": COWSWAP_CONNECTOR_NAME,
                 "network": self.network,
-                "payload_hash": _canonical_payload_hash(value),
+                "payload_hash": _canonical_payload_hash(
+                    {
+                        "domain": dict(domain),
+                        "types": dict(types),
+                        "value": dict(value),
+                    },
+                ),
                 "scope": "provider_intent",
                 "signing_type": signing_type,
                 "source": "marlin",

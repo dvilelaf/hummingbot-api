@@ -487,6 +487,10 @@ async def update_network_config(
     Example: POST /gateway/networks/solana-mainnet-beta
     """
     try:
+        assert_gateway_config_update_allowed(
+            namespace=network_id,
+            updates=config_updates,
+        )
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 

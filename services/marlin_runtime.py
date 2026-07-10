@@ -254,6 +254,17 @@ def sanitize_account_credential_update(
     return sanitized
 
 
+def assert_connector_credential_deletion_allowed(connector_name: str) -> None:
+    """Keep mnemonic-derived provider credentials materialized in Marlin runtime."""
+    if not is_marlin_runtime():
+        return
+    if _normalize(connector_name) in MNEMONIC_DERIVED_CREDENTIAL_KEYS:
+        raise HTTPException(
+            status_code=403,
+            detail="Mnemonic-derived connector credentials cannot be deleted in Marlin runtime",
+        )
+
+
 def assert_marlin_default_wallet_identity(
     *,
     chain: str,
@@ -322,19 +333,21 @@ def _addresses_equal(left: str, right: str) -> bool:
 def _derive_marlin_credential_values(namespace_key: str) -> dict[str, str] | None:
     """Derive expected wallet credential values from MARLIN_MNEMONIC."""
     if namespace_key == "hyperliquid":
-        return _derive_hyperliquid_mainnet_credentials()
+        return _derive_hyperliquid_credentials(prefix="hyperliquid")
+    if namespace_key in {"hyperliquidtestnet", "hyperliquid_testnet"}:
+        return _derive_hyperliquid_credentials(prefix="hyperliquid_testnet")
     if namespace_key in {"xrpl", "xrpledger", "xrp-ledger"}:
         return _derive_xrpl_credentials()
     return None
 
 
-def _derive_hyperliquid_mainnet_credentials() -> dict[str, str]:
+def _derive_hyperliquid_credentials(*, prefix: str) -> dict[str, str]:
     seed_bytes = _marlin_seed_bytes()
     wallet = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM).Purpose().Coin().Account(20)
     address = wallet.Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
     return {
-        "hyperliquid_address": str(address.PublicKey().ToAddress()),
-        "hyperliquid_secret_key": f"0x{address.PrivateKey().Raw().ToHex()}",
+        f"{prefix}_address": str(address.PublicKey().ToAddress()),
+        f"{prefix}_secret_key": f"0x{address.PrivateKey().Raw().ToHex()}",
     }
 
 

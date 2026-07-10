@@ -7,6 +7,7 @@ from deps import get_accounts_service
 from models import MarlinDefaultWalletRequest
 from services.accounts_service import AccountsService
 from services.marlin_runtime import (
+    assert_connector_credential_deletion_allowed,
     assert_marlin_default_wallet_identity,
     is_marlin_runtime,
     sanitize_account_credential_update,
@@ -111,6 +112,7 @@ async def delete_credential(account_name: str, connector_name: str, accounts_ser
         HTTPException: 404 if credential not found
     """
     try:
+        assert_connector_credential_deletion_allowed(connector_name)
         await accounts_service.delete_credentials(account_name, connector_name)
         return {"message": "Credential deleted successfully."}
     except FileNotFoundError as e:

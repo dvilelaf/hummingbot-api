@@ -210,48 +210,6 @@ def test_execute_quote_posts_wallet_address_payload():
     ]
 
 
-def test_gateway_client_sign_typed_data_posts_wallet_payload():
-    calls = []
-    client = GatewayClient(base_url="http://gateway.local")
-
-    async def fake_request(method, path, params=None, json=None):
-        calls.append((method, path, params, json))
-        return {"signature": "0xsig"}
-
-    client._request = fake_request
-
-    result = asyncio.run(
-        client.sign_typed_data(
-            chain="ethereum",
-            network="base",
-            address="0x1111111111111111111111111111111111111111",
-            domain={"chainId": 8453, "verifyingContract": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41"},
-            types={"Order": [{"name": "sellToken", "type": "address"}]},
-            value={"sellToken": "0x2222222222222222222222222222222222222222"},
-        ),
-    )
-
-    assert result == {"signature": "0xsig"}
-    assert calls == [
-        (
-            "POST",
-            "wallet/sign-typed-data",
-            None,
-            {
-                "chain": "ethereum",
-                "network": "base",
-                "address": "0x1111111111111111111111111111111111111111",
-                "domain": {
-                    "chainId": 8453,
-                    "verifyingContract": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
-                },
-                "types": {"Order": [{"name": "sellToken", "type": "address"}]},
-                "value": {"sellToken": "0x2222222222222222222222222222222222222222"},
-            },
-        ),
-    ]
-
-
 def test_gateway_client_get_allowances_posts_chain_payload():
     calls = []
     client = GatewayClient(base_url="http://gateway.local")

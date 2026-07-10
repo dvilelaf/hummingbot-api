@@ -16,6 +16,7 @@ spec.loader.exec_module(marlin_runtime)
 
 MARLIN_RUNTIME_PROFILE_ENV = marlin_runtime.MARLIN_RUNTIME_PROFILE_ENV
 assert_gateway_config_update_allowed = marlin_runtime.assert_gateway_config_update_allowed
+assert_connector_credential_deletion_allowed = marlin_runtime.assert_connector_credential_deletion_allowed
 assert_not_marlin_wallet_authority_surface = marlin_runtime.assert_not_marlin_wallet_authority_surface
 sanitize_account_credential_update = marlin_runtime.sanitize_account_credential_update
 
@@ -141,6 +142,21 @@ def test_gateway_config_update_blocks_wallet_authority_paths_before_gateway_call
     assert function_source.index("assert_gateway_config_update_allowed(") < function_source.index(
         "gateway_client.ping(",
     )
+    network_source = gateway_source[gateway_source.index("async def update_network_config") :]
+    assert network_source.index("assert_gateway_config_update_allowed(") < network_source.index(
+        "gateway_client.ping(",
+    )
+
+
+@pytest.mark.parametrize("connector", ["hyperliquid", "hyperliquid_testnet", "xrpl"])
+def test_mnemonic_credential_deletion_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+) -> None:
+    monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, "marlin")
+
+    with pytest.raises(HTTPException, match="cannot be deleted"):
+        assert_connector_credential_deletion_allowed(connector)
 
 
 def test_account_credential_route_blocks_wallet_secret_updates_before_service_call(
@@ -259,6 +275,13 @@ def test_account_credential_route_allows_marked_mnemonic_derived_credentials(
                 "hyperliquid_secret_key": "0xsecret",
             },
         ),
+        (
+            "hyperliquid_testnet",
+            {
+                "hyperliquid_testnet_address": "0x0000000000000000000000000000000000000123",
+                "hyperliquid_testnet_secret_key": "0xsecret",
+            },
+        ),
         ("xrpl", {"xrpl_secret_key": "00" + ("0" * 64)}),
     ],
 )
@@ -278,6 +301,30 @@ def test_marked_wallet_credentials_must_match_fresh_mnemonic_derivation(
             connector_name=connector,
             credentials={"__marlin_mnemonic_derived__": True, **credentials},
         )
+
+
+def test_hyperliquid_testnet_uses_the_same_chain_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, "marlin")
+    monkeypatch.setenv(
+        "MARLIN_MNEMONIC",
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    )
+    credentials = {
+        "__marlin_mnemonic_derived__": True,
+        "hyperliquid_testnet_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
+        "hyperliquid_testnet_secret_key": (
+            "0x11a0c3518e4720ac640ee5bda16a5926cfac1edad0dcae96d1f32ab5a463c5f2"
+        ),
+    }
+
+    result = sanitize_account_credential_update(
+        connector_name="hyperliquid_testnet",
+        credentials=credentials,
+    )
+
+    assert "__marlin_mnemonic_derived__" not in result
 
 
 def test_marlin_scoped_default_wallet_route_forwards_public_identity_only(
