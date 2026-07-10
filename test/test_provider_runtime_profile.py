@@ -36,6 +36,7 @@ def test_provider_runtime_router_surface_is_provider_boundary_only():
         "gateway_swap",
         "market_data",
         "rate_oracle",
+        "accounts.credential_router",
     )
     removed = (
         "docker",
@@ -49,7 +50,6 @@ def test_provider_runtime_router_surface_is_provider_boundary_only():
         "storage",
         "executors",
         "websocket",
-        "accounts",
     )
 
     for router_name in kept:
@@ -71,6 +71,7 @@ def test_provider_runtime_does_not_eager_import_orchestration_services():
 def test_provider_runtime_registered_routes_include_bridge_without_admin_surfaces():
     source = _main_source()
     provider = source[source.index("def _include_provider_routers()") : source.index("def _include_full_routers()")]
+    assert "accounts.credential_router" in provider
     assert "accounts.router" not in provider
     assert "gateway.router" not in provider
     assert "gateway_bridge.router" in provider

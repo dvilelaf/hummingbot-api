@@ -14,6 +14,7 @@ from services.marlin_runtime import (
 )
 
 router = APIRouter(tags=["Accounts"], prefix="/accounts")
+credential_router = APIRouter(tags=["Accounts"])
 
 
 @router.get("/", response_model=List[str])
@@ -119,7 +120,7 @@ async def delete_credential(account_name: str, connector_name: str, accounts_ser
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.post("/add-credential/{account_name}/{connector_name}", status_code=status.HTTP_201_CREATED)
+@credential_router.post("/add-credential/{account_name}/{connector_name}", status_code=status.HTTP_201_CREATED)
 async def add_credential(account_name: str, connector_name: str, credentials: Dict, accounts_service: AccountsService = Depends(get_accounts_service)):
     """
     Add or update connector credentials (API keys) for a specific account and connector.
@@ -224,3 +225,6 @@ async def set_marlin_default_gateway_wallet(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error setting Marlin default wallet: {str(e)}")
+
+
+router.include_router(credential_router)

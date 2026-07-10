@@ -494,6 +494,7 @@ def auth_user(
 
 def _include_provider_routers() -> None:
     from routers import (
+        accounts,
         connectors,
         gateway_bridge,
         gateway_swap,
@@ -506,6 +507,11 @@ def _include_provider_routers() -> None:
     )
 
     app.include_router(connectors.router, dependencies=[Depends(auth_user)])
+    app.include_router(
+        accounts.credential_router,
+        prefix="/accounts",
+        dependencies=[Depends(auth_user)],
+    )
     app.include_router(portfolio.router, dependencies=[Depends(auth_user)])
     app.include_router(trading.router, dependencies=[Depends(auth_user)])
     app.include_router(provider_boundary.router, dependencies=[Depends(auth_user)])
