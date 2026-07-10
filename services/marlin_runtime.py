@@ -15,6 +15,11 @@ MARLIN_RUNTIME_PROFILE = "marlin"
 HUMMINGBOT_API_RUNTIME_PROFILE_ENV = "HUMMINGBOT_API_RUNTIME_PROFILE"
 HUMMINGBOT_API_PROVIDER_PROFILES = frozenset({"provider", "marlin"})
 MARLIN_MNEMONIC_DERIVED_CREDENTIAL_FLAG = "__marlin_mnemonic_derived__"
+HYPERLIQUID_CREDENTIAL_PREFIXES = {
+    "hyperliquid": "hyperliquid",
+    "hyperliquid_perpetual": "hyperliquid_perpetual",
+    "hyperliquidperpetual": "hyperliquid_perpetual",
+}
 WALLET_AUTHORITY_CONFIG_KEYS = frozenset(
     {
         "defaultwallet",
@@ -55,6 +60,12 @@ WALLET_AUTHORITY_NAMESPACES = frozenset(
 )
 MNEMONIC_DERIVED_CREDENTIAL_KEYS = {
     "hyperliquid": frozenset({"hyperliquid_address", "hyperliquid_secret_key"}),
+    "hyperliquid_perpetual": frozenset(
+        {"hyperliquid_perpetual_address", "hyperliquid_perpetual_secret_key"},
+    ),
+    "hyperliquidperpetual": frozenset(
+        {"hyperliquid_perpetual_address", "hyperliquid_perpetual_secret_key"},
+    ),
     "hyperliquidtestnet": frozenset(
         {"hyperliquid_testnet_address", "hyperliquid_testnet_secret_key"},
     ),
@@ -343,8 +354,9 @@ def _addresses_equal(left: str, right: str) -> bool:
 
 def _derive_marlin_credential_values(namespace_key: str) -> dict[str, str] | None:
     """Derive expected wallet credential values from MARLIN_MNEMONIC."""
-    if namespace_key == "hyperliquid":
-        return _derive_hyperliquid_credentials(prefix="hyperliquid")
+    hyperliquid_prefix = HYPERLIQUID_CREDENTIAL_PREFIXES.get(namespace_key)
+    if hyperliquid_prefix is not None:
+        return _derive_hyperliquid_credentials(prefix=hyperliquid_prefix)
     if namespace_key in {"hyperliquidtestnet", "hyperliquid_testnet"}:
         return _derive_hyperliquid_credentials(prefix="hyperliquid_testnet")
     if namespace_key in {"xrpl", "xrpledger", "xrp-ledger"}:

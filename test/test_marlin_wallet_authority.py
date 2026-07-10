@@ -148,7 +148,18 @@ def test_gateway_config_update_blocks_wallet_authority_paths_before_gateway_call
     )
 
 
-@pytest.mark.parametrize("connector", ["hyperliquid", "hyperliquid_testnet", "xrpl"])
+@pytest.mark.parametrize(
+    "connector",
+    [
+        "hyperliquid",
+        "hyperliquid_perpetual",
+        "hyperliquid-perpetual",
+        "hyperliquid.perpetual",
+        "hyperliquid/perpetual",
+        "hyperliquid_testnet",
+        "xrpl",
+    ],
+)
 def test_mnemonic_credential_deletion_is_blocked(
     monkeypatch: pytest.MonkeyPatch,
     connector: str,
@@ -207,8 +218,17 @@ def test_account_credential_route_blocks_wallet_secret_updates_before_service_ca
     assert fake_service.add_calls == []
 
 
+@pytest.mark.parametrize(
+    ("connector", "credential_prefix"),
+    [
+        ("hyperliquid", "hyperliquid"),
+        ("hyperliquid_perpetual", "hyperliquid_perpetual"),
+    ],
+)
 def test_account_credential_route_allows_marked_mnemonic_derived_credentials(
     monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    credential_prefix: str,
 ) -> None:
     class FakeAccountsService:
         def __init__(self) -> None:
@@ -240,11 +260,11 @@ def test_account_credential_route_allows_marked_mnemonic_derived_credentials(
     )
 
     response = TestClient(app).post(
-        "/accounts/add-credential/master_account/hyperliquid",
+        f"/accounts/add-credential/master_account/{connector}",
         json={
             "__marlin_mnemonic_derived__": True,
-            "hyperliquid_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
-            "hyperliquid_secret_key": (
+            f"{credential_prefix}_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
+            f"{credential_prefix}_secret_key": (
                 "0x11a0c3518e4720ac640ee5bda16a5926cfac1edad0dcae96d1f32ab5a463c5f2"
             ),
         },
@@ -254,10 +274,10 @@ def test_account_credential_route_allows_marked_mnemonic_derived_credentials(
     assert fake_service.add_calls == [
         {
             "account_name": "master_account",
-            "connector_name": "hyperliquid",
+            "connector_name": connector,
             "credentials": {
-                "hyperliquid_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
-                "hyperliquid_secret_key": (
+                f"{credential_prefix}_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
+                f"{credential_prefix}_secret_key": (
                     "0x11a0c3518e4720ac640ee5bda16a5926cfac1edad0dcae96d1f32ab5a463c5f2"
                 ),
             },
@@ -273,6 +293,13 @@ def test_account_credential_route_allows_marked_mnemonic_derived_credentials(
             {
                 "hyperliquid_address": "0x0000000000000000000000000000000000000123",
                 "hyperliquid_secret_key": "0xsecret",
+            },
+        ),
+        (
+            "hyperliquid_perpetual",
+            {
+                "hyperliquid_perpetual_address": "0x0000000000000000000000000000000000000123",
+                "hyperliquid_perpetual_secret_key": "0xsecret",
             },
         ),
         (
@@ -327,16 +354,24 @@ def test_provider_profile_alone_rejects_arbitrary_wallet_credentials(
 
 
 @pytest.mark.parametrize(
-    ("marlin_profile", "expected_delete_calls"),
+    "marlin_profile",
     [
-        (True, []),
-        (False, [("master_account", "hyperliquid")]),
+        True,
+        False,
+    ],
+)
+@pytest.mark.parametrize(
+    ("connector", "credential_prefix"),
+    [
+        ("hyperliquid", "hyperliquid"),
+        ("hyperliquid_perpetual", "hyperliquid_perpetual"),
     ],
 )
 def test_failed_credential_refresh_uses_runtime_scoped_rollback(
     monkeypatch: pytest.MonkeyPatch,
     marlin_profile: bool,
-    expected_delete_calls: list[tuple[str, str]],
+    connector: str,
+    credential_prefix: str,
 ) -> None:
     class FakeAccountsService:
         def __init__(self) -> None:
@@ -369,17 +404,18 @@ def test_failed_credential_refresh_uses_runtime_scoped_rollback(
     )
 
     response = TestClient(app).post(
-        "/accounts/add-credential/master_account/hyperliquid",
+        f"/accounts/add-credential/master_account/{connector}",
         json={
             "__marlin_mnemonic_derived__": True,
-            "hyperliquid_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
-            "hyperliquid_secret_key": (
+            f"{credential_prefix}_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
+            f"{credential_prefix}_secret_key": (
                 "0x11a0c3518e4720ac640ee5bda16a5926cfac1edad0dcae96d1f32ab5a463c5f2"
             ),
         },
     )
 
     assert response.status_code == 400
+    expected_delete_calls = [] if marlin_profile else [("master_account", connector)]
     assert fake_service.delete_calls == expected_delete_calls
     service_source = (ROOT / "services" / "accounts_service.py").read_text()
     assert "if not (is_marlin_runtime() and is_mnemonic_credential_connector(connector_name)):" in service_source
@@ -407,6 +443,44 @@ def test_hyperliquid_testnet_uses_the_same_chain_account(
     )
 
     assert "__marlin_mnemonic_derived__" not in result
+
+
+@pytest.mark.parametrize(
+    "connector",
+    [
+        "hyperliquid_perpetual",
+        "hyperliquid-perpetual",
+        "hyperliquid.perpetual",
+        "hyperliquid/perpetual",
+    ],
+)
+def test_hyperliquid_perpetual_aliases_use_the_spot_mnemonic_derivation(
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+) -> None:
+    monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, "marlin")
+    monkeypatch.setenv(
+        "MARLIN_MNEMONIC",
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    )
+
+    result = sanitize_account_credential_update(
+        connector_name=connector,
+        credentials={
+            "__marlin_mnemonic_derived__": True,
+            "hyperliquid_perpetual_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
+            "hyperliquid_perpetual_secret_key": (
+                "0x11a0c3518e4720ac640ee5bda16a5926cfac1edad0dcae96d1f32ab5a463c5f2"
+            ),
+        },
+    )
+
+    assert result == {
+        "hyperliquid_perpetual_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
+        "hyperliquid_perpetual_secret_key": (
+            "0x11a0c3518e4720ac640ee5bda16a5926cfac1edad0dcae96d1f32ab5a463c5f2"
+        ),
+    }
 
 
 def test_marlin_scoped_default_wallet_route_forwards_public_identity_only(
