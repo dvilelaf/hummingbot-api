@@ -117,7 +117,7 @@ def test_wallet_admin_routes_are_absent() -> None:
         "remove_gateway_wallet",
     ):
         assert f"async def {function_name}" not in accounts_source
-    for function_name in ("create_wallet", "show_private_key"):
+    for function_name in ("create_wallet", "show_private_key", "send_transaction"):
         assert f"async def {function_name}" not in gateway_source
 
 

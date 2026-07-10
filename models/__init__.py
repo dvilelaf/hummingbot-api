@@ -84,7 +84,6 @@ from .gateway import (
     GatewayTransactionPollRequest,
     GatewayWalletInfo,
     MarlinDefaultWalletRequest,
-    SendTransactionRequest,
     UpdateApiKeysRequest,
 )
 
@@ -287,7 +286,6 @@ __all__ = [
     # Gateway models
     "GatewayConfig",
     "GatewayStatus",
-    "SendTransactionRequest",
     "GatewayWalletInfo",
     "MarlinDefaultWalletRequest",
     "GatewayBalanceRequest",

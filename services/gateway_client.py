@@ -247,44 +247,6 @@ class GatewayClient:
             logger.error(f"Error getting all wallet addresses: {e}")
             return {}
 
-    async def sign_typed_data(
-        self,
-        chain: str,
-        network: str,
-        address: str,
-        domain: Dict,
-        types: Dict,
-        value: Dict,
-    ) -> Dict:
-        """Sign EIP-712 typed data with a Gateway-managed wallet."""
-        return await self._request("POST", "wallet/sign-typed-data", json={
-            "chain": chain,
-            "network": network,
-            "address": address,
-            "domain": domain,
-            "types": types,
-            "value": value,
-        })
-
-    async def send_transaction(
-        self,
-        chain: str,
-        network: str,
-        address: str,
-        to_address: str,
-        amount: str,
-        live_action_authorization: Optional[Dict[str, Any]] = None,
-    ) -> Dict:
-        """Send a native token transaction"""
-        payload = {
-            "chain": chain,
-            "network": network,
-            "address": address,
-            "toAddress": to_address,
-            "amount": amount,
-        }
-        return await self._request("POST", "wallet/send", json=payload)
-
     async def set_marlin_default_wallet(
         self,
         chain: str,

@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -27,19 +27,6 @@ class GatewayStatus(BaseModel):
 # ============================================
 # Wallet Management Models
 # ============================================
-
-class SendTransactionRequest(BaseModel):
-    """Request to send a native token transaction"""
-    chain: str = Field(description="Blockchain chain (e.g., 'solana', 'ethereum')")
-    network: str = Field(description="Network (e.g., 'mainnet-beta', 'mainnet')")
-    address: str = Field(description="Sender wallet address")
-    to_address: str = Field(description="Recipient address")
-    amount: str = Field(description="Amount to send (in native token units)")
-    live_action_authorization: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="Marlin live-action-authorization-v1 artifact for live wallet sends",
-    )
-
 
 class GatewayTransactionPollRequest(BaseModel):
     """Request to poll a Gateway transaction by chain/network and hash."""

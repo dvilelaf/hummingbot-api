@@ -10,16 +10,13 @@ from models import (
     GatewayConfig,
     GatewayStatus,
     GatewayTransactionPollRequest,
-    SendTransactionRequest,
     UpdateApiKeysRequest,
 )
 from services.accounts_service import AccountsService
 from services.gateway_poll import gateway_poll_error_detail
 from services.gateway_service import GatewayService
-from services.live_trading_gate import assert_live_gateway_mutation_allowed
 from services.marlin_runtime import (
     assert_gateway_config_update_allowed,
-    assert_not_marlin_wallet_authority_surface,
 )
 
 router = APIRouter(tags=["Gateway"], prefix="/gateway")
@@ -969,66 +966,6 @@ async def delete_network_pool(
 # ============================================
 # Wallet Management
 # ============================================
-
-@router.post("/wallets/send")
-async def send_transaction(
-    request: SendTransactionRequest,
-    accounts_service: AccountsService = Depends(get_accounts_service)
-) -> Dict:
-    """
-    Send a native token transaction.
-
-    Args:
-        request: Contains chain, network, sender address, recipient address, and amount
-
-    Returns:
-        Dict with transaction signature/hash.
-
-    Example: POST /gateway/wallets/send
-    {
-        "chain": "solana",
-        "network": "mainnet-beta",
-        "address": "<sender-address>",
-        "to_address": "<recipient-address>",
-        "amount": "0.001"
-    }
-    """
-    try:
-        assert_not_marlin_wallet_authority_surface("Gateway wallet send")
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
-        assert_live_gateway_mutation_allowed(
-            action="wallet_send",
-            chain=request.chain,
-            expected_notional=request.amount,
-            live_action_authorization=request.live_action_authorization,
-            network=request.network,
-            source="gateway.wallets.send",
-        )
-
-        result = await accounts_service.gateway_client.send_transaction(
-            chain=request.chain,
-            network=request.network,
-            address=request.address,
-            to_address=request.to_address,
-            amount=request.amount,
-            live_action_authorization=request.live_action_authorization,
-        )
-
-        if result is None:
-            raise HTTPException(status_code=502, detail="Failed to send transaction: Gateway returned no response")
-
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=f"Failed to send transaction: {result.get('error')}")
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error sending transaction: {str(e)}")
-
 
 @router.post("/transactions/poll")
 async def poll_transaction(
