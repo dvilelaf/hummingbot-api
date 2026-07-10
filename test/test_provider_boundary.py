@@ -290,6 +290,19 @@ class FakeGatewayClient:
         return {"error": "Insufficient funds for transaction.", "status": "FAILED"}
 
 
+class FakeMarketDataService:
+    def __init__(self):
+        self.rate_calls = []
+        self.rates = {
+            "USDC-WETH": Decimal("0.0004"),
+            "WETH-USDC": Decimal("2500"),
+        }
+
+    def get_rate(self, base, quote):
+        self.rate_calls.append((base, quote))
+        return self.rates.get(f"{base}-{quote}")
+
+
 class FakeAccountsService:
     def __init__(self):
         self.gateway_client = FakeGatewayClient()
@@ -335,6 +348,14 @@ class FakeAccountsService:
         if self.place_trade_error is not None:
             raise self.place_trade_error
         return "order-1"
+
+
+def _request_with_market_data():
+    market_data_service = FakeMarketDataService()
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(market_data_service=market_data_service)),
+    )
+    return request, market_data_service
 
 
 def test_swap_provider_snapshot_uses_gateway_chain_network_portfolio():
@@ -483,7 +504,7 @@ def test_cowswap_provider_snapshot_exposes_order_actions_when_runtime_ready():
     provider_boundary = _provider_boundary_module()
     service = FakeAccountsService()
     service.accounts_state["master_account"]["cowswap"] = []
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    request, market_data_service = _request_with_market_data()
 
     result = asyncio.run(
         provider_boundary.provider_snapshot(
@@ -502,8 +523,15 @@ def test_cowswap_provider_snapshot_exposes_order_actions_when_runtime_ready():
     assert "provider actions missing: cowswap" not in result.operator_issues
     assert service._cowswap_runtime._connector.quote_sell_calls == []
     assert service._cowswap_runtime._connector.quote_buy_calls == []
+    assert market_data_service.rate_calls == [("WETH", "USDC")]
     rows = result.portfolio["master_account"]["cowswap"]
-    assert {"available_units": 0.0, "token": "WETH", "units": 0.0, "value": 0.0} in rows
+    assert {
+        "available_units": 0.0,
+        "price": 2500.0,
+        "token": "WETH",
+        "units": 0.0,
+        "value": 0.0,
+    } in rows
     assert {"available_units": 5.0, "price": 1.0, "token": "USDC", "units": 5.0, "value": 5.0} in rows
 
 
@@ -511,7 +539,7 @@ def test_cowswap_provider_snapshot_exposes_reverse_pair_gateway_balances():
     provider_boundary = _provider_boundary_module()
     service = FakeAccountsService()
     service.accounts_state["master_account"]["cowswap"] = []
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    request, market_data_service = _request_with_market_data()
 
     result = asyncio.run(
         provider_boundary.provider_snapshot(
@@ -538,15 +566,23 @@ def test_cowswap_provider_snapshot_exposes_reverse_pair_gateway_balances():
     rows = result.portfolio["master_account"]["cowswap"]
     assert service._cowswap_runtime._connector.quote_sell_calls == []
     assert service._cowswap_runtime._connector.quote_buy_calls == []
+    assert market_data_service.rate_calls == [("USDC", "WETH")]
     assert {"available_units": 5.0, "price": 1.0, "token": "USDC", "units": 5.0, "value": 5.0} in rows
-    assert {"available_units": 0.0, "token": "WETH", "units": 0.0, "value": 0.0} in rows
+    assert {
+        "available_units": 0.0,
+        "price": 2500.0,
+        "token": "WETH",
+        "units": 0.0,
+        "value": 0.0,
+    } in rows
 
 
-def test_cowswap_provider_snapshot_stablecoin_rows_get_obvious_price_value():
+def test_cowswap_provider_snapshot_missing_reference_price_fails_closed():
     provider_boundary = _provider_boundary_module()
     service = FakeAccountsService()
     service.accounts_state["master_account"]["cowswap"] = []
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    request, market_data_service = _request_with_market_data()
+    market_data_service.rates.clear()
 
     result = asyncio.run(
         provider_boundary.provider_snapshot(
@@ -563,6 +599,7 @@ def test_cowswap_provider_snapshot_stablecoin_rows_get_obvious_price_value():
     assert result.status == "available"
     assert service._cowswap_runtime._connector.quote_sell_calls == []
     assert service._cowswap_runtime._connector.quote_buy_calls == []
+    assert market_data_service.rate_calls == [("USDC", "WETH")]
     assert result.portfolio == {
         "master_account": {
             "cowswap": [

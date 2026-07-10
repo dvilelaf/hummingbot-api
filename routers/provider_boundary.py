@@ -139,10 +139,11 @@ async def provider_snapshot(
             and cow_runtime_blocker is None
             and trading_rule is not None
         ):
-            portfolio = await _portfolio_with_cowswap_quote_prices(
+            portfolio = await _portfolio_with_cowswap_reference_prices(
                 accounts_service,
                 portfolio=portfolio,
-                request=body,
+                http_request=request,
+                snapshot_request=body,
             )
     except Exception as exc:
         issues.append(f"portfolio unavailable: {_redact_secret_text(exc)}")
@@ -1100,31 +1101,61 @@ def _normalized_provider_trading_rule(connector_name: str, rule: dict[str, Any])
     return normalized
 
 
-async def _portfolio_with_cowswap_quote_prices(
+async def _portfolio_with_cowswap_reference_prices(
     accounts_service: AccountsService,
     *,
     portfolio: dict[str, Any] | None,
-    request: ProviderSnapshotRequest,
+    http_request: Request,
+    snapshot_request: ProviderSnapshotRequest,
 ) -> dict[str, Any] | None:
     runtime = getattr(accounts_service, "_cowswap_runtime", None)
     connector_rows = _cowswap_balance_rows(
         accounts_service,
         runtime=runtime,
-        trading_pair=request.trading_pair,
+        trading_pair=snapshot_request.trading_pair,
     )
 
-    base_asset, quote_asset = _split_pair(request.trading_pair)
+    base_asset, quote_asset = _split_pair(snapshot_request.trading_pair)
     account_portfolio: dict[str, Any] = dict(portfolio or {})
-    account_rows = dict(account_portfolio.get(request.account_name) or {})
+    account_rows = dict(account_portfolio.get(snapshot_request.account_name) or {})
     if not connector_rows:
         connector_rows = list(account_rows.get(COWSWAP_CONNECTOR_NAME) or [])
-    if quote_asset.upper() in {"DAI", "USDC", "USDT", "USD"}:
-        connector_rows = _upsert_price_row(connector_rows, token=quote_asset, price=Decimal("1"))
-    if base_asset.upper() in {"DAI", "USDC", "USDT", "USD"}:
-        connector_rows = _upsert_price_row(connector_rows, token=base_asset, price=Decimal("1"))
+    for token, price in _cowswap_reference_prices(
+        http_request,
+        base_asset=base_asset,
+        quote_asset=quote_asset,
+    ).items():
+        connector_rows = _upsert_price_row(connector_rows, token=token, price=price)
     account_rows[COWSWAP_CONNECTOR_NAME] = connector_rows
-    account_portfolio[request.account_name] = account_rows
+    account_portfolio[snapshot_request.account_name] = account_rows
     return account_portfolio
+
+
+def _cowswap_reference_prices(
+    request: Request,
+    *,
+    base_asset: str,
+    quote_asset: str,
+) -> dict[str, Decimal]:
+    stable_assets = {"DAI", "USDC", "USDT", "USD"}
+    prices = {
+        asset: Decimal("1")
+        for asset in (base_asset, quote_asset)
+        if asset in stable_assets
+    }
+    try:
+        rate = Decimal(
+            str(request.app.state.market_data_service.get_rate(base_asset, quote_asset)),
+        )
+    except Exception:
+        return prices
+    if not rate.is_finite() or rate <= 0:
+        return prices
+    if quote_asset in stable_assets:
+        prices[base_asset] = rate
+    elif base_asset in stable_assets:
+        prices[quote_asset] = Decimal("1") / rate
+    return prices
 
 
 def _cowswap_balance_rows(
