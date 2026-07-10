@@ -1,4 +1,4 @@
-from sqlalchemy import TIMESTAMP, Column, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, TIMESTAMP, Column, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 
@@ -242,6 +242,22 @@ class GatewaySwap(Base):
     # Additional metadata
     quote_id = Column(String, nullable=True)  # If swap was from a quote
     error_message = Column(Text, nullable=True)
+
+
+class ProviderTreasuryRebalance(Base):
+    __tablename__ = "provider_treasury_rebalances"
+
+    rebalance_id = Column(String, primary_key=True)
+    status = Column(String, nullable=False, default="built", index=True)
+    request_payload = Column(JSON, nullable=False)
+    response_payload = Column(JSON, nullable=True)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
 
 
 class GatewayCLMMPosition(Base):

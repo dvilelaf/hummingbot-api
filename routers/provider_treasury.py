@@ -4,13 +4,13 @@ import logging
 import os
 import re
 import secrets
-import asyncio
 from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from deps import get_accounts_service
+from database.repositories import ProviderTreasuryRebalanceRepository
+from deps import get_accounts_service, get_database_manager
 from models.provider_treasury import (
     ProviderTreasuryRebalanceExecuteRequest,
     ProviderTreasuryRebalanceRequest,
@@ -197,15 +197,12 @@ SQUID_NON_EVM_DESTINATION_ALIASES = {
 GATEWAY_NETWORK_TO_WALLET_CONTEXT = {
     "solana": ("solana", "mainnet-beta"),
 }
-_REBALANCE_REQUESTS: dict[str, dict[str, str]] = {}
-_REBALANCE_LOCKS: dict[str, asyncio.Lock] = {}
-
-
 @router.post("/rebalances", response_model=ProviderTreasuryRebalanceResponse)
 async def create_provider_treasury_rebalance(
     body: ProviderTreasuryRebalanceRequest,
     request: Request,
     accounts_service: AccountsService = Depends(get_accounts_service),
+    db_manager=Depends(get_database_manager),
 ) -> ProviderTreasuryRebalanceResponse:
     """Build a provider-owned treasury rebalance through Gateway."""
     try:
@@ -365,7 +362,7 @@ async def create_provider_treasury_rebalance(
             ),
         )
         built_destination_network = str(result.get("destinationNetwork") or destination_network or "").strip()
-        _REBALANCE_REQUESTS[rebalance_id] = {
+        stored_request = {
             "amount": _decimal_payload_value(body.amount),
             "destination_address": body.destination_account,
             "destination_asset": destination_asset,
@@ -382,7 +379,14 @@ async def create_provider_treasury_rebalance(
         result.setdefault("id", rebalance_id)
         result.setdefault("route", provider)
         result.setdefault("status", "built")
-        return _rebalance_response(result)
+        response = _rebalance_response(result)
+        await _create_built_rebalance(
+            _database_manager(request, db_manager),
+            rebalance_id,
+            stored_request,
+            _rebalance_response_payload(response),
+        )
+        return response
     except HTTPException:
         raise
     except Exception as exc:
@@ -397,54 +401,63 @@ async def execute_provider_treasury_rebalance(
     body: ProviderTreasuryRebalanceExecuteRequest,
     request: Request,
     accounts_service: AccountsService = Depends(get_accounts_service),
+    db_manager=Depends(get_database_manager),
 ) -> ProviderTreasuryRebalanceResponse:
     """Execute a previously built provider-owned treasury rebalance through Gateway."""
     try:
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
         _assert_provider_treasury_authorized(request)
-        lock = _rebalance_lock(rebalance_id)
-        async with lock:
-            stored = _REBALANCE_REQUESTS.get(rebalance_id)
-            if stored is None:
-                result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
-                return _rebalance_response(result, rebalance_id=rebalance_id)
-            if stored.get("status") in {"pending", "submitted", "confirmed"}:
-                result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
-                return _rebalance_response(result, rebalance_id=rebalance_id)
-            stored["status"] = "pending"
-            try:
-                result = await accounts_service.gateway_client.execute_treasury_rebalance(
-                    idempotency_key=rebalance_id,
-                    wallet_address=stored["wallet_address"],
-                    destination_address=stored["destination_address"],
-                    amount=stored["amount"],
-                    provider=stored["provider"],
-                    source_network=stored["source_network"],
-                    destination_network=stored.get("destination_network") or None,
-                    **_stored_provider_semantic_gateway_fields(stored),
-                    live_action_authorization=_marlin_gateway_rebalance_authorization(
-                        destination_address=stored["destination_address"],
-                        destination_network=stored.get("destination_network") or "",
-                        wallet_address=stored["wallet_address"],
-                        amount=stored["amount"],
-                        provider=stored["provider"],
-                        source_network=stored["source_network"],
-                    ),
-                    marlin_provider_intent_authorized=True,
-                )
-                _rebalance_response(result, rebalance_id=rebalance_id)
-                status_result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
-                status_result.setdefault("id", rebalance_id)
-                status_result.setdefault("route", stored["provider"])
-                result = status_result
-                stored["status"] = str(status_result.get("status") or "submitted")
-            except Exception:
-                stored["status"] = "failed"
-                raise
+        database_manager = _database_manager(request, db_manager)
+        stored_record = await _get_rebalance(database_manager, rebalance_id)
+        if stored_record is None:
+            result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
+            return _rebalance_response(result, rebalance_id=rebalance_id)
+        claimed_record = await _claim_rebalance_for_execution(database_manager, rebalance_id)
+        if claimed_record is None:
+            result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
+            response = _rebalance_response(result, rebalance_id=rebalance_id)
+            await _update_rebalance_status(
+                database_manager,
+                rebalance_id,
+                _rebalance_response_payload(response),
+            )
+            return response
+
+        stored = claimed_record.request_payload
+        result = await accounts_service.gateway_client.execute_treasury_rebalance(
+            idempotency_key=rebalance_id,
+            wallet_address=stored["wallet_address"],
+            destination_address=stored["destination_address"],
+            amount=stored["amount"],
+            provider=stored["provider"],
+            source_network=stored["source_network"],
+            destination_network=stored.get("destination_network") or None,
+            **_stored_provider_semantic_gateway_fields(stored),
+            live_action_authorization=_marlin_gateway_rebalance_authorization(
+                destination_address=stored["destination_address"],
+                destination_network=stored.get("destination_network") or "",
+                wallet_address=stored["wallet_address"],
+                amount=stored["amount"],
+                provider=stored["provider"],
+                source_network=stored["source_network"],
+            ),
+            marlin_provider_intent_authorized=True,
+        )
+        _rebalance_response(result, rebalance_id=rebalance_id)
+        status_result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
+        status_result.setdefault("id", rebalance_id)
+        status_result.setdefault("route", stored["provider"])
+        result = status_result
         result.setdefault("id", rebalance_id)
         result.setdefault("route", stored["provider"])
-        return _rebalance_response(result, rebalance_id=rebalance_id)
+        response = _rebalance_response(result, rebalance_id=rebalance_id)
+        await _update_rebalance_status(
+            database_manager,
+            rebalance_id,
+            _rebalance_response_payload(response),
+        )
+        return response
     except HTTPException:
         raise
     except Exception as exc:
@@ -456,14 +469,22 @@ async def execute_provider_treasury_rebalance(
 @router.get("/rebalances/{rebalance_id}", response_model=ProviderTreasuryRebalanceResponse)
 async def get_provider_treasury_rebalance(
     rebalance_id: str,
+    request: Request,
     accounts_service: AccountsService = Depends(get_accounts_service),
+    db_manager=Depends(get_database_manager),
 ) -> ProviderTreasuryRebalanceResponse:
     """Fetch provider-owned treasury rebalance status from Gateway."""
     try:
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
         result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
-        return _rebalance_response(result, rebalance_id=rebalance_id)
+        response = _rebalance_response(result, rebalance_id=rebalance_id)
+        await _update_rebalance_status(
+            _database_manager(request, db_manager),
+            rebalance_id,
+            _rebalance_response_payload(response),
+        )
+        return response
     except HTTPException:
         raise
     except Exception as exc:
@@ -778,12 +799,54 @@ def _rebalance_id(body: ProviderTreasuryRebalanceRequest) -> str:
     return f"{body.account_name}:{body.route}:{body.destination_account}:{_decimal_payload_value(body.amount)}"
 
 
-def _rebalance_lock(rebalance_id: str) -> asyncio.Lock:
-    lock = _REBALANCE_LOCKS.get(rebalance_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _REBALANCE_LOCKS[rebalance_id] = lock
-    return lock
+def _database_manager(request: Request, manager):
+    if manager is None:
+        manager = getattr(getattr(getattr(request, "app", None), "state", None), "db_manager", None)
+    if manager is None:
+        raise RuntimeError("HBA database manager is unavailable")
+    return manager
+
+
+async def _get_rebalance(db_manager, rebalance_id: str):
+    async with db_manager.get_session_context() as session:
+        return await ProviderTreasuryRebalanceRepository(session).get_rebalance(rebalance_id)
+
+
+async def _create_built_rebalance(
+    db_manager,
+    rebalance_id: str,
+    request_payload: dict[str, Any],
+    response_payload: dict[str, Any],
+):
+    async with db_manager.get_session_context() as session:
+        return await ProviderTreasuryRebalanceRepository(session).create_built(
+            rebalance_id,
+            request_payload,
+            response_payload,
+        )
+
+
+async def _claim_rebalance_for_execution(db_manager, rebalance_id: str):
+    async with db_manager.get_session_context() as session:
+        return await ProviderTreasuryRebalanceRepository(session).claim_for_execution(rebalance_id)
+
+
+async def _update_rebalance_status(
+    db_manager,
+    rebalance_id: str,
+    response_payload: dict[str, Any],
+):
+    status = str(response_payload.get("status") or "unknown").lower()
+    async with db_manager.get_session_context() as session:
+        return await ProviderTreasuryRebalanceRepository(session).update_status(
+            rebalance_id,
+            status,
+            response_payload,
+        )
+
+
+def _rebalance_response_payload(response: ProviderTreasuryRebalanceResponse) -> dict[str, Any]:
+    return response.model_dump(mode="json", exclude_none=True)
 
 
 def _assert_provider_treasury_authorized(request: Request) -> None:

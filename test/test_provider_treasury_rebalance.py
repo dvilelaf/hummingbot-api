@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import sys
 import types
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -14,10 +15,12 @@ STUBBED_MODULES = (
     "models",
     "services.accounts_service",
 )
+_REBALANCE_RECORDS = {}
 
 
 @pytest.fixture(autouse=True)
 def _restore_stubbed_modules():
+    _REBALANCE_RECORDS.clear()
     previous = {name: sys.modules.get(name) for name in STUBBED_MODULES}
     yield
     for name, module in previous.items():
@@ -54,6 +57,7 @@ def _install_provider_treasury_stubs():
 
     deps = types.ModuleType("deps")
     deps.get_accounts_service = lambda: None
+    deps.get_database_manager = lambda: None
     sys.modules["deps"] = deps
 
     models = types.ModuleType("models")
@@ -73,11 +77,57 @@ def _provider_treasury_module():
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    module.ProviderTreasuryRebalanceRepository = FakeProviderTreasuryRebalanceRepository
     return module
 
 
 def _authorized_request():
-    return types.SimpleNamespace(headers={"x-marlin-provider-intent-token": PROVIDER_INTENT_TOKEN})
+    app = types.SimpleNamespace(state=types.SimpleNamespace(db_manager=FakeDatabaseManager()))
+    return types.SimpleNamespace(
+        app=app,
+        headers={"x-marlin-provider-intent-token": PROVIDER_INTENT_TOKEN},
+    )
+
+
+class FakeDatabaseManager:
+    @asynccontextmanager
+    async def get_session_context(self):
+        yield _REBALANCE_RECORDS
+
+
+class FakeProviderTreasuryRebalanceRepository:
+    def __init__(self, records):
+        self.records = records
+
+    async def get_rebalance(self, rebalance_id):
+        return self.records.get(rebalance_id)
+
+    async def create_built(self, rebalance_id, request_payload, response_payload):
+        record = self.records.get(rebalance_id)
+        if record is None:
+            record = types.SimpleNamespace(
+                rebalance_id=rebalance_id,
+                status="built",
+                request_payload=request_payload,
+                response_payload=response_payload,
+            )
+            self.records[rebalance_id] = record
+        return record
+
+    async def claim_for_execution(self, rebalance_id):
+        record = self.records.get(rebalance_id)
+        if record is None or record.status != "built":
+            return None
+        record.status = "pending"
+        return record
+
+    async def update_status(self, rebalance_id, status, response_payload):
+        record = self.records.get(rebalance_id)
+        if record is not None:
+            if status != "built":
+                record.status = status
+            record.response_payload = response_payload
+        return record
 
 
 class FakeGatewayClient:
@@ -750,6 +800,7 @@ def test_execute_and_status_forward_to_gateway_treasury_rebalance_endpoints(monk
     status_result = asyncio.run(
         provider_treasury.get_provider_treasury_rebalance(
             "rebalance-123",
+            _authorized_request(),
             service,
         ),
     )
@@ -1044,6 +1095,7 @@ def test_rebalance_response_scrubs_provider_internal_metadata():
     )
 
     assert result.metadata == {"phase": "complete"}
+    assert provider_treasury._rebalance_response_payload(result)["metadata"] == {"phase": "complete"}
 
 
 def test_rebalance_response_redacts_gateway_error_details():
@@ -1122,6 +1174,84 @@ def test_execute_rebalance_is_not_rebroadcast_with_new_execute_idempotency(monke
             "marlin_provider_intent_authorized": True,
         }
     ]
+
+
+def test_rebalance_survives_router_recreation_without_rebroadcast(monkeypatch):
+    first_router = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    asyncio.run(
+        first_router.create_provider_treasury_rebalance(
+            _hyperliquid_bridge2_request(first_router),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    restarted_router = _provider_treasury_module()
+    asyncio.run(
+        restarted_router.execute_provider_treasury_rebalance(
+            "rebalance-idem-001",
+            restarted_router.ProviderTreasuryRebalanceExecuteRequest(),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    second_restart = _provider_treasury_module()
+    asyncio.run(
+        second_restart.execute_provider_treasury_rebalance(
+            "rebalance-idem-001",
+            second_restart.ProviderTreasuryRebalanceExecuteRequest(),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert len(service.gateway_client.execute_calls) == 1
+    assert _REBALANCE_RECORDS["rebalance-idem-001"].status == "confirmed"
+
+
+def test_ambiguous_execute_failure_stays_pending_and_cannot_rebroadcast(monkeypatch):
+    first_router = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        first_router.create_provider_treasury_rebalance(
+            _hyperliquid_bridge2_request(first_router),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    async def ambiguous_failure(**kwargs):
+        service.gateway_client.execute_calls.append(kwargs)
+        raise TimeoutError("provider response lost")
+
+    service.gateway_client.execute_treasury_rebalance = ambiguous_failure
+    with pytest.raises(first_router.HTTPException):
+        asyncio.run(
+            first_router.execute_provider_treasury_rebalance(
+                "rebalance-idem-001",
+                first_router.ProviderTreasuryRebalanceExecuteRequest(),
+                _authorized_request(),
+                service,
+            )
+        )
+
+    restarted_router = _provider_treasury_module()
+    result = asyncio.run(
+        restarted_router.execute_provider_treasury_rebalance(
+            "rebalance-idem-001",
+            restarted_router.ProviderTreasuryRebalanceExecuteRequest(),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "confirmed"
+    assert len(service.gateway_client.execute_calls) == 1
 
 
 def test_concurrent_execute_rebalance_marks_pending_before_gateway_submit(monkeypatch):
