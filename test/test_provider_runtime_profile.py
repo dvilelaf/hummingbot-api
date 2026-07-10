@@ -1,6 +1,12 @@
 import importlib
+import importlib.util
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +18,32 @@ def _main_source() -> str:
 
 def _provider_router_section() -> str:
     source = _main_source()
-    return source[source.index("def _include_provider_routers()") : source.index("def _include_full_routers()")]
+    return source[source.index("def _include_provider_routers(") : source.index("def _include_full_routers()")]
+
+
+def _openapi_paths(profile: str) -> dict[str, list[str]]:
+    if importlib.util.find_spec("hummingbot") is None:
+        pytest.skip("Hummingbot runtime dependencies are not installed")
+
+    command = (
+        "import json, main; "
+        "print('OPENAPI_PATHS=' + json.dumps({path: sorted(methods) "
+        "for path, methods in main.app.openapi()['paths'].items()}))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=ROOT,
+        env={**os.environ, "HUMMINGBOT_API_RUNTIME_PROFILE": profile},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = next(
+        line.removeprefix("OPENAPI_PATHS=")
+        for line in result.stdout.splitlines()
+        if line.startswith("OPENAPI_PATHS=")
+    )
+    return json.loads(payload)
 
 
 def test_provider_runtime_profile_is_configured_for_compose():
@@ -32,7 +63,7 @@ def test_provider_runtime_router_surface_is_provider_boundary_only():
         "portfolio",
         "trading",
         "provider_boundary",
-        "gateway_bridge",
+        "provider_treasury",
         "gateway_swap",
         "market_data",
         "rate_oracle",
@@ -68,15 +99,37 @@ def test_provider_runtime_does_not_eager_import_orchestration_services():
     assert "services.executor_service" not in top_level
 
 
-def test_provider_runtime_registered_routes_include_bridge_without_admin_surfaces():
+def test_provider_runtime_excludes_raw_gateway_mutations():
+    provider = _provider_router_section()
+
+    assert "include_gateway_mutations: bool = False" in provider
+    assert 'excluded_paths={"/gateway/swap/execute"}' in provider
+
+
+def test_provider_runtime_openapi_exposes_only_provider_mutation_boundaries():
+    paths = _openapi_paths("provider")
+
+    assert "/gateway/bridge/execute" not in paths
+    assert "/gateway/swap/execute" not in paths
+    assert "/provider/intents" in paths
+    assert "/provider/treasury/rebalances/{rebalance_id}/execute" in paths
+    assert "/gateway/swap/quote" in paths
+    assert "/gateway/swaps/{transaction_hash}/status" in paths
+
+
+def test_full_runtime_keeps_raw_gateway_mutations():
     source = _main_source()
-    provider = source[source.index("def _include_provider_routers()") : source.index("def _include_full_routers()")]
-    assert "accounts.credential_router" in provider
-    assert "accounts.router" not in provider
-    assert "gateway.router" not in provider
-    assert "gateway_bridge.router" in provider
-    assert "gateway_lp.router" not in provider
-    assert "docker.router" not in provider
+    full = source[source.index("def _include_full_routers()") :]
+
+    assert "_include_provider_routers(include_gateway_mutations=True)" in full
+    assert "app.include_router(gateway_bridge.router" in full
+
+
+def test_full_runtime_openapi_keeps_raw_gateway_mutations():
+    paths = _openapi_paths("full")
+
+    assert "/gateway/bridge/execute" in paths
+    assert "/gateway/swap/execute" in paths
 
 
 def test_marlin_cowswap_startup_reconciles_gateway_wallet_before_runtime_build():

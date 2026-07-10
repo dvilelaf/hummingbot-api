@@ -1,6 +1,7 @@
 import logging
 import os
 import secrets
+from copy import copy
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -30,7 +31,7 @@ def patched_save_to_yml(yml_path, cm):
 
 config_helpers.save_to_yml = patched_save_to_yml
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status  # noqa: E402
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
@@ -492,11 +493,18 @@ def auth_user(
     return credentials.username
 
 
-def _include_provider_routers() -> None:
+def _include_router_excluding_paths(router: APIRouter, *, excluded_paths: set[str]) -> None:
+    filtered_router = copy(router)
+    filtered_router.routes = [
+        route for route in router.routes if getattr(route, "path", None) not in excluded_paths
+    ]
+    app.include_router(filtered_router, dependencies=[Depends(auth_user)])
+
+
+def _include_provider_routers(*, include_gateway_mutations: bool = False) -> None:
     from routers import (
         accounts,
         connectors,
-        gateway_bridge,
         gateway_swap,
         market_data,
         portfolio,
@@ -516,8 +524,16 @@ def _include_provider_routers() -> None:
     app.include_router(trading.router, dependencies=[Depends(auth_user)])
     app.include_router(provider_boundary.router, dependencies=[Depends(auth_user)])
     app.include_router(provider_treasury.router, dependencies=[Depends(auth_user)])
-    app.include_router(gateway_bridge.router, dependencies=[Depends(auth_user)])
-    app.include_router(gateway_swap.router, dependencies=[Depends(auth_user)])
+    if include_gateway_mutations:
+        from routers import gateway_bridge
+
+        app.include_router(gateway_bridge.router, dependencies=[Depends(auth_user)])
+        app.include_router(gateway_swap.router, dependencies=[Depends(auth_user)])
+    else:
+        _include_router_excluding_paths(
+            gateway_swap.router,
+            excluded_paths={"/gateway/swap/execute"},
+        )
     app.include_router(market_data.router, dependencies=[Depends(auth_user)])
     app.include_router(rate_oracle.router, dependencies=[Depends(auth_user)])
 
@@ -543,7 +559,7 @@ def _include_full_routers() -> None:
     app.include_router(docker.router, dependencies=[Depends(auth_user)])
     app.include_router(gateway.router, dependencies=[Depends(auth_user)])
     app.include_router(accounts.router, dependencies=[Depends(auth_user)])
-    _include_provider_routers()
+    _include_provider_routers(include_gateway_mutations=True)
     app.include_router(gateway_bridge.router, dependencies=[Depends(auth_user)])
     app.include_router(gateway_clmm.router, dependencies=[Depends(auth_user)])
     app.include_router(gateway_lp.router, dependencies=[Depends(auth_user)])
