@@ -293,6 +293,7 @@ class FakeGatewayClient:
 class FakeMarketDataService:
     def __init__(self):
         self.rate_calls = []
+        self.trading_rule_calls = []
         self.rates = {
             "USDC-WETH": Decimal("0.0004"),
             "WETH-USDC": Decimal("2500"),
@@ -301,6 +302,16 @@ class FakeMarketDataService:
     def get_rate(self, base, quote):
         self.rate_calls.append((base, quote))
         return self.rates.get(f"{base}-{quote}")
+
+    async def get_trading_rules(self, connector_name, trading_pairs):
+        self.trading_rule_calls.append((connector_name, trading_pairs))
+        return {
+            "HYPE-USD": {
+                "buy_order_collateral_token": "USD",
+                "min_notional_size": 10.0,
+                "sell_order_collateral_token": "USD",
+            }
+        }
 
 
 class FakeAccountsService:
@@ -323,6 +334,7 @@ class FakeAccountsService:
             }
         }
         self.place_trade_error = None
+        self.place_trade_calls = []
 
     async def update_account_state(self, **kwargs):
         self.update_calls.append(kwargs)
@@ -345,6 +357,7 @@ class FakeAccountsService:
         return self.balance_refresh_errors.get(connector_name)
 
     async def place_trade(self, **_kwargs):
+        self.place_trade_calls.append(_kwargs)
         if self.place_trade_error is not None:
             raise self.place_trade_error
         return "order-1"
@@ -356,6 +369,91 @@ def _request_with_market_data():
         app=SimpleNamespace(state=SimpleNamespace(market_data_service=market_data_service)),
     )
     return request, market_data_service
+
+
+def test_hyperliquid_perpetual_snapshot_uses_native_market_and_exposes_logical_collateral():
+    provider_boundary = _provider_boundary_module()
+    provider_boundary._provider_available = _async_return(True)  # noqa: SLF001
+    provider_boundary._provider_capabilities = _async_return((['MARKET'], ['order', 'cancel']))  # noqa: SLF001
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["hyperliquid_perpetual"] = [
+        {"available_units": 15.0, "token": "USD", "units": 15.0, "value": 15.0},
+    ]
+    request, market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="hyperliquid_perpetual",
+                refresh_portfolio=False,
+                trading_pair="HYPE-USDC",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert market_data_service.trading_rule_calls == [
+        ("hyperliquid_perpetual", ["HYPE-USD"]),
+    ]
+    assert result.trading_pair == "HYPE-USDC"
+    assert result.trading_rule == {
+        "buy_order_collateral_token": "USDC",
+        "min_notional_size": 10.0,
+        "sell_order_collateral_token": "USDC",
+    }
+    assert result.portfolio == {
+        "master_account": {
+            "hyperliquid_perpetual": [
+                {"available_units": 15.0, "token": "USDC", "units": 15.0, "value": 15.0},
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("connector_name", "mode", "logical_pair", "submitted_pair"),
+    [
+        ("hyperliquid_perpetual", "mainnet", "HYPE-USDC", "HYPE-USD"),
+        ("hyperliquid", "mainnet", "HYPE-USDC", "HYPE-USDC"),
+        ("hyperliquid_perpetual_testnet", "testnet", "HYPE-USDC", "HYPE-USDC"),
+    ],
+)
+def test_provider_order_intent_maps_only_hyperliquid_perpetual_mainnet_market(
+    monkeypatch,
+    connector_name,
+    mode,
+    logical_pair,
+    submitted_pair,
+):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            provider_boundary.ProviderIntentRequest(
+                account_name="master_account",
+                action="order",
+                connector_name=connector_name,
+                market_id=logical_pair,
+                mode=mode,
+                order_type="LIMIT",
+                price="25",
+                quantity="1",
+                side="BUY",
+            ),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "submitted"
+    assert service.place_trade_calls[0]["trading_pair"] == submitted_pair
 
 
 def test_swap_provider_snapshot_uses_gateway_chain_network_portfolio():

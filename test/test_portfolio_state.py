@@ -117,7 +117,7 @@ class TestBalanceRefresh:
     async def test_hyperliquid_perpetual_exposes_connector_margin_balance(
         self, accounts_service, mock_connector
     ):
-        """Perpetual collateral remains visible through its owning connector."""
+        """Perpetual collateral is provider-neutral USDC at the account boundary."""
         mock_connector.get_all_balances.return_value = {"USD": Decimal("15")}
         mock_connector.get_available_balance.return_value = Decimal("15")
 
@@ -127,7 +127,7 @@ class TestBalanceRefresh:
 
         assert result == [
             {
-                "token": "USD",
+                "token": "USDC",
                 "units": 15.0,
                 "price": 1.0,
                 "value": 15.0,

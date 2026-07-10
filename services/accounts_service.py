@@ -30,6 +30,11 @@ from services.live_trading_gate import (
     assert_live_order_cancel_allowed,
     assert_live_order_submission_allowed,
 )
+from services.hyperliquid_market import (
+    connector_trading_pair,
+    logical_balance_rows,
+    logical_observation,
+)
 from services.marlin_runtime import (
     GATEWAY_WALLET_POLICIES,
     _canonical_gateway_wallet_context,
@@ -976,7 +981,7 @@ class AccountsService:
                 tokens_info[info_idx]["price"] = float(price)
                 tokens_info[info_idx]["value"] = float(price * Decimal(str(tokens_info[info_idx]["units"])))
 
-        return tokens_info
+        return logical_balance_rows(connector_name, tokens_info)
 
     def connector_balance_refresh_error(self, connector_name: str) -> str | None:
         """Return the latest balance refresh error for a connector, if any."""
@@ -2150,14 +2155,14 @@ class AccountsService:
                 orders = await order_repo.get_orders(
                     account_name=account_name,
                     connector_name=connector_name,
-                    trading_pair=trading_pair,
+                    trading_pair=connector_trading_pair(connector_name or "", trading_pair) if trading_pair else None,
                     status=status,
                     start_time=start_time,
                     end_time=end_time,
                     limit=limit,
                     offset=offset
                 )
-                return [order_repo.to_dict(order) for order in orders]
+                return [logical_observation(order_repo.to_dict(order)) for order in orders]
         except Exception as e:
             logger.error(f"Error getting orders: {e}")
             return []
@@ -2173,9 +2178,9 @@ class AccountsService:
                 orders = await order_repo.get_active_orders(
                     account_name=account_name,
                     connector_name=connector_name,
-                    trading_pair=trading_pair
+                    trading_pair=connector_trading_pair(connector_name or "", trading_pair) if trading_pair else None
                 )
-                return [order_repo.to_dict(order) for order in orders]
+                return [logical_observation(order_repo.to_dict(order)) for order in orders]
         except Exception as e:
             logger.error(f"Error getting active orders: {e}")
             return []
@@ -2217,14 +2222,14 @@ class AccountsService:
                 trade_order_pairs = await trade_repo.get_trades_with_orders(
                     account_name=account_name,
                     connector_name=connector_name,
-                    trading_pair=trading_pair,
+                    trading_pair=connector_trading_pair(connector_name or "", trading_pair) if trading_pair else None,
                     trade_type=trade_type,
                     start_time=start_time,
                     end_time=end_time,
                     limit=limit,
                     offset=offset
                 )
-                return [trade_repo.to_dict(trade, order) for trade, order in trade_order_pairs]
+                return [logical_observation(trade_repo.to_dict(trade, order)) for trade, order in trade_order_pairs]
         except Exception as e:
             logger.error(f"Error getting trades: {e}")
             return []

@@ -25,6 +25,11 @@ from services.cowswap_runtime import (
     cowswap_order_submission_blocker,
     cowswap_supported_order_types,
 )
+from services.hyperliquid_market import (
+    connector_trading_pair,
+    logical_balance_rows,
+    logical_trading_rule,
+)
 from services.live_trading_gate import (
     assert_live_gateway_mutation_allowed,
 )
@@ -114,7 +119,10 @@ async def provider_snapshot(
     try:
         portfolio_state = accounts_service.get_accounts_state()
         account_state = portfolio_state.get(body.account_name, {})
-        portfolio_value = account_state.get(connector_name)
+        portfolio_value = logical_balance_rows(
+            connector_name,
+            account_state.get(connector_name),
+        )
         if (
             "swap" in {action.lower() for action in provider_actions}
             and connector_name in GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS
@@ -239,11 +247,16 @@ async def _submit_order_intent(
         )
     if body.preflight_only:
         return await _preflight_order_intent(body, accounts_service, order_type=order_type)
+    connector_market = (
+        connector_trading_pair(body.connector_name, body.market_id)
+        if body.mode == "mainnet"
+        else body.market_id
+    )
     try:
         order_id = await accounts_service.place_trade(
             account_name=body.account_name,
             connector_name=body.connector_name,
-            trading_pair=body.market_id,
+            trading_pair=connector_market,
             trade_type=TradeType[body.side],
             amount=body.quantity,
             order_type=OrderType[order_type],
@@ -1077,14 +1090,18 @@ async def _provider_trading_rule(
             "supports_limit_orders": False,
             "supports_market_orders": True,
         }
+    connector_market = connector_trading_pair(connector_name, trading_pair)
     try:
-        rules = await request.app.state.market_data_service.get_trading_rules(connector_name, [trading_pair])
+        rules = await request.app.state.market_data_service.get_trading_rules(connector_name, [connector_market])
     except Exception:
         return None
-    rule = rules.get(trading_pair) if isinstance(rules, dict) else None
+    rule = rules.get(connector_market) if isinstance(rules, dict) else None
     if not isinstance(rule, dict) or "error" in rule:
         return None
-    return _normalized_provider_trading_rule(connector_name, rule)
+    return logical_trading_rule(
+        connector_name,
+        _normalized_provider_trading_rule(connector_name, rule),
+    )
 
 
 def _normalized_provider_trading_rule(connector_name: str, rule: dict[str, Any]) -> dict[str, Any]:
