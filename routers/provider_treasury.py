@@ -144,8 +144,19 @@ async def execute_provider_treasury_rebalance(
             result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
             return _rebalance_response(result, rebalance_id=rebalance_id)
 
+        stored_status = str(stored_record.status).lower()
         claimed_record = await _claim_rebalance_for_execution(database_manager, rebalance_id)
         if claimed_record is None:
+            response = await _refresh_rebalance_status(
+                accounts_service,
+                database_manager,
+                rebalance_id,
+            )
+            if stored_status != "pending" or response.status.lower() != "built":
+                return response
+
+            result = await accounts_service.gateway_client.execute_treasury_rebalance_target(rebalance_id)
+            _rebalance_response(result, rebalance_id=rebalance_id)
             return await _refresh_rebalance_status(
                 accounts_service,
                 database_manager,
