@@ -13,7 +13,7 @@ from fastapi import HTTPException
 MARLIN_RUNTIME_PROFILE_ENV = "MARLIN_RUNTIME_PROFILE"
 MARLIN_RUNTIME_PROFILE = "marlin"
 HUMMINGBOT_API_RUNTIME_PROFILE_ENV = "HUMMINGBOT_API_RUNTIME_PROFILE"
-HUMMINGBOT_API_PROVIDER_PROFILE = "provider"
+HUMMINGBOT_API_PROVIDER_PROFILES = frozenset({"provider", "marlin"})
 MARLIN_MNEMONIC_DERIVED_CREDENTIAL_FLAG = "__marlin_mnemonic_derived__"
 WALLET_AUTHORITY_CONFIG_KEYS = frozenset(
     {
@@ -178,7 +178,7 @@ def is_marlin_runtime() -> bool:
     return (
         os.environ.get(MARLIN_RUNTIME_PROFILE_ENV, "").strip().lower() == MARLIN_RUNTIME_PROFILE
         or os.environ.get(HUMMINGBOT_API_RUNTIME_PROFILE_ENV, "").strip().lower()
-        == HUMMINGBOT_API_PROVIDER_PROFILE
+        in HUMMINGBOT_API_PROVIDER_PROFILES
     )
 
 

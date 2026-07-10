@@ -303,11 +303,13 @@ def test_marked_wallet_credentials_must_match_fresh_mnemonic_derivation(
         )
 
 
+@pytest.mark.parametrize("api_profile", ["provider", "marlin"])
 def test_provider_profile_alone_rejects_arbitrary_wallet_credentials(
     monkeypatch: pytest.MonkeyPatch,
+    api_profile: str,
 ) -> None:
     monkeypatch.delenv(MARLIN_RUNTIME_PROFILE_ENV, raising=False)
-    monkeypatch.setenv("HUMMINGBOT_API_RUNTIME_PROFILE", "provider")
+    monkeypatch.setenv("HUMMINGBOT_API_RUNTIME_PROFILE", api_profile)
     monkeypatch.setenv(
         "MARLIN_MNEMONIC",
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
