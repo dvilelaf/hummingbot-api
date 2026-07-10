@@ -1184,7 +1184,7 @@ class AccountsService:
             await self.update_account_state()
         except Exception as e:
             logger.error(f"Error adding connector credentials for account {account_name}: {e}")
-            if not is_mnemonic_credential_connector(connector_name):
+            if not (is_marlin_runtime() and is_mnemonic_credential_connector(connector_name)):
                 await self.delete_credentials(account_name, connector_name)
             raise e
 

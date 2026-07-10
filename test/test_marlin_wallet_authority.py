@@ -186,7 +186,7 @@ def test_account_credential_route_blocks_wallet_secret_updates_before_service_ca
     accounts_module = _load_accounts_router(monkeypatch)
     fake_service = FakeAccountsService()
     app = FastAPI()
-    app.include_router(accounts_module.router)
+    app.include_router(accounts_module.credential_router, prefix="/accounts")
     app.dependency_overrides[accounts_module.get_accounts_service] = lambda: fake_service
     monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, "marlin")
     monkeypatch.setenv(
@@ -231,7 +231,7 @@ def test_account_credential_route_allows_marked_mnemonic_derived_credentials(
     accounts_module = _load_accounts_router(monkeypatch)
     fake_service = FakeAccountsService()
     app = FastAPI()
-    app.include_router(accounts_module.router)
+    app.include_router(accounts_module.credential_router, prefix="/accounts")
     app.dependency_overrides[accounts_module.get_accounts_service] = lambda: fake_service
     monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, "marlin")
     monkeypatch.setenv(
@@ -324,8 +324,17 @@ def test_provider_profile_alone_rejects_arbitrary_wallet_credentials(
         )
 
 
-def test_failed_mnemonic_credential_refresh_preserves_existing_file(
+@pytest.mark.parametrize(
+    ("marlin_profile", "expected_delete_calls"),
+    [
+        (True, []),
+        (False, [("master_account", "hyperliquid")]),
+    ],
+)
+def test_failed_credential_refresh_uses_runtime_scoped_rollback(
     monkeypatch: pytest.MonkeyPatch,
+    marlin_profile: bool,
+    expected_delete_calls: list[tuple[str, str]],
 ) -> None:
     class FakeAccountsService:
         def __init__(self) -> None:
@@ -345,9 +354,13 @@ def test_failed_mnemonic_credential_refresh_preserves_existing_file(
     accounts_module = _load_accounts_router(monkeypatch)
     fake_service = FakeAccountsService()
     app = FastAPI()
-    app.include_router(accounts_module.router)
+    app.include_router(accounts_module.credential_router, prefix="/accounts")
     app.dependency_overrides[accounts_module.get_accounts_service] = lambda: fake_service
-    monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, "marlin")
+    if marlin_profile:
+        monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, "marlin")
+    else:
+        monkeypatch.delenv(MARLIN_RUNTIME_PROFILE_ENV, raising=False)
+        monkeypatch.delenv("HUMMINGBOT_API_RUNTIME_PROFILE", raising=False)
     monkeypatch.setenv(
         "MARLIN_MNEMONIC",
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
@@ -365,9 +378,9 @@ def test_failed_mnemonic_credential_refresh_preserves_existing_file(
     )
 
     assert response.status_code == 400
-    assert fake_service.delete_calls == []
+    assert fake_service.delete_calls == expected_delete_calls
     service_source = (ROOT / "services" / "accounts_service.py").read_text()
-    assert "if not is_mnemonic_credential_connector(connector_name):" in service_source
+    assert "if not (is_marlin_runtime() and is_mnemonic_credential_connector(connector_name)):" in service_source
 
 
 def test_hyperliquid_testnet_uses_the_same_chain_account(

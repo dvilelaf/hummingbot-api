@@ -147,7 +147,7 @@ async def add_credential(account_name: str, connector_name: str, credentials: Di
     except HTTPException:
         raise
     except Exception as e:
-        if not is_mnemonic_credential_connector(connector_name):
+        if not (is_marlin_runtime() and is_mnemonic_credential_connector(connector_name)):
             await accounts_service.delete_credentials(account_name, connector_name)
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -227,6 +227,3 @@ async def set_marlin_default_gateway_wallet(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error setting Marlin default wallet: {str(e)}")
-
-
-router.include_router(credential_router)
