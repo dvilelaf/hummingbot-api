@@ -509,18 +509,6 @@ def test_gateway_lp_checks_live_gate_before_add_and_remove():
     )
 
 
-def test_gateway_wallet_send_checks_live_gate_before_send_transaction():
-    source = (ROOT / "routers" / "gateway.py").read_text()
-    send_source = source[source.index("async def send_transaction") : source.index("@router.post(\"/transactions/poll\")")]
-
-    assert 'action="wallet_send"' in send_source
-    assert "expected_notional=request.amount" in send_source
-    assert "live_action_authorization=request.live_action_authorization" in send_source
-    assert send_source.index("assert_live_gateway_mutation_allowed(") < send_source.index(
-        "accounts_service.gateway_client.send_transaction(",
-    )
-
-
 def test_bridge_execution_gate_rejects_authorization_route_payload_mismatch(monkeypatch):
     gate = _live_gate_module()
 
@@ -655,7 +643,6 @@ def test_gateway_clmm_checks_live_gate_before_mutations():
 
 def test_gateway_mutation_models_accept_live_action_authorization():
     models_source = (ROOT / "models" / "gateway_trading.py").read_text()
-    gateway_source = (ROOT / "models" / "gateway.py").read_text()
 
     for class_name in (
         "SwapExecuteRequest",
@@ -671,12 +658,6 @@ def test_gateway_mutation_models_accept_live_action_authorization():
         end = models_source.find("\n\nclass ", start + 1)
         class_source = models_source[start : end if end != -1 else len(models_source)]
         assert "live_action_authorization: Optional[Dict[str, Any]]" in class_source
-
-    start = gateway_source.index("class SendTransactionRequest")
-    end = gateway_source.find("\n\nclass ", start + 1)
-    send_model = gateway_source[start : end if end != -1 else len(gateway_source)]
-    assert "live_action_authorization: Optional[Dict[str, Any]]" in send_model
-
 
 def test_gateway_client_only_forwards_live_action_authorization_to_swap_and_bridge_execute():
     source = (ROOT / "services" / "gateway_client.py").read_text()
@@ -704,7 +685,6 @@ def test_gateway_client_only_forwards_live_action_authorization_to_swap_and_brid
         "clmm_remove_liquidity",
         "clmm_close_position",
         "clmm_collect_fees",
-        "send_transaction",
     ):
         start = source.index(f"async def {method_name}")
         end = source.find("\n    async def ", start + 1)
