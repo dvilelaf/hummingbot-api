@@ -303,6 +303,73 @@ def test_marked_wallet_credentials_must_match_fresh_mnemonic_derivation(
         )
 
 
+def test_provider_profile_alone_rejects_arbitrary_wallet_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(MARLIN_RUNTIME_PROFILE_ENV, raising=False)
+    monkeypatch.setenv("HUMMINGBOT_API_RUNTIME_PROFILE", "provider")
+    monkeypatch.setenv(
+        "MARLIN_MNEMONIC",
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    )
+
+    with pytest.raises(HTTPException, match="does not match MARLIN_MNEMONIC-derived"):
+        sanitize_account_credential_update(
+            connector_name="hyperliquid",
+            credentials={
+                "__marlin_mnemonic_derived__": True,
+                "hyperliquid_address": "0x0000000000000000000000000000000000000123",
+                "hyperliquid_secret_key": "0xsecret",
+            },
+        )
+
+
+def test_failed_mnemonic_credential_refresh_preserves_existing_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeAccountsService:
+        def __init__(self) -> None:
+            self.delete_calls: list[tuple[str, str]] = []
+
+        async def add_credentials(
+            self,
+            account_name: str,
+            connector_name: str,
+            credentials: dict[str, object],
+        ) -> None:
+            raise RuntimeError("transient connector initialization failure")
+
+        async def delete_credentials(self, account_name: str, connector_name: str) -> None:
+            self.delete_calls.append((account_name, connector_name))
+
+    accounts_module = _load_accounts_router(monkeypatch)
+    fake_service = FakeAccountsService()
+    app = FastAPI()
+    app.include_router(accounts_module.router)
+    app.dependency_overrides[accounts_module.get_accounts_service] = lambda: fake_service
+    monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, "marlin")
+    monkeypatch.setenv(
+        "MARLIN_MNEMONIC",
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    )
+
+    response = TestClient(app).post(
+        "/accounts/add-credential/master_account/hyperliquid",
+        json={
+            "__marlin_mnemonic_derived__": True,
+            "hyperliquid_address": "0x60685341Bd52B4048e647F00C204138B2D1a211f",
+            "hyperliquid_secret_key": (
+                "0x11a0c3518e4720ac640ee5bda16a5926cfac1edad0dcae96d1f32ab5a463c5f2"
+            ),
+        },
+    )
+
+    assert response.status_code == 400
+    assert fake_service.delete_calls == []
+    service_source = (ROOT / "services" / "accounts_service.py").read_text()
+    assert "if not is_mnemonic_credential_connector(connector_name):" in service_source
+
+
 def test_hyperliquid_testnet_uses_the_same_chain_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

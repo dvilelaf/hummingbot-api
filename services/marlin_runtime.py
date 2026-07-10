@@ -12,6 +12,8 @@ from fastapi import HTTPException
 
 MARLIN_RUNTIME_PROFILE_ENV = "MARLIN_RUNTIME_PROFILE"
 MARLIN_RUNTIME_PROFILE = "marlin"
+HUMMINGBOT_API_RUNTIME_PROFILE_ENV = "HUMMINGBOT_API_RUNTIME_PROFILE"
+HUMMINGBOT_API_PROVIDER_PROFILE = "provider"
 MARLIN_MNEMONIC_DERIVED_CREDENTIAL_FLAG = "__marlin_mnemonic_derived__"
 WALLET_AUTHORITY_CONFIG_KEYS = frozenset(
     {
@@ -173,7 +175,16 @@ GATEWAY_WALLET_ALIASES = {
 
 def is_marlin_runtime() -> bool:
     """Return true when this API instance is serving Marlin's runtime profile."""
-    return os.environ.get(MARLIN_RUNTIME_PROFILE_ENV, "").strip().lower() == MARLIN_RUNTIME_PROFILE
+    return (
+        os.environ.get(MARLIN_RUNTIME_PROFILE_ENV, "").strip().lower() == MARLIN_RUNTIME_PROFILE
+        or os.environ.get(HUMMINGBOT_API_RUNTIME_PROFILE_ENV, "").strip().lower()
+        == HUMMINGBOT_API_PROVIDER_PROFILE
+    )
+
+
+def is_mnemonic_credential_connector(connector_name: str) -> bool:
+    """Identify connectors whose signing authority is derived from MARLIN_MNEMONIC."""
+    return _normalize(connector_name) in MNEMONIC_DERIVED_CREDENTIAL_KEYS
 
 
 def assert_not_marlin_wallet_authority_surface(surface: str) -> None:
@@ -258,7 +269,7 @@ def assert_connector_credential_deletion_allowed(connector_name: str) -> None:
     """Keep mnemonic-derived provider credentials materialized in Marlin runtime."""
     if not is_marlin_runtime():
         return
-    if _normalize(connector_name) in MNEMONIC_DERIVED_CREDENTIAL_KEYS:
+    if is_mnemonic_credential_connector(connector_name):
         raise HTTPException(
             status_code=403,
             detail="Mnemonic-derived connector credentials cannot be deleted in Marlin runtime",

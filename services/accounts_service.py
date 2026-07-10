@@ -37,6 +37,7 @@ from services.marlin_runtime import (
     _canonical_gateway_wallet_context,
     _derive_marlin_public_address,
     is_marlin_runtime,
+    is_mnemonic_credential_connector,
 )
 from utils.file_system import fs_util
 
@@ -1183,7 +1184,8 @@ class AccountsService:
             await self.update_account_state()
         except Exception as e:
             logger.error(f"Error adding connector credentials for account {account_name}: {e}")
-            await self.delete_credentials(account_name, connector_name)
+            if not is_mnemonic_credential_connector(connector_name):
+                await self.delete_credentials(account_name, connector_name)
             raise e
 
     def _add_cowswap_credentials(self, account_name: str, credentials: dict):

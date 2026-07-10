@@ -10,6 +10,7 @@ from services.marlin_runtime import (
     assert_connector_credential_deletion_allowed,
     assert_marlin_default_wallet_identity,
     is_marlin_runtime,
+    is_mnemonic_credential_connector,
     sanitize_account_credential_update,
 )
 
@@ -146,7 +147,8 @@ async def add_credential(account_name: str, connector_name: str, credentials: Di
     except HTTPException:
         raise
     except Exception as e:
-        await accounts_service.delete_credentials(account_name, connector_name)
+        if not is_mnemonic_credential_connector(connector_name):
+            await accounts_service.delete_credentials(account_name, connector_name)
         raise HTTPException(status_code=400, detail=str(e))
 
 
