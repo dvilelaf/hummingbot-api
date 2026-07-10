@@ -11,5 +11,7 @@ COPY database ./database
 COPY bots/controllers ./bots/controllers
 COPY bots/scripts ./bots/scripts
 COPY docker/hyperliquid-runtime-patch.py /tmp/hyperliquid-runtime-patch.py
+COPY docker/xrpl-runtime-patch.py /tmp/xrpl-runtime-patch.py
 
-RUN python /tmp/hyperliquid-runtime-patch.py && rm /tmp/hyperliquid-runtime-patch.py
+RUN python /tmp/hyperliquid-runtime-patch.py && rm /tmp/hyperliquid-runtime-patch.py && \
+    python /tmp/xrpl-runtime-patch.py && rm /tmp/xrpl-runtime-patch.py
