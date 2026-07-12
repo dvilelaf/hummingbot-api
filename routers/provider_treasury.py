@@ -153,13 +153,16 @@ async def execute_provider_treasury_rebalance(
         stored_status = str(stored_record.status).lower()
         claimed_record = await _claim_rebalance_for_execution(database_manager, rebalance_id)
         if claimed_record is None:
+            stored_status_is_recoverable = stored_status == "pending" or (
+                stored_status != "built" and stored_status in GATEWAY_RECOVERABLE_EXECUTION_STATUSES
+            )
             response = await _refresh_rebalance_status(
                 accounts_service,
                 database_manager,
                 rebalance_id,
             )
             if (
-                stored_status != "pending"
+                not stored_status_is_recoverable
                 or response.status.lower() not in GATEWAY_RECOVERABLE_EXECUTION_STATUSES
             ):
                 return response

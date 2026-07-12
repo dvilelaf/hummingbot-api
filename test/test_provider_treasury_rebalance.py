@@ -729,6 +729,69 @@ def test_execute_restart_recovers_pending_claim_from_gateway_recoverable_status(
     assert _REBALANCE_RECORDS["target-funding-1"].status == "confirmed"
 
 
+def test_execute_retry_recovers_persisted_gateway_recoverable_status(monkeypatch):
+    first_module = _provider_treasury_module()
+    first_service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        first_module.create_provider_treasury_rebalance(
+            _neutral_request(first_module),
+            _authorized_request(),
+            first_service,
+        )
+    )
+    first_service.gateway_client.status_results = [
+        {"idempotencyKey": "target-funding-1", "status": "submission_ambiguous"},
+    ]
+    refresh_status = first_module._refresh_rebalance_status
+
+    async def persist_status_then_fail(*args, **kwargs):
+        await refresh_status(*args, **kwargs)
+        raise RuntimeError("response interrupted")
+
+    monkeypatch.setattr(first_module, "_refresh_rebalance_status", persist_status_then_fail)
+    body = first_module.ProviderTreasuryRebalanceExecuteRequest(
+        idempotency_key="target-funding-1",
+    )
+
+    with pytest.raises(first_module.HTTPException) as exc:
+        asyncio.run(
+            first_module.execute_provider_treasury_rebalance(
+                "target-funding-1",
+                body,
+                _authorized_request(),
+                first_service,
+            )
+        )
+
+    assert exc.value.status_code == 500
+    assert first_service.gateway_client.execute_calls == ["target-funding-1"]
+    assert _REBALANCE_RECORDS["target-funding-1"].status == "submission_ambiguous"
+
+    recreated_module = _provider_treasury_module()
+    recreated_service = FakeAccountsService()
+    recreated_service.gateway_client.status_results = [
+        {"idempotencyKey": "target-funding-1", "status": "submission_ambiguous"},
+        {"idempotencyKey": "target-funding-1", "status": "confirmed"},
+    ]
+
+    result = asyncio.run(
+        recreated_module.execute_provider_treasury_rebalance(
+            "target-funding-1",
+            recreated_module.ProviderTreasuryRebalanceExecuteRequest(
+                idempotency_key="target-funding-1",
+            ),
+            _authorized_request(),
+            recreated_service,
+        )
+    )
+
+    assert result.status == "confirmed"
+    assert recreated_service.gateway_client.execute_calls == ["target-funding-1"]
+    assert recreated_service.gateway_client.statuses_at_execute == ["submission_ambiguous"]
+    assert _REBALANCE_RECORDS["target-funding-1"].status == "confirmed"
+
+
 @pytest.mark.parametrize(
     "gateway_status",
     ["submitted", "approval_submitted", "confirmed", "failed", "unknown", "cancelled"],
