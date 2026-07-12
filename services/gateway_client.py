@@ -576,7 +576,8 @@ class GatewayClient:
         destination_network: str,
         destination_asset: str,
         destination_address: str,
-        amount: str,
+        target_notional_eur: str,
+        destination_amount: Optional[str] = None,
         max_cost_bps: Optional[str] = None,
     ) -> Dict:
         """Create a destination-only treasury target through Gateway."""
@@ -587,8 +588,10 @@ class GatewayClient:
             "destinationNetwork": destination_network,
             "destinationAsset": destination_asset,
             "destinationAddress": destination_address,
-            "amount": amount,
+            "targetNotionalEur": target_notional_eur,
         }
+        if destination_amount is not None:
+            payload["destinationAmount"] = destination_amount
         if max_cost_bps is not None:
             payload["maxCostBps"] = max_cost_bps
         return await self._request("POST", "bridge/rebalance/targets", json=payload)

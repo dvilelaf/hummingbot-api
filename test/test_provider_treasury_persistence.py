@@ -20,7 +20,7 @@ def test_rebalance_repository_persists_and_claims_once_across_sessions(tmp_path)
             await repository.create_built(
                 "rebalance-001",
                 {
-                    "amount": "1",
+                    "target_notional_eur": "1",
                     "destination_chain": "ethereum",
                     "destination_network": "base",
                     "destination_wallet_ref": "base:mainnet:evm_gateway",
@@ -45,7 +45,7 @@ def test_rebalance_repository_persists_and_claims_once_across_sessions(tmp_path)
             restored = await repository.get_rebalance("rebalance-001")
             assert restored.status == "pending"
             assert restored.request_payload == {
-                "amount": "1",
+                "target_notional_eur": "1",
                 "destination_chain": "ethereum",
                 "destination_network": "base",
                 "destination_wallet_ref": "base:mainnet:evm_gateway",

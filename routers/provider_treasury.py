@@ -64,7 +64,7 @@ async def create_provider_treasury_rebalance(
 
         stored_request = {
             "account_name": body.account_name.strip(),
-            "amount": _decimal_payload_value(body.amount),
+            "target_notional_eur": _decimal_payload_value(body.target_notional_eur),
             "destination_address": destination_identity["address"],
             "destination_asset": body.destination_asset.strip(),
             "destination_chain": destination_chain,
@@ -73,6 +73,8 @@ async def create_provider_treasury_rebalance(
             "max_cost_bps": _decimal_payload_value(body.max_cost_bps),
             "route_id": body.route_id.strip(),
         }
+        if body.destination_amount is not None:
+            stored_request["destination_amount"] = _decimal_payload_value(body.destination_amount)
         database_manager = _database_manager(request, db_manager)
         stored_record = await _create_built_rebalance(
             database_manager,
@@ -102,15 +104,18 @@ async def create_provider_treasury_rebalance(
                 detail=f"{DESTINATION_WALLET_DEFAULT_FAILED_BLOCKER}: {error}",
             )
 
-        result = await accounts_service.gateway_client.create_treasury_rebalance_target(
+        gateway_kwargs = dict(
             idempotency_key=body.idempotency_key,
             destination_chain=destination_chain,
             destination_network=destination_network,
             destination_asset=body.destination_asset.strip(),
             destination_address=destination_identity["address"],
-            amount=_decimal_payload_value(body.amount),
+            target_notional_eur=_decimal_payload_value(body.target_notional_eur),
             max_cost_bps=_decimal_payload_value(body.max_cost_bps),
         )
+        if body.destination_amount is not None:
+            gateway_kwargs["destination_amount"] = _decimal_payload_value(body.destination_amount)
+        result = await accounts_service.gateway_client.create_treasury_rebalance_target(**gateway_kwargs)
         if isinstance(result, dict):
             result.setdefault("id", body.idempotency_key)
             result.setdefault("status", "built")

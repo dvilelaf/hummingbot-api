@@ -227,7 +227,7 @@ class FakeAccountsService:
 def _neutral_request(module, **overrides):
     data = {
         "account_name": "master_account",
-        "amount": "6",
+        "target_notional_eur": "6",
         "destination_asset": "USDC",
         "destination_chain": "ethereum",
         "destination_network": "base",
@@ -246,7 +246,7 @@ def test_request_contract_accepts_only_neutral_destination_fields():
 
     assert set(body.model_dump()) == {
         "account_name",
-        "amount",
+        "destination_amount",
         "destination_asset",
         "destination_chain",
         "destination_network",
@@ -254,6 +254,7 @@ def test_request_contract_accepts_only_neutral_destination_fields():
         "idempotency_key",
         "max_cost_bps",
         "route_id",
+        "target_notional_eur",
     }
     with pytest.raises(ValidationError):
         module.ProviderTreasuryRebalanceRequest(**body.model_dump(), provider="squid_router")
@@ -261,6 +262,8 @@ def test_request_contract_accepts_only_neutral_destination_fields():
         module.ProviderTreasuryRebalanceRequest(**body.model_dump(), source_network="arbitrum")
     with pytest.raises(ValidationError):
         module.ProviderTreasuryRebalanceRequest(**body.model_dump(), destination_address="0xcaller")
+    with pytest.raises(ValidationError):
+        module.ProviderTreasuryRebalanceRequest(**body.model_dump(), amount="6")
 
 
 def test_execute_request_accepts_idempotency_key_and_forbids_extra_fields():
@@ -311,20 +314,20 @@ def test_create_derives_destination_identity_and_forwards_only_target(monkeypatc
     ]
     assert service.gateway_client.target_calls == [
         {
-            "amount": "6",
             "destination_address": "0x00000000000000000000000000000000000000B1",
             "destination_asset": "USDC",
             "destination_chain": "ethereum",
             "destination_network": "base",
             "idempotency_key": "target-funding-1",
             "max_cost_bps": "100",
+            "target_notional_eur": "6",
         }
     ]
     assert service.gateway_client.statuses_at_target == ["built"]
     stored = _REBALANCE_RECORDS["target-funding-1"].request_payload
     assert stored == {
         "account_name": "master_account",
-        "amount": "6",
+        "target_notional_eur": "6",
         "destination_address": "0x00000000000000000000000000000000000000B1",
         "destination_asset": "USDC",
         "destination_chain": "ethereum",
@@ -350,6 +353,28 @@ def test_create_forwards_fractional_max_cost_bps_without_precision_loss(monkeypa
 
     assert service.gateway_client.target_calls[0]["max_cost_bps"] == "12.375"
     assert _REBALANCE_RECORDS["target-funding-1"].request_payload["max_cost_bps"] == "12.375"
+
+
+def test_create_forwards_optional_destination_amount(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    asyncio.run(
+        module.create_provider_treasury_rebalance(
+            _neutral_request(module, destination_amount=Decimal("1000")),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert service.gateway_client.target_calls[0]["destination_amount"] == "1000"
+    assert "amount" not in service.gateway_client.target_calls[0]
+    assert service.gateway_client.target_calls[0]["target_notional_eur"] == "6"
+    stored = _REBALANCE_RECORDS["target-funding-1"].request_payload
+    assert stored["target_notional_eur"] == "6"
+    assert stored["destination_amount"] == "1000"
+    assert "amount" not in stored
 
 
 def test_hyperliquid_target_validates_logical_identity_and_provisions_arbitrum_wallet(monkeypatch):
@@ -392,13 +417,13 @@ def test_hyperliquid_target_validates_logical_identity_and_provisions_arbitrum_w
         }
     ]
     assert service.gateway_client.target_calls[0] == {
-        "amount": "6",
         "destination_address": "0x00000000000000000000000000000000000000a1",
         "destination_asset": "USDC",
         "destination_chain": "hyperliquid",
         "destination_network": "mainnet",
         "idempotency_key": "target-funding-1",
         "max_cost_bps": "100",
+        "target_notional_eur": "6",
     }
     assert _REBALANCE_RECORDS["target-funding-1"].request_payload["destination_wallet_ref"] == (
         "hyperliquid:mainnet:hyperliquid_trader"
@@ -593,7 +618,34 @@ def test_same_idempotency_key_with_different_target_fails_before_gateway(monkeyp
     with pytest.raises(module.HTTPException) as exc:
         asyncio.run(
             module.create_provider_treasury_rebalance(
-                _neutral_request(module, amount="7"),
+                _neutral_request(module, target_notional_eur="7"),
+                _authorized_request(),
+                service,
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "idempotency_key_conflict"
+    assert len(service.gateway_client.wallet_calls) == 1
+    assert len(service.gateway_client.target_calls) == 1
+
+
+def test_same_idempotency_key_with_different_destination_amount_fails_before_gateway(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        module.create_provider_treasury_rebalance(
+            _neutral_request(module, destination_amount=Decimal("1000")),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    with pytest.raises(module.HTTPException) as exc:
+        asyncio.run(
+            module.create_provider_treasury_rebalance(
+                _neutral_request(module, destination_amount=Decimal("2000")),
                 _authorized_request(),
                 service,
             )
@@ -945,7 +997,7 @@ def test_gateway_client_uses_exact_target_paths_and_payload(monkeypatch):
             destination_network="base",
             destination_asset="USDC",
             destination_address="0x00000000000000000000000000000000000000B1",
-            amount="6",
+            target_notional_eur="6",
             max_cost_bps="100",
         )
     )
@@ -958,7 +1010,6 @@ def test_gateway_client_uses_exact_target_paths_and_payload(monkeypatch):
             "bridge/rebalance/targets",
             {
                 "json": {
-                    "amount": "6",
                     "destinationAddress": "0x00000000000000000000000000000000000000B1",
                     "destinationAsset": "USDC",
                     "destinationChain": "ethereum",
@@ -966,6 +1017,7 @@ def test_gateway_client_uses_exact_target_paths_and_payload(monkeypatch):
                     "idempotencyKey": "target-funding-1",
                     "maxCostBps": "100",
                     "mode": "mainnet",
+                    "targetNotionalEur": "6",
                 }
             },
         ),
