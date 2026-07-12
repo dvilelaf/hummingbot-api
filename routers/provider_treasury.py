@@ -29,6 +29,15 @@ DESTINATION_WALLET_REF_MISMATCH_BLOCKER = "destination_wallet_ref_mismatch"
 DESTINATION_WALLET_DEFAULT_FAILED_BLOCKER = "destination_wallet_default_failed"
 IDEMPOTENCY_KEY_CONFLICT_BLOCKER = "idempotency_key_conflict"
 HYPERLIQUID_MAINNET_WALLET_REF = "hyperliquid:mainnet:hyperliquid_trader"
+GATEWAY_RECOVERABLE_EXECUTION_STATUSES = frozenset(
+    {
+        "approval_submission_ambiguous",
+        "approval_submission_pending",
+        "built",
+        "submission_ambiguous",
+        "submission_pending",
+    }
+)
 
 
 @router.post("/rebalances", response_model=ProviderTreasuryRebalanceResponse)
@@ -149,7 +158,10 @@ async def execute_provider_treasury_rebalance(
                 database_manager,
                 rebalance_id,
             )
-            if stored_status != "pending" or response.status.lower() != "built":
+            if (
+                stored_status != "pending"
+                or response.status.lower() not in GATEWAY_RECOVERABLE_EXECUTION_STATUSES
+            ):
                 return response
 
             result = await accounts_service.gateway_client.execute_treasury_rebalance_target(rebalance_id)

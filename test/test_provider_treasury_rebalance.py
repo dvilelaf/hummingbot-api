@@ -670,7 +670,20 @@ def test_execute_rejects_idempotency_key_mismatch_before_gateway(monkeypatch):
     assert service.gateway_client.status_calls == []
 
 
-def test_execute_restart_recovers_pending_claim_when_gateway_is_still_built(monkeypatch):
+@pytest.mark.parametrize(
+    "gateway_status",
+    [
+        "built",
+        "approval_submission_pending",
+        "approval_submission_ambiguous",
+        "submission_pending",
+        "submission_ambiguous",
+    ],
+)
+def test_execute_restart_recovers_pending_claim_from_gateway_recoverable_status(
+    monkeypatch,
+    gateway_status,
+):
     first_module = _provider_treasury_module()
     first_service = FakeAccountsService()
     monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
@@ -686,7 +699,7 @@ def test_execute_restart_recovers_pending_claim_when_gateway_is_still_built(monk
     recreated_module = _provider_treasury_module()
     recreated_service = FakeAccountsService()
     recreated_service.gateway_client.status_results = [
-        {"idempotencyKey": "target-funding-1", "status": "built"},
+        {"idempotencyKey": "target-funding-1", "status": gateway_status},
         {
             "idempotencyKey": "target-funding-1",
             "status": "confirmed",
@@ -711,15 +724,16 @@ def test_execute_restart_recovers_pending_claim_when_gateway_is_still_built(monk
         "target-funding-1",
     ]
     assert recreated_service.gateway_client.execute_calls == ["target-funding-1"]
-    assert recreated_service.gateway_client.statuses_at_execute == ["pending"]
+    expected_stored_status = "pending" if gateway_status == "built" else gateway_status
+    assert recreated_service.gateway_client.statuses_at_execute == [expected_stored_status]
     assert _REBALANCE_RECORDS["target-funding-1"].status == "confirmed"
 
 
 @pytest.mark.parametrize(
     "gateway_status",
-    ["submission_pending", "submission_ambiguous", "submitted", "confirmed", "failed"],
+    ["submitted", "approval_submitted", "confirmed", "failed", "unknown", "cancelled"],
 )
-def test_execute_pending_claim_never_resubmits_non_built_gateway_status(
+def test_execute_pending_claim_never_resubmits_non_recoverable_gateway_status(
     monkeypatch,
     gateway_status,
 ):
