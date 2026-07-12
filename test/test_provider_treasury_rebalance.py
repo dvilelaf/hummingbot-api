@@ -3,6 +3,7 @@ import importlib.util
 import sys
 import types
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -977,6 +978,227 @@ def test_response_ignores_protocol_selection_fields_and_redacts_error():
         "status": "failed",
         "transaction_hash": "0xtx",
     }
+
+
+@pytest.mark.parametrize(
+    ("gateway_field", "hba_field", "gateway_value", "expected_value"),
+    [
+        ("sourceAmount", "source_amount", "1000.5", Decimal("1000.5")),
+        ("sourceAsset", "source_asset", "USDC", "USDC"),
+        ("destinationAmount", "destination_amount", "999.99", Decimal("999.99")),
+        ("destinationAsset", "destination_asset", "USDC", "USDC"),
+        ("quotedProviderCostUsd", "quoted_provider_cost_usd", "12.34", Decimal("12.34")),
+        ("quotedGasCostUsd", "quoted_gas_cost_usd", "5.67", Decimal("5.67")),
+        ("quotedNativeGasAmount", "quoted_native_gas_amount", "0.001", Decimal("0.001")),
+        ("quotedNativeGasAsset", "quoted_native_gas_asset", "ETH", "ETH"),
+        ("quotedAt", "quoted_at", "2025-06-15T10:30:00+00:00", None),
+    ],
+)
+def test_rebalance_response_quote_economics_parsed_correctly(
+    gateway_field,
+    hba_field,
+    gateway_value,
+    expected_value,
+):
+    module = _provider_treasury_module()
+
+    payload = {
+        "idempotencyKey": "target-funding-1",
+        "status": "built",
+        gateway_field: gateway_value,
+    }
+
+    response = module._rebalance_response(payload)
+
+    actual = getattr(response, hba_field)
+    if hba_field == "quoted_at":
+        assert actual == datetime(2025, 6, 15, 10, 30, tzinfo=timezone.utc)
+    else:
+        assert actual == expected_value
+
+
+def test_rebalance_response_all_quote_economics_passthrough():
+    module = _provider_treasury_module()
+
+    response = module._rebalance_response(
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "built",
+            "sourceAmount": "5000.00",
+            "sourceAsset": "DAI",
+            "destinationAmount": "4995.00",
+            "destinationAsset": "USDC",
+            "quotedProviderCostUsd": "25.00",
+            "quotedGasCostUsd": "3.50",
+            "quotedNativeGasAmount": "0.0021",
+            "quotedNativeGasAsset": "ETH",
+            "quotedAt": "2025-06-15T10:30:00+00:00",
+        }
+    )
+
+    dumped = response.model_dump(mode="json", exclude_none=True)
+    assert dumped["source_amount"] == "5000.00"
+    assert dumped["source_asset"] == "DAI"
+    assert dumped["destination_amount"] == "4995.00"
+    assert dumped["destination_asset"] == "USDC"
+    assert dumped["quoted_provider_cost_usd"] == "25.00"
+    assert dumped["quoted_gas_cost_usd"] == "3.50"
+    assert dumped["quoted_native_gas_amount"] == "0.0021"
+    assert dumped["quoted_native_gas_asset"] == "ETH"
+    assert "quoted_at" in dumped
+
+
+def test_rebalance_response_quote_economics_default_to_none():
+    module = _provider_treasury_module()
+
+    response = module._rebalance_response(
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "built",
+        }
+    )
+
+    dumped = response.model_dump(mode="json", exclude_none=True)
+    for field in (
+        "source_amount",
+        "source_asset",
+        "destination_amount",
+        "destination_asset",
+        "quoted_provider_cost_usd",
+        "quoted_gas_cost_usd",
+        "quoted_native_gas_amount",
+        "quoted_native_gas_asset",
+        "quoted_at",
+    ):
+        assert field not in dumped, f"{field} should be absent when None"
+
+
+def test_malformed_gateway_decimal_raises_502():
+    module = _provider_treasury_module()
+
+    with pytest.raises(module.HTTPException) as exc:
+        module._rebalance_response(
+            {
+                "idempotencyKey": "target-funding-1",
+                "status": "built",
+                "sourceAmount": "not-a-number",
+            }
+        )
+    assert exc.value.status_code == 502
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("sourceAmount", "NaN", "non-finite decimal"),
+        ("sourceAmount", "Infinity", "non-finite decimal"),
+        ("sourceAmount", "-Infinity", "non-finite decimal"),
+        ("destinationAmount", "NaN", "non-finite decimal"),
+        ("destinationAmount", "Infinity", "non-finite decimal"),
+        ("destinationAmount", "-Infinity", "non-finite decimal"),
+        ("quotedProviderCostUsd", "NaN", "non-finite decimal"),
+        ("quotedProviderCostUsd", "Infinity", "non-finite decimal"),
+        ("quotedGasCostUsd", "NaN", "non-finite decimal"),
+        ("quotedGasCostUsd", "Infinity", "non-finite decimal"),
+        ("quotedNativeGasAmount", "NaN", "non-finite decimal"),
+        ("quotedNativeGasAmount", "Infinity", "non-finite decimal"),
+        ("sourceAmount", "-1", "non-positive"),
+        ("sourceAmount", "0", "non-positive"),
+        ("destinationAmount", "-50", "non-positive"),
+        ("destinationAmount", "0", "non-positive"),
+        ("sourceAsset", "", "empty"),
+        ("sourceAsset", "  ", "empty"),
+        ("destinationAsset", "", "empty"),
+        ("destinationAsset", "  ", "empty"),
+        ("quotedNativeGasAsset", "", "empty"),
+        ("quotedNativeGasAsset", "  ", "empty"),
+        ("sourceAsset", {"symbol": "USDC"}, "non-string"),
+        ("sourceAmount", 1.5, "non-string"),
+    ],
+)
+def test_malformed_economics_rejected_with_502(field, value, reason):
+    module = _provider_treasury_module()
+
+    with pytest.raises(module.HTTPException) as exc:
+        module._rebalance_response(
+            {
+                "idempotencyKey": "target-funding-1",
+                "status": "built",
+                field: value,
+            }
+        )
+    assert exc.value.status_code == 502
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("quotedProviderCostUsd", "0", Decimal("0")),
+        ("quotedGasCostUsd", "0", Decimal("0")),
+        ("quotedNativeGasAmount", "0", Decimal("0")),
+    ],
+)
+def test_zero_quoted_costs_accepted(field, value, expected):
+    module = _provider_treasury_module()
+
+    response = module._rebalance_response(
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "built",
+            field: value,
+        }
+    )
+
+    assert getattr(response, {
+        "quotedProviderCostUsd": "quoted_provider_cost_usd",
+        "quotedGasCostUsd": "quoted_gas_cost_usd",
+        "quotedNativeGasAmount": "quoted_native_gas_amount",
+    }[field]) == expected
+
+
+def test_response_model_rejects_nonfinite_and_naive_economics_directly():
+    module = _provider_treasury_module()
+
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryRebalanceResponse(
+            id="target-funding-1",
+            status="built",
+            quoted_provider_cost_usd=Decimal("Infinity"),
+        )
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryRebalanceResponse(
+            id="target-funding-1",
+            status="built",
+            quoted_at=datetime(2025, 6, 15, 10, 30),
+        )
+
+
+def test_malformed_gateway_quoted_at_raises_502():
+    module = _provider_treasury_module()
+
+    with pytest.raises(module.HTTPException) as exc:
+        module._rebalance_response(
+            {
+                "idempotencyKey": "target-funding-1",
+                "status": "built",
+                "quotedAt": "not-a-date",
+            }
+        )
+    assert exc.value.status_code == 502
+
+
+def test_naive_quoted_at_raises_502():
+    module = _provider_treasury_module()
+
+    with pytest.raises(module.HTTPException) as exc:
+        module._rebalance_response(
+            {
+                "idempotencyKey": "target-funding-1",
+                "status": "built",
+                "quotedAt": "2025-06-15T10:30:00",
+            }
+        )
+    assert exc.value.status_code == 502
 
 
 def test_gateway_client_uses_exact_target_paths_and_payload(monkeypatch):

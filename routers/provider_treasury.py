@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import secrets
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -316,6 +317,15 @@ def _rebalance_response(
         ),
         error=_optional_error(result.get("provider_error") or result.get("providerError")),
         metadata=_safe_metadata(result.get("metadata")),
+        source_amount=_parse_gateway_amount(result.get("sourceAmount"), "sourceAmount"),
+        source_asset=_parse_gateway_asset(result.get("sourceAsset"), "sourceAsset"),
+        destination_amount=_parse_gateway_amount(result.get("destinationAmount"), "destinationAmount"),
+        destination_asset=_parse_gateway_asset(result.get("destinationAsset"), "destinationAsset"),
+        quoted_provider_cost_usd=_parse_gateway_decimal(result.get("quotedProviderCostUsd")),
+        quoted_gas_cost_usd=_parse_gateway_decimal(result.get("quotedGasCostUsd")),
+        quoted_native_gas_amount=_parse_gateway_decimal(result.get("quotedNativeGasAmount")),
+        quoted_native_gas_asset=_parse_gateway_asset(result.get("quotedNativeGasAsset"), "quotedNativeGasAsset"),
+        quoted_at=_parse_gateway_quoted_at(result.get("quotedAt")),
     )
 
 
@@ -329,8 +339,57 @@ def _gateway_error_status(result: dict[str, Any]) -> int:
     return 502
 
 
+def _parse_gateway_decimal(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=502, detail=f"Gateway returned non-string decimal: {_redact_error(value)}")
+    try:
+        d = Decimal(value.strip())
+    except (TypeError, ValueError, ArithmeticError):
+        raise HTTPException(status_code=502, detail=f"Gateway returned malformed decimal: {_redact_error(value)}")
+    if not d.is_finite():
+        raise HTTPException(status_code=502, detail=f"Gateway returned non-finite decimal: {_redact_error(value)}")
+    return d
+
+
+def _parse_gateway_amount(value: Any, field: str) -> Decimal | None:
+    d = _parse_gateway_decimal(value)
+    if d is None:
+        return None
+    if d <= 0:
+        raise HTTPException(status_code=502, detail=f"Gateway returned non-positive {field}: {_redact_error(value)}")
+    return d
+
+
+def _parse_gateway_asset(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=502, detail=f"Gateway returned non-string {field}: {_redact_error(value)}")
+    raw = value.strip()
+    if not raw:
+        raise HTTPException(status_code=502, detail=f"Gateway returned empty {field}: {_redact_error(value)}")
+    return raw
+
+
 def _optional_text(value: Any) -> str | None:
     return None if value is None else str(value)
+
+
+def _parse_gateway_quoted_at(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+        if dt.utcoffset() is None:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Gateway returned naive quotedAt timestamp: {_redact_error(value)}",
+            )
+        return dt
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=502, detail=f"Gateway returned malformed quotedAt: {_redact_error(value)}")
 
 
 def _optional_error(value: Any) -> str | None:
