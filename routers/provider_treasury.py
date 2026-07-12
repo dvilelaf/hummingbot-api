@@ -17,6 +17,7 @@ from models.provider_treasury import (
     ProviderTreasuryRebalanceResponse,
 )
 from services.accounts_service import AccountsService
+from services.marlin_runtime import _derive_marlin_credential_values
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ DESTINATION_WALLET_IDENTITY_UNAVAILABLE_BLOCKER = "destination_wallet_identity_u
 DESTINATION_WALLET_REF_MISMATCH_BLOCKER = "destination_wallet_ref_mismatch"
 DESTINATION_WALLET_DEFAULT_FAILED_BLOCKER = "destination_wallet_default_failed"
 IDEMPOTENCY_KEY_CONFLICT_BLOCKER = "idempotency_key_conflict"
+HYPERLIQUID_MAINNET_WALLET_REF = "hyperliquid:mainnet:hyperliquid_trader"
 
 
 @router.post("/rebalances", response_model=ProviderTreasuryRebalanceResponse)
@@ -44,17 +46,12 @@ async def create_provider_treasury_rebalance(
 
         destination_chain = body.destination_chain.strip().lower()
         destination_network = body.destination_network.strip().lower()
-        identity_chain, identity_network = _destination_identity_context(
-            destination_chain,
-            destination_network,
-        )
-        destination_identity = _marlin_destination_wallet_identity(
+        destination_identity, gateway_identity = _destination_wallet_identities(
             accounts_service,
-            chain=identity_chain,
-            network=identity_network,
+            destination_chain=destination_chain,
+            destination_network=destination_network,
+            destination_wallet_ref=body.destination_wallet_ref.strip(),
         )
-        if destination_identity["wallet_ref"] != body.destination_wallet_ref.strip():
-            raise HTTPException(status_code=400, detail=DESTINATION_WALLET_REF_MISMATCH_BLOCKER)
 
         stored_request = {
             "account_name": body.account_name.strip(),
@@ -84,10 +81,10 @@ async def create_provider_treasury_rebalance(
             )
 
         wallet_result = await accounts_service.gateway_client.set_marlin_default_wallet(
-            chain=identity_chain,
-            network=identity_network,
-            address=destination_identity["address"],
-            wallet_ref=destination_identity["wallet_ref"],
+            chain=gateway_identity["chain"],
+            network=gateway_identity["network"],
+            address=gateway_identity["address"],
+            wallet_ref=gateway_identity["wallet_ref"],
         )
         if isinstance(wallet_result, dict) and wallet_result.get("error"):
             error = _redact_error(wallet_result.get("error"))
@@ -211,6 +208,48 @@ def _destination_identity_context(destination_chain: str, destination_network: s
     return destination_chain, destination_network
 
 
+def _destination_wallet_identities(
+    accounts_service: AccountsService,
+    *,
+    destination_chain: str,
+    destination_network: str,
+    destination_wallet_ref: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    identity_chain, identity_network = _destination_identity_context(
+        destination_chain,
+        destination_network,
+    )
+    if (destination_chain, destination_network) == ("hyperliquid", "mainnet"):
+        if destination_wallet_ref != HYPERLIQUID_MAINNET_WALLET_REF:
+            raise HTTPException(status_code=400, detail=DESTINATION_WALLET_REF_MISMATCH_BLOCKER)
+        destination_identity = _marlin_hyperliquid_wallet_identity()
+        gateway_identity = _marlin_destination_wallet_identity(
+            accounts_service,
+            chain=identity_chain,
+            network=identity_network,
+        )
+        if destination_identity["address"].lower() != gateway_identity["address"].lower():
+            raise HTTPException(status_code=400, detail=DESTINATION_WALLET_IDENTITY_UNAVAILABLE_BLOCKER)
+        return destination_identity, gateway_identity
+
+    destination_identity = _marlin_destination_wallet_identity(
+        accounts_service,
+        chain=identity_chain,
+        network=identity_network,
+    )
+    if destination_identity["wallet_ref"] != destination_wallet_ref:
+        raise HTTPException(status_code=400, detail=DESTINATION_WALLET_REF_MISMATCH_BLOCKER)
+    return destination_identity, destination_identity
+
+
+def _marlin_hyperliquid_wallet_identity() -> dict[str, str]:
+    credentials = _derive_marlin_credential_values("hyperliquid")
+    address = str(credentials.get("hyperliquid_address") if isinstance(credentials, dict) else "").strip()
+    if not address:
+        raise HTTPException(status_code=400, detail=DESTINATION_WALLET_IDENTITY_UNAVAILABLE_BLOCKER)
+    return {"address": address, "wallet_ref": HYPERLIQUID_MAINNET_WALLET_REF}
+
+
 def _marlin_destination_wallet_identity(
     accounts_service: AccountsService,
     *,
@@ -225,7 +264,12 @@ def _marlin_destination_wallet_identity(
     wallet_ref = str(identity.get("wallet_ref") or "").strip()
     if not address or not wallet_ref:
         raise HTTPException(status_code=400, detail=DESTINATION_WALLET_IDENTITY_UNAVAILABLE_BLOCKER)
-    return {"address": address, "wallet_ref": wallet_ref}
+    return {
+        "chain": chain,
+        "network": network,
+        "address": address,
+        "wallet_ref": wallet_ref,
+    }
 
 
 def _rebalance_response(

@@ -20,6 +20,7 @@ STUBBED_MODULES = (
     "fastapi",
     "models",
     "services.accounts_service",
+    "services.marlin_runtime",
 )
 _REBALANCE_RECORDS = {}
 
@@ -80,6 +81,10 @@ def _install_provider_treasury_stubs():
     accounts_service = types.ModuleType("services.accounts_service")
     accounts_service.AccountsService = object
     sys.modules["services.accounts_service"] = accounts_service
+
+    marlin_runtime = types.ModuleType("services.marlin_runtime")
+    marlin_runtime._derive_marlin_credential_values = lambda namespace: None
+    sys.modules["services.marlin_runtime"] = marlin_runtime
 
 
 def _provider_treasury_module():
@@ -347,10 +352,20 @@ def test_create_forwards_fractional_max_cost_bps_without_precision_loss(monkeypa
     assert _REBALANCE_RECORDS["target-funding-1"].request_payload["max_cost_bps"] == "12.375"
 
 
-def test_hyperliquid_target_uses_mnemonic_derived_arbitrum_identity(monkeypatch):
+def test_hyperliquid_target_validates_logical_identity_and_provisions_arbitrum_wallet(monkeypatch):
     module = _provider_treasury_module()
     service = FakeAccountsService()
     monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    hyperliquid_identity_calls = []
+
+    def derive_hyperliquid_credentials(namespace):
+        hyperliquid_identity_calls.append(namespace)
+        return {
+            "hyperliquid_address": "0x00000000000000000000000000000000000000a1",
+            "hyperliquid_secret_key": "unused",
+        }
+
+    monkeypatch.setattr(module, "_derive_marlin_credential_values", derive_hyperliquid_credentials)
 
     asyncio.run(
         module.create_provider_treasury_rebalance(
@@ -358,7 +373,7 @@ def test_hyperliquid_target_uses_mnemonic_derived_arbitrum_identity(monkeypatch)
                 module,
                 destination_chain="hyperliquid",
                 destination_network="mainnet",
-                destination_wallet_ref="arbitrum:mainnet:evm_gateway",
+                destination_wallet_ref="hyperliquid:mainnet:hyperliquid_trader",
                 route_id="hl-mainnet",
             ),
             _authorized_request(),
@@ -366,16 +381,97 @@ def test_hyperliquid_target_uses_mnemonic_derived_arbitrum_identity(monkeypatch)
         )
     )
 
+    assert hyperliquid_identity_calls == ["hyperliquid"]
     assert service.identity_calls == [("ethereum", "arbitrum-mainnet")]
+    assert service.gateway_client.wallet_calls == [
+        {
+            "address": "0x00000000000000000000000000000000000000A1",
+            "chain": "ethereum",
+            "network": "arbitrum-mainnet",
+            "wallet_ref": "arbitrum:mainnet:evm_gateway",
+        }
+    ]
     assert service.gateway_client.target_calls[0] == {
         "amount": "6",
-        "destination_address": "0x00000000000000000000000000000000000000A1",
+        "destination_address": "0x00000000000000000000000000000000000000a1",
         "destination_asset": "USDC",
         "destination_chain": "hyperliquid",
         "destination_network": "mainnet",
         "idempotency_key": "target-funding-1",
         "max_cost_bps": "100",
     }
+    assert _REBALANCE_RECORDS["target-funding-1"].request_payload["destination_wallet_ref"] == (
+        "hyperliquid:mainnet:hyperliquid_trader"
+    )
+
+
+def test_hyperliquid_target_fails_closed_when_logical_and_arbitrum_addresses_differ(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    monkeypatch.setattr(
+        module,
+        "_derive_marlin_credential_values",
+        lambda namespace: {
+            "hyperliquid_address": "0x00000000000000000000000000000000000000B2",
+            "hyperliquid_secret_key": "unused",
+        },
+    )
+
+    with pytest.raises(module.HTTPException) as exc:
+        asyncio.run(
+            module.create_provider_treasury_rebalance(
+                _neutral_request(
+                    module,
+                    destination_chain="hyperliquid",
+                    destination_network="mainnet",
+                    destination_wallet_ref="hyperliquid:mainnet:hyperliquid_trader",
+                    route_id="hl-mainnet",
+                ),
+                _authorized_request(),
+                service,
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "destination_wallet_identity_unavailable"
+    assert _REBALANCE_RECORDS == {}
+    assert service.gateway_client.wallet_calls == []
+    assert service.gateway_client.target_calls == []
+
+
+def test_hyperliquid_target_rejects_arbitrum_ref_as_logical_identity(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    monkeypatch.setattr(
+        module,
+        "_derive_marlin_credential_values",
+        lambda namespace: {
+            "hyperliquid_address": "0x00000000000000000000000000000000000000A1",
+            "hyperliquid_secret_key": "unused",
+        },
+    )
+
+    with pytest.raises(module.HTTPException) as exc:
+        asyncio.run(
+            module.create_provider_treasury_rebalance(
+                _neutral_request(
+                    module,
+                    destination_chain="hyperliquid",
+                    destination_network="mainnet",
+                    destination_wallet_ref="arbitrum:mainnet:evm_gateway",
+                    route_id="hl-mainnet",
+                ),
+                _authorized_request(),
+                service,
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "destination_wallet_ref_mismatch"
+    assert service.identity_calls == []
+    assert service.gateway_client.wallet_calls == []
 
 
 @pytest.mark.parametrize(
