@@ -19,6 +19,7 @@ from hummingbot.core.rate_oracle.rate_oracle import RateOracle
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory, UnsupportedConnectorException
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from services.cowswap_runtime import COWSWAP_CONNECTOR_NAME, cowswap_runtime_prices
+from services.hyperliquid_market import connector_trading_pair
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,7 @@ class MarketDataService:
 
         return await self._connector_service.initialize_order_book(
             connector_name=connector_name,
-            trading_pair=trading_pair,
+            trading_pair=connector_trading_pair(connector_name, trading_pair),
             account_name=account_name,
             timeout=timeout
         )
@@ -187,7 +188,7 @@ class MarketDataService:
 
         return await self._connector_service.remove_trading_pair(
             connector_name=connector_name,
-            trading_pair=trading_pair,
+            trading_pair=connector_trading_pair(connector_name, trading_pair),
             account_name=account_name
         )
 
@@ -210,11 +211,12 @@ class MarketDataService:
         connector = self._connector_service.get_best_connector_for_market(
             connector_name, account_name
         )
+        connector_pair = connector_trading_pair(connector_name, trading_pair)
 
         if connector and hasattr(connector, 'order_book_tracker'):
             tracker = connector.order_book_tracker
-            if tracker and trading_pair in tracker.order_books:
-                return tracker.order_books[trading_pair]
+            if tracker and connector_pair in tracker.order_books:
+                return tracker.order_books[connector_pair]
 
         logger.warning(f"No order book found for {connector_name}/{trading_pair}")
         return None
@@ -267,6 +269,7 @@ class MarketDataService:
             connector = self._connector_service.get_best_connector_for_market(
                 connector_name, account_name
             )
+            connector_pair = connector_trading_pair(connector_name, trading_pair)
 
             if not connector:
                 return {"error": f"No connector available for {connector_name}"}
@@ -274,8 +277,8 @@ class MarketDataService:
             # Try to get from existing order book tracker
             if hasattr(connector, 'order_book_tracker') and connector.order_book_tracker:
                 tracker = connector.order_book_tracker
-                if trading_pair in tracker.order_books:
-                    order_book = tracker.order_books[trading_pair]
+                if connector_pair in tracker.order_books:
+                    order_book = tracker.order_books[connector_pair]
                     snapshot = order_book.snapshot
 
                     return {
@@ -288,7 +291,7 @@ class MarketDataService:
             # Fallback to getting fresh order book from data source
             if hasattr(connector, '_orderbook_ds') and connector._orderbook_ds:
                 orderbook_ds = connector._orderbook_ds
-                order_book = await orderbook_ds.get_new_order_book(trading_pair)
+                order_book = await orderbook_ds.get_new_order_book(connector_pair)
                 snapshot = order_book.snapshot
 
                 return {
@@ -330,6 +333,7 @@ class MarketDataService:
             connector = self._connector_service.get_best_connector_for_market(
                 connector_name, account_name
             )
+            connector_pair = connector_trading_pair(connector_name, trading_pair)
 
             if not connector:
                 return {"error": f"No connector available for {connector_name}"}
@@ -338,11 +342,11 @@ class MarketDataService:
             order_book = None
             if hasattr(connector, 'order_book_tracker') and connector.order_book_tracker:
                 tracker = connector.order_book_tracker
-                if trading_pair in tracker.order_books:
-                    order_book = tracker.order_books[trading_pair]
+                if connector_pair in tracker.order_books:
+                    order_book = tracker.order_books[connector_pair]
 
             if not order_book and hasattr(connector, '_orderbook_ds') and connector._orderbook_ds:
-                order_book = await connector._orderbook_ds.get_new_order_book(trading_pair)
+                order_book = await connector._orderbook_ds.get_new_order_book(connector_pair)
 
             if not order_book:
                 return {"error": f"No order book available for {connector_name}/{trading_pair}"}

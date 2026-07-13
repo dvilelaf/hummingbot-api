@@ -24,6 +24,54 @@ def test_connector_trading_pair_is_narrowly_scoped(connector_name, trading_pair,
     assert connector_trading_pair(connector_name, trading_pair) == expected
 
 
+def test_market_data_initializes_hyperliquid_connector_market():
+    pytest.importorskip("hummingbot")
+    from services.market_data_service import MarketDataService
+
+    service = MarketDataService.__new__(MarketDataService)
+    service._connector_service = MagicMock()
+    service._connector_service.initialize_order_book = AsyncMock(return_value=True)
+
+    result = asyncio.run(
+        service.initialize_order_book(
+            "hyperliquid_perpetual",
+            "HYPE-USDC",
+            account_name="master_account",
+        )
+    )
+
+    assert result is True
+    service._connector_service.initialize_order_book.assert_awaited_once_with(
+        connector_name="hyperliquid_perpetual",
+        trading_pair="HYPE-USD",
+        account_name="master_account",
+        timeout=30.0,
+    )
+
+
+def test_market_data_reads_connector_book_with_logical_market():
+    pytest.importorskip("hummingbot")
+    from services.market_data_service import MarketDataService
+
+    book = object()
+    connector = SimpleNamespace(
+        order_book_tracker=SimpleNamespace(order_books={"HYPE-USD": book}),
+    )
+    service = MarketDataService.__new__(MarketDataService)
+    service._connector_service = MagicMock()
+    service._connector_service.get_best_connector_for_market.return_value = connector
+    service._last_access_times = {}
+    service._feed_configs = {}
+
+    result = service.get_order_book(
+        "hyperliquid_perpetual",
+        "HYPE-USDC",
+        "master_account",
+    )
+
+    assert result is book
+
+
 def test_logical_observation_normalizes_market_and_usd_fee_currency():
     assert logical_observation(
         {
