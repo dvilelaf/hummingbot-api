@@ -368,14 +368,14 @@ class UnifiedConnectorService:
             else:
                 # Connector started, dynamically add trading pair
                 success = await self._add_trading_pair_to_tracker(
-                    connector, trading_pair
+                    connector, trading_pair, timeout
                 )
                 if not success:
                     return False
 
         # For trading connectors, dynamically add trading pair
         else:
-            success = await self._add_trading_pair_to_tracker(connector, trading_pair)
+            success = await self._add_trading_pair_to_tracker(connector, trading_pair, timeout)
             if not success:
                 return False
 
@@ -397,7 +397,8 @@ class UnifiedConnectorService:
     async def _add_trading_pair_to_tracker(
         self,
         connector: ExchangePyBase,
-        trading_pair: str
+        trading_pair: str,
+        timeout: float = 30.0,
     ) -> bool:
         """Add a trading pair to connector's order book tracker.
 
@@ -424,11 +425,21 @@ class UnifiedConnectorService:
                     return True
 
                 logger.info(f"Adding {trading_pair} to running tracker")
-                result = await connector.add_trading_pair(trading_pair)
-                if result:
+                try:
+                    result = await asyncio.wait_for(
+                        connector.add_trading_pair(trading_pair), timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"Timeout ({timeout}s) adding {trading_pair} to tracker, "
+                        "falling back to REST snapshot"
+                    )
+                    result = None
+                if result is True:
                     logger.info(f"Successfully added {trading_pair}")
                     return True
-                logger.warning(f"add_trading_pair() returned False for {trading_pair}")
+                if result is False:
+                    logger.warning(f"add_trading_pair() returned False for {trading_pair}")
 
             # Case 2: Tracker not running - start it with this trading pair
             else:
