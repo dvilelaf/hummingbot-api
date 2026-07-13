@@ -34,9 +34,16 @@ GATEWAY_RECOVERABLE_EXECUTION_STATUSES = frozenset(
     {
         "approval_submission_ambiguous",
         "approval_submission_pending",
+        "approval_confirmed",
+        "approval_submitted",
         "built",
         "submission_ambiguous",
         "submission_pending",
+        "submitted",
+        "wrap_confirmed",
+        "wrap_submission_ambiguous",
+        "wrap_submission_pending",
+        "wrap_submitted",
     }
 )
 

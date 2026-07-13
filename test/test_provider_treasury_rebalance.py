@@ -729,8 +729,15 @@ def test_execute_rejects_idempotency_key_mismatch_before_gateway(monkeypatch):
         "built",
         "approval_submission_pending",
         "approval_submission_ambiguous",
+        "approval_submitted",
+        "approval_confirmed",
         "submission_pending",
         "submission_ambiguous",
+        "submitted",
+        "wrap_submission_pending",
+        "wrap_submission_ambiguous",
+        "wrap_submitted",
+        "wrap_confirmed",
     ],
 )
 def test_execute_restart_recovers_pending_claim_from_gateway_recoverable_status(
@@ -847,7 +854,7 @@ def test_execute_retry_recovers_persisted_gateway_recoverable_status(monkeypatch
 
 @pytest.mark.parametrize(
     "gateway_status",
-    ["submitted", "approval_submitted", "confirmed", "failed", "unknown", "cancelled"],
+    ["confirmed", "destination_pending", "failed", "unknown", "cancelled"],
 )
 def test_execute_pending_claim_never_resubmits_non_recoverable_gateway_status(
     monkeypatch,
