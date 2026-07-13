@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from decimal import Decimal
 
-from sqlalchemy import desc, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Order
@@ -73,6 +73,48 @@ class OrderRepository:
                 order.status = "PARTIALLY_FILLED"
             
             await self.session.flush()
+        return order
+
+    async def recompute_order_aggregates(self, client_order_id: str, trades: List,
+                                         exchange_order_id: Optional[str] = None) -> Optional[Order]:
+        result = await self.session.execute(
+            select(Order).where(Order.client_order_id == client_order_id)
+        )
+        order = result.scalar_one_or_none()
+        if order is None:
+            return None
+
+        total_filled = Decimal("0")
+        total_fee = Decimal("0")
+        weighted_sum = Decimal("0")
+        fee_currency = None
+
+        for trade in trades:
+            amt = Decimal(str(trade.amount or 0))
+            price = Decimal(str(trade.price or 0))
+            fee = Decimal(str(trade.fee_paid or 0))
+            total_filled += amt
+            total_fee += fee
+            weighted_sum += amt * price
+            if trade.fee_currency:
+                fee_currency = trade.fee_currency
+
+        order.filled_amount = float(total_filled)
+        if total_filled > 0:
+            order.average_fill_price = float(weighted_sum / total_filled)
+        order.fee_paid = float(total_fee)
+        if fee_currency:
+            order.fee_currency = fee_currency
+        if exchange_order_id:
+            order.exchange_order_id = exchange_order_id
+
+        order_amount = Decimal(str(order.amount))
+        if total_filled >= order_amount:
+            order.status = "FILLED"
+        elif total_filled > 0:
+            order.status = "PARTIALLY_FILLED"
+
+        await self.session.flush()
         return order
 
     async def get_orders(self, account_name: Optional[str] = None, 

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from sqlalchemy import desc, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,6 +40,13 @@ class TradeRepository:
         query = select(Trade).where(Trade.trade_id == trade_id)
         result = await self.session.execute(query)
         return result.scalar_one_or_none()
+
+    async def get_trades_by_order_id(self, order_id: int) -> List[Trade]:
+        """Get all trades for a given order id."""
+        result = await self.session.execute(
+            select(Trade).where(Trade.order_id == order_id)
+        )
+        return result.scalars().all()
 
     async def get_trades(self, account_name: Optional[str] = None,
                         connector_name: Optional[str] = None,

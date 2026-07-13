@@ -105,6 +105,7 @@ def fill_ctx(service):
     trade_repo = MagicMock()
     trade_repo.get_trade_by_id = AsyncMock(return_value=None)
     trade_repo.create_trade = AsyncMock(return_value=SimpleNamespace(id=99, trade_id="ORD-1_5001"))
+    trade_repo.get_trades_by_order_id = AsyncMock(return_value=[])
     fills = [{"tid": 5001, "sz": "5.0", "px": "1.5", "fee": "0.05",
               "feeToken": "USDC", "time": "1718000000000", "oid": 999}]
     return SimpleNamespace(order_repo=order_repo, trade_repo=trade_repo,
@@ -136,6 +137,67 @@ async def test_fill_skips_when_already_persisted(service, fill_ctx, existing_id)
 
 
 @pytest.mark.asyncio
+async def test_external_fills_recompute_from_all_persisted_trades(service, fill_ctx):
+    fill_ctx.fills[0]["sz"] = "0.50"
+    fill_ctx.fills[0]["px"] = "31"
+    fill_ctx.fills[0]["fee"] = "0.015"
+    trades = [
+        SimpleNamespace(amount=0.50, price=31, fee_paid=0.015, fee_currency="USDC"),
+        SimpleNamespace(amount=0.14, price=32, fee_paid=0.004, fee_currency="USDC"),
+    ]
+    fill_ctx.fills.append(
+        {"tid": 5002, "sz": "0.14", "px": "32", "fee": "0.004",
+         "feeToken": "USDC", "time": "1718000001000", "oid": 999}
+    )
+    fill_ctx.trade_repo.create_trade = AsyncMock(side_effect=[SimpleNamespace(), None])
+    fill_ctx.trade_repo.get_trades_by_order_id = AsyncMock(return_value=trades)
+    fill_ctx.order_repo.recompute_order_aggregates = AsyncMock()
+
+    await service._persist_external_order_fills(
+        order_repo=fill_ctx.order_repo,
+        trade_repo=fill_ctx.trade_repo,
+        order=fill_ctx.order,
+        fills=fill_ctx.fills,
+    )
+
+    fill_ctx.order_repo.recompute_order_aggregates.assert_awaited_once_with(
+        "ORD-1", trades, exchange_order_id="999"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recompute_order_aggregates_uses_persisted_trade_truth():
+    from database.repositories.order_repository import OrderRepository
+
+    order = SimpleNamespace(
+        amount=0.64,
+        filled_amount=0.50,
+        average_fill_price=31,
+        fee_paid=0.015,
+        fee_currency="USDC",
+        exchange_order_id=None,
+        status="PARTIALLY_FILLED",
+    )
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = order
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+    session.flush = AsyncMock()
+    trades = [
+        SimpleNamespace(amount=0.50, price=31, fee_paid=0.015, fee_currency="USDC"),
+        SimpleNamespace(amount=0.14, price=32, fee_paid=0.004, fee_currency="USDC"),
+    ]
+
+    await OrderRepository(session).recompute_order_aggregates("ORD-1", trades, "999")
+
+    assert order.filled_amount == pytest.approx(0.64)
+    assert order.average_fill_price == pytest.approx((0.50 * 31 + 0.14 * 32) / 0.64)
+    assert order.fee_paid == pytest.approx(0.019)
+    assert order.exchange_order_id == "999"
+    assert order.status == "FILLED"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("has_fills", [True, False])
 async def test_reconcile_persistence_selects_fills_or_tracked(service, monkeypatch, has_fills):
     from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
@@ -156,11 +218,7 @@ async def test_reconcile_persistence_selects_fills_or_tracked(service, monkeypat
 
     external_fills = [{"tid": "5001", "sz": "5.0", "px": "1.5", "time": "1718000000000"}] if has_fills else []
 
-    async def fake_fetch(conn, o):
-        return external_fills
-
-    monkeypatch.setattr(service, "_refresh_tracked_order_fills", AsyncMock())
-    monkeypatch.setattr(service, "_fetch_hyperliquid_order_fills", fake_fetch)
+    monkeypatch.setattr(service, "_fetch_hyperliquid_order_fills", AsyncMock(return_value=external_fills))
 
     persist_tracked = AsyncMock()
     persist_external = AsyncMock()

@@ -1266,6 +1266,14 @@ class UnifiedConnectorService:
                 exchange_order_id=str(fill.get("oid") or order.exchange_order_id or ""),
             )
 
+        all_trades = await trade_repo.get_trades_by_order_id(db_order.id)
+        if not all_trades:
+            return
+        exchange_oid = str(fill.get("oid") or order.exchange_order_id or "")
+        await order_repo.recompute_order_aggregates(
+            order.client_order_id, all_trades, exchange_order_id=exchange_oid
+        )
+
     async def sync_all_orders_to_database(self):
         """
         Sync in_flight_orders to DB for every trading connector, then reconcile once.
