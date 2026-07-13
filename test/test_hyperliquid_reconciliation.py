@@ -244,7 +244,8 @@ async def test_duplicate_trade_rolls_back_only_savepoint():
 
 
 @pytest.mark.asyncio
-async def test_recorder_recomputes_from_durable_trades(monkeypatch):
+@pytest.mark.parametrize("existing_id", [None, "ORD-1_5002", "5002"])
+async def test_recorder_recomputes_from_durable_trades(monkeypatch, existing_id):
     from services.orders_recorder import OrdersRecorder
 
     db_order = SimpleNamespace(id=42)
@@ -256,7 +257,9 @@ async def test_recorder_recomputes_from_durable_trades(monkeypatch):
     order_repo.get_order_by_client_id_with_lock = AsyncMock(return_value=db_order)
     order_repo.recompute_order_aggregates = AsyncMock()
     trade_repo = MagicMock()
-    trade_repo.get_trade_by_id = AsyncMock(return_value=None)
+    trade_repo.get_trade_by_id = AsyncMock(
+        side_effect=lambda trade_id: SimpleNamespace() if trade_id == existing_id else None
+    )
     trade_repo.create_trade = AsyncMock(return_value=SimpleNamespace(id=1))
     trade_repo.get_trades_by_order_id = AsyncMock(return_value=trades)
     monkeypatch.setattr("services.orders_recorder.OrderRepository", lambda _session: order_repo)
@@ -276,6 +279,10 @@ async def test_recorder_recomputes_from_durable_trades(monkeypatch):
     order_repo.recompute_order_aggregates.assert_awaited_once_with(
         "ORD-1", trades, exchange_order_id="999"
     )
+    if existing_id is None:
+        trade_repo.create_trade.assert_awaited_once()
+    else:
+        trade_repo.create_trade.assert_not_awaited()
 
 
 @pytest.mark.asyncio

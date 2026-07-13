@@ -266,9 +266,11 @@ class OrdersRecorder:
                     # Fallback: include amount to differentiate partial fills at same timestamp
                     trade_id = f"{event.order_id}_{validated_timestamp}_{float(filled_amount)}"
 
-                # Canonical duplicate check. Recompute even for an existing
-                # trade so retries converge stale aggregates to durable truth.
+                # Check canonical and legacy raw identities. Recompute even for
+                # an existing trade so retries converge stale aggregates.
                 existing_trade = await trade_repo.get_trade_by_id(trade_id)
+                if existing_trade is None and exchange_trade_id:
+                    existing_trade = await trade_repo.get_trade_by_id(str(exchange_trade_id))
                 if existing_trade is None:
                     trade_data = {
                         "order_id": db_order.id,
