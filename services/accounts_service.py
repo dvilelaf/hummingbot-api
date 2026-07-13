@@ -921,6 +921,25 @@ class AccountsService:
             else:
                 self.accounts_state[account_name][connector_name] = result
 
+    async def get_fresh_available_balance(
+        self,
+        account_name: str,
+        connector_name: str,
+        token: str,
+    ) -> Decimal:
+        """Refresh one initialized account connector and return its exact available balance."""
+        all_connectors = self._connector_service.get_all_trading_connectors() if self._connector_service else {}
+        connector = all_connectors.get(account_name, {}).get(connector_name)
+        if connector is None:
+            raise ValueError(f"Connector {connector_name} is not initialized for account {account_name}")
+        if not hasattr(connector, "_update_balances"):
+            raise ValueError(f"Connector {connector_name} cannot refresh balances")
+        await connector._update_balances()
+        balance = connector.get_available_balance(token)
+        if not isinstance(balance, Decimal):
+            balance = Decimal(str(balance))
+        return balance
+
     async def _get_connector_tokens_info(self, connector, connector_name: str, skip_balance_refresh: bool = False) -> List[Dict]:
         """Get token info from a connector instance using RateOracle cached prices.
 

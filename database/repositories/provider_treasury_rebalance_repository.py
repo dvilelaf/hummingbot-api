@@ -14,9 +14,9 @@ class ProviderTreasuryRebalanceRepository:
 
     async def get_rebalance(self, rebalance_id: str) -> ProviderTreasuryRebalance | None:
         result = await self.session.execute(
-            select(ProviderTreasuryRebalance).where(
-                ProviderTreasuryRebalance.rebalance_id == rebalance_id,
-            )
+            select(ProviderTreasuryRebalance)
+            .where(ProviderTreasuryRebalance.rebalance_id == rebalance_id)
+            .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
 
@@ -57,15 +57,25 @@ class ProviderTreasuryRebalanceRepository:
         status: str,
         response_payload: dict[str, Any],
     ) -> ProviderTreasuryRebalance | None:
-        values: dict[str, Any] = {"response_payload": response_payload}
+        payload = dict(response_payload)
+        # Preserve internal baseline fields from the existing record.
+        existing = await self.get_rebalance(rebalance_id)
+        if existing is not None and isinstance(existing.response_payload, dict):
+            baseline = existing.response_payload.get("_hl_baseline_usdc")
+            if baseline is not None:
+                payload.setdefault("_hl_baseline_usdc", baseline)
+        values: dict[str, Any] = {"response_payload": payload}
         # Gateway may briefly report its pre-submit build state while another
         # process owns the durable execution claim. Never reopen that claim.
         if status != "built":
             values["status"] = status
-        result = await self.session.execute(
-            update(ProviderTreasuryRebalance)
-            .where(ProviderTreasuryRebalance.rebalance_id == rebalance_id)
-            .values(**values)
-            .returning(ProviderTreasuryRebalance)
+        statement = update(ProviderTreasuryRebalance).where(
+            ProviderTreasuryRebalance.rebalance_id == rebalance_id,
         )
-        return result.scalar_one_or_none()
+        if status != "confirmed":
+            statement = statement.where(ProviderTreasuryRebalance.status != "confirmed")
+        result = await self.session.execute(
+            statement.values(**values).returning(ProviderTreasuryRebalance)
+        )
+        updated = result.scalar_one_or_none()
+        return updated if updated is not None else await self.get_rebalance(rebalance_id)

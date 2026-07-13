@@ -30,6 +30,8 @@ DESTINATION_WALLET_REF_MISMATCH_BLOCKER = "destination_wallet_ref_mismatch"
 DESTINATION_WALLET_DEFAULT_FAILED_BLOCKER = "destination_wallet_default_failed"
 IDEMPOTENCY_KEY_CONFLICT_BLOCKER = "idempotency_key_conflict"
 HYPERLIQUID_MAINNET_WALLET_REF = "hyperliquid:mainnet:hyperliquid_trader"
+HL_BASELINE_FIELD = "_hl_baseline_usdc"
+
 GATEWAY_RECOVERABLE_EXECUTION_STATUSES = frozenset(
     {
         "approval_submission_ambiguous",
@@ -84,11 +86,16 @@ async def create_provider_treasury_rebalance(
         if body.destination_amount is not None:
             stored_request["destination_amount"] = _decimal_payload_value(body.destination_amount)
         database_manager = _database_manager(request, db_manager)
+        initial_response_payload = {"id": body.idempotency_key, "status": "built"}
+        if destination_chain == "hyperliquid" and destination_network == "mainnet":
+            initial_response_payload[HL_BASELINE_FIELD] = str(
+                await _hl_usdc_balance(accounts_service, body.account_name.strip())
+            )
         stored_record = await _create_built_rebalance(
             database_manager,
             body.idempotency_key,
             stored_request,
-            {"id": body.idempotency_key, "status": "built"},
+            initial_response_payload,
         )
         if stored_record.request_payload != stored_request:
             raise HTTPException(status_code=409, detail=IDEMPOTENCY_KEY_CONFLICT_BLOCKER)
@@ -128,10 +135,11 @@ async def create_provider_treasury_rebalance(
             result.setdefault("id", body.idempotency_key)
             result.setdefault("status", "built")
         response = _rebalance_response(result, rebalance_id=body.idempotency_key)
+        response_payload = _rebalance_response_payload(response)
         await _update_rebalance_status(
             database_manager,
             body.idempotency_key,
-            _rebalance_response_payload(response),
+            response_payload,
         )
         return response
     except HTTPException:
@@ -214,14 +222,11 @@ async def get_provider_treasury_rebalance(
     try:
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
-        result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
-        response = _rebalance_response(result, rebalance_id=rebalance_id)
-        await _update_rebalance_status(
+        return await _refresh_rebalance_status(
+            accounts_service,
             _database_manager(request, db_manager),
             rebalance_id,
-            _rebalance_response_payload(response),
         )
-        return response
     except HTTPException:
         raise
     except Exception as exc:
@@ -298,6 +303,21 @@ def _marlin_destination_wallet_identity(
         "address": address,
         "wallet_ref": wallet_ref,
     }
+
+
+async def _hl_usdc_balance(accounts_service: AccountsService, account_name: str) -> Decimal:
+    """Return a fresh hyperliquid_perpetual USDC balance, fail-closed on any error."""
+    try:
+        val = await accounts_service.get_fresh_available_balance(
+            account_name,
+            "hyperliquid_perpetual",
+            "USDC",
+        )
+    except Exception:
+        raise HTTPException(status_code=502, detail="Hyperliquid balance refresh failed")
+    if not val.is_finite() or val < 0:
+        raise HTTPException(status_code=502, detail="Hyperliquid USDC balance non-finite or negative")
+    return val
 
 
 def _rebalance_response(
@@ -560,13 +580,60 @@ async def _refresh_rebalance_status(
     database_manager,
     rebalance_id: str,
 ) -> ProviderTreasuryRebalanceResponse:
+    record = await _get_rebalance(database_manager, rebalance_id)
+    if (
+        record is not None
+        and str(record.status).lower() == "confirmed"
+        and isinstance(record.response_payload, dict)
+        and str(record.response_payload.get("status", "")).lower() == "confirmed"
+    ):
+        return _rebalance_response(record.response_payload, rebalance_id=rebalance_id)
     result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
     response = _rebalance_response(result, rebalance_id=rebalance_id)
-    await _update_rebalance_status(
+    payload = _rebalance_response_payload(response)
+
+    if response.status.lower() == "destination_pending":
+        if record is not None and isinstance(record.request_payload, dict):
+            rp = record.request_payload
+            staged_hyperliquid_credit = (
+                rp.get("destination_chain") == "hyperliquid"
+                and rp.get("destination_network") == "mainnet"
+                and str(rp.get("destination_asset", "")).upper() == "USDC"
+                and response.stage_index == 1
+                and response.stage_count == 2
+                and (response.stage_status or "").lower() == "source_confirmed"
+            )
+            if staged_hyperliquid_credit:
+                if not isinstance(record.response_payload, dict):
+                    raise HTTPException(status_code=502, detail="Hyperliquid treasury baseline unavailable")
+                baseline_raw = record.response_payload.get(HL_BASELINE_FIELD)
+                try:
+                    baseline = Decimal(str(baseline_raw))
+                except (TypeError, ValueError, ArithmeticError):
+                    raise HTTPException(status_code=502, detail="Hyperliquid treasury baseline malformed")
+                if not baseline.is_finite() or baseline < 0:
+                    raise HTTPException(status_code=502, detail="Hyperliquid treasury baseline malformed")
+                if response.destination_amount is None or response.destination_amount <= 0:
+                    raise HTTPException(status_code=502, detail="Hyperliquid treasury destination amount unavailable")
+                account_name = str(rp.get("account_name", "")).strip()
+                if not account_name:
+                    raise HTTPException(status_code=502, detail="Hyperliquid treasury account unavailable")
+                fresh = await _hl_usdc_balance(accounts_service, account_name)
+                if fresh - baseline >= response.destination_amount:
+                    response = response.model_copy(update={"status": "confirmed"})
+                    payload = _rebalance_response_payload(response)
+
+    updated = await _update_rebalance_status(
         database_manager,
         rebalance_id,
-        _rebalance_response_payload(response),
+        payload,
     )
+    if (
+        updated is not None
+        and str(updated.status).lower() == "confirmed"
+        and response.status.lower() != "confirmed"
+    ):
+        return _rebalance_response(updated.response_payload, rebalance_id=rebalance_id)
     return response
 
 

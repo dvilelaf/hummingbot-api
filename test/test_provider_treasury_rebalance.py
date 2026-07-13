@@ -143,9 +143,16 @@ class FakeProviderTreasuryRebalanceRepository:
     async def update_status(self, rebalance_id, status, response_payload):
         record = self.records.get(rebalance_id)
         if record is not None:
+            if record.status == "confirmed" and status != "confirmed":
+                return record
+            payload = dict(response_payload)
+            if isinstance(record.response_payload, dict):
+                baseline = record.response_payload.get("_hl_baseline_usdc")
+                if baseline is not None:
+                    payload.setdefault("_hl_baseline_usdc", baseline)
             if status != "built":
                 record.status = status
-            record.response_payload = response_payload
+            record.response_payload = payload
         return record
 
 
@@ -205,6 +212,11 @@ class FakeAccountsService:
     def __init__(self, identities=None):
         self.gateway_client = FakeGatewayClient()
         self.identity_calls = []
+        self._connector_balance_refresh_errors = {}
+        self.accounts_state = {}
+        self._hl_balance = None
+        self._refresh_error = None
+        self.update_account_state_calls = []
         self.identities = identities if identities is not None else {
             ("ethereum", "base"): {
                 "address": "0x00000000000000000000000000000000000000B1",
@@ -223,6 +235,45 @@ class FakeAccountsService:
     def _marlin_gateway_wallet_identity(self, *, chain, network):
         self.identity_calls.append((chain, network))
         return self.identities.get((chain, network))
+
+    def get_accounts_state(self):
+        return self.accounts_state
+
+    def connector_balance_refresh_error(self, connector_name):
+        return self._connector_balance_refresh_errors.get(connector_name)
+
+    async def update_account_state(self, skip_gateway=False, account_names=None, connector_names=None):
+        self.update_account_state_calls.append((skip_gateway, account_names, connector_names))
+        if self._refresh_error:
+            self._connector_balance_refresh_errors["hyperliquid_perpetual"] = self._refresh_error
+        else:
+            self._connector_balance_refresh_errors.pop("hyperliquid_perpetual", None)
+            if account_names:
+                for acct in account_names:
+                    if acct not in self.accounts_state:
+                        self.accounts_state[acct] = {}
+                    if self._hl_balance is not None:
+                        self.accounts_state[acct]["hyperliquid_perpetual"] = [
+                            {
+                                "token": "USDC",
+                                "units": float(self._hl_balance),
+                                "available_units": float(self._hl_balance),
+                                "price": 1.0,
+                                "value": float(self._hl_balance),
+                            }
+                        ]
+                    elif "hyperliquid_perpetual" not in self.accounts_state.get(acct, {}):
+                        self.accounts_state[acct]["hyperliquid_perpetual"] = []
+
+    async def get_fresh_available_balance(self, account_name, connector_name, token):
+        await self.update_account_state(
+            skip_gateway=True,
+            account_names=[account_name],
+            connector_names=[connector_name],
+        )
+        if self._refresh_error:
+            raise RuntimeError(self._refresh_error)
+        return self._hl_balance or Decimal("0")
 
 
 def _neutral_request(module, **overrides):
@@ -695,7 +746,7 @@ def test_execute_claims_durable_record_once_and_forwards_only_id(monkeypatch):
     assert [result.status for result in results] == ["confirmed", "confirmed"]
     assert service.gateway_client.execute_calls == ["target-funding-1"]
     assert service.gateway_client.statuses_at_execute == ["pending"]
-    assert service.gateway_client.status_calls == ["target-funding-1", "target-funding-1"]
+    assert service.gateway_client.status_calls == ["target-funding-1"]
     assert _REBALANCE_RECORDS["target-funding-1"].status == "confirmed"
 
 
@@ -1445,6 +1496,533 @@ def test_gateway_client_uses_exact_target_paths_and_payload(monkeypatch):
         ("POST", "bridge/rebalance/targets/target-funding-1/execute", {}),
         ("GET", "bridge/rebalance/target-funding-1", {}),
     ]
+
+
+def _hl_create(module, service, monkeypatch, **overrides):
+    """Create a Hyperliquid target and return the response."""
+    data = dict(
+        destination_chain="hyperliquid",
+        destination_network="mainnet",
+        destination_wallet_ref="hyperliquid:mainnet:hyperliquid_trader",
+        route_id="hl-mainnet",
+    )
+    data.update(overrides)
+    return asyncio.run(
+        module.create_provider_treasury_rebalance(
+            _neutral_request(module, **data),
+            _authorized_request(),
+            service,
+        )
+    )
+
+
+def _stub_hl_credentials(module, monkeypatch):
+    monkeypatch.setattr(
+        module,
+        "_derive_marlin_credential_values",
+        lambda namespace: {
+            "hyperliquid_address": "0x00000000000000000000000000000000000000A1",
+            "hyperliquid_secret_key": "unused",
+        },
+    )
+
+
+def test_hyperliquid_create_captures_usdc_baseline(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+
+    result = _hl_create(module, service, monkeypatch)
+
+    stored = _REBALANCE_RECORDS["target-funding-1"]
+    assert stored.response_payload.get("_hl_baseline_usdc") is not None
+    assert result.status == "built"
+    assert "_hl_baseline_usdc" not in result.model_dump(exclude_none=True)
+
+
+def test_hyperliquid_baseline_persists_across_status_updates(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch)
+
+    asyncio.run(
+        module._update_rebalance_status(
+            _authorized_request().app.state.db_manager,
+            "target-funding-1",
+            {"status": "pending", "transaction_hash": "0xabc"},
+        )
+    )
+
+    stored = _REBALANCE_RECORDS["target-funding-1"]
+    assert stored.response_payload.get("status") == "pending"
+    assert stored.response_payload.get("_hl_baseline_usdc") is not None
+
+
+def test_hyperliquid_baseline_is_durable_before_gateway_side_effect(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+
+    async def fail_wallet_setup(**kwargs):
+        raise RuntimeError("gateway unavailable")
+
+    service.gateway_client.set_marlin_default_wallet = fail_wallet_setup
+    with pytest.raises(module.HTTPException):
+        _hl_create(module, service, monkeypatch)
+
+    assert _REBALANCE_RECORDS["target-funding-1"].response_payload["_hl_baseline_usdc"] == "500"
+
+
+def test_hyperliquid_baseline_persists_after_module_recreation(monkeypatch):
+    first_module = _provider_treasury_module()
+    first_service = FakeAccountsService()
+    first_service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(first_module, monkeypatch)
+    _hl_create(first_module, first_service, monkeypatch)
+
+    recreated_module = _provider_treasury_module()
+    recreated_service = FakeAccountsService()
+    recreated_service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "confirmed",
+            "transactionHash": "0xconfirmed",
+        }
+    ]
+    result = asyncio.run(
+        recreated_module.get_provider_treasury_rebalance(
+            "target-funding-1",
+            _authorized_request(),
+            recreated_service,
+        )
+    )
+
+    assert result.status == "confirmed"
+    stored = _REBALANCE_RECORDS["target-funding-1"]
+    assert stored.response_payload.get("_hl_baseline_usdc") is not None
+
+
+def test_hyperliquid_delta_exact_confirms(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_amount=Decimal("300"))
+
+    service._hl_balance = Decimal("800")
+    _REBALANCE_RECORDS["target-funding-1"].status = "destination_pending"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stageIndex": 1,
+            "stageCount": 2,
+            "stageStatus": "source_confirmed",
+            "destinationAmount": "300",
+        }
+    ]
+
+    result = asyncio.run(
+        module.get_provider_treasury_rebalance(
+            "target-funding-1",
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "confirmed"
+
+
+def test_hyperliquid_delta_greater_confirms(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_amount=Decimal("300"))
+
+    service._hl_balance = Decimal("900")
+    _REBALANCE_RECORDS["target-funding-1"].status = "destination_pending"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stageIndex": 1,
+            "stageCount": 2,
+            "stageStatus": "source_confirmed",
+            "destinationAmount": "300",
+        }
+    ]
+
+    result = asyncio.run(
+        module.get_provider_treasury_rebalance(
+            "target-funding-1",
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "confirmed"
+
+
+def test_hyperliquid_delta_under_remains_pending(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_amount=Decimal("300"))
+
+    service._hl_balance = Decimal("700")
+    _REBALANCE_RECORDS["target-funding-1"].status = "destination_pending"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stageIndex": 1,
+            "stageCount": 2,
+            "stageStatus": "source_confirmed",
+            "destinationAmount": "300",
+        }
+    ]
+
+    result = asyncio.run(
+        module.get_provider_treasury_rebalance(
+            "target-funding-1",
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "destination_pending"
+    assert service.gateway_client.execute_calls == []
+
+
+def test_hyperliquid_exact_decimal_below_target_remains_pending(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_amount=Decimal("300"))
+
+    service._hl_balance = Decimal("799.999999999999999999")
+    service.gateway_client.status_results = [{
+        "idempotencyKey": "target-funding-1",
+        "status": "destination_pending",
+        "stageIndex": 1,
+        "stageCount": 2,
+        "stageStatus": "source_confirmed",
+        "destinationAmount": "300",
+    }]
+
+    result = asyncio.run(module.get_provider_treasury_rebalance(
+        "target-funding-1", _authorized_request(), service,
+    ))
+
+    assert result.status == "destination_pending"
+
+
+def test_hyperliquid_zero_delta_remains_pending(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_amount=Decimal("300"))
+
+    service._hl_balance = Decimal("500")
+    _REBALANCE_RECORDS["target-funding-1"].status = "destination_pending"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stageIndex": 1,
+            "stageCount": 2,
+            "stageStatus": "source_confirmed",
+            "destinationAmount": "300",
+        }
+    ]
+
+    result = asyncio.run(
+        module.get_provider_treasury_rebalance(
+            "target-funding-1",
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "destination_pending"
+
+
+def test_hyperliquid_refresh_failure_fails_closed(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_amount=Decimal("300"))
+
+    service._refresh_error = "connection timeout"
+    _REBALANCE_RECORDS["target-funding-1"].status = "destination_pending"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stageIndex": 1,
+            "stageCount": 2,
+            "stageStatus": "source_confirmed",
+            "destinationAmount": "300",
+        }
+    ]
+
+    with pytest.raises(module.HTTPException) as exc:
+        asyncio.run(
+            module.get_provider_treasury_rebalance(
+                "target-funding-1",
+                _authorized_request(),
+                service,
+            )
+        )
+
+    assert exc.value.status_code == 502
+    detail = str(exc.value.detail)
+    assert "Hyperliquid" in detail
+    assert "connection timeout" not in detail
+
+
+def test_hyperliquid_no_usdc_row_returns_zero_and_no_confirm(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_amount=Decimal("300"))
+
+    service._hl_balance = None
+    _REBALANCE_RECORDS["target-funding-1"].status = "destination_pending"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stageIndex": 1,
+            "stageCount": 2,
+            "stageStatus": "source_confirmed",
+            "destinationAmount": "300",
+        }
+    ]
+
+    result = asyncio.run(
+        module.get_provider_treasury_rebalance(
+            "target-funding-1",
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "destination_pending"
+
+
+def test_non_hyperliquid_destination_pending_unchanged(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        module.create_provider_treasury_rebalance(
+            _neutral_request(module),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    _REBALANCE_RECORDS["target-funding-1"].status = "destination_pending"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stageIndex": 1,
+            "stageCount": 2,
+            "stageStatus": "source_confirmed",
+        }
+    ]
+
+    result = asyncio.run(
+        module.get_provider_treasury_rebalance(
+            "target-funding-1",
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "destination_pending"
+    assert len(service.update_account_state_calls) == 0
+
+
+def test_hyperliquid_destination_pending_wrong_stage_ignored(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_amount=Decimal("300"))
+
+    _REBALANCE_RECORDS["target-funding-1"].status = "destination_pending"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stageIndex": 0,
+            "stageCount": 2,
+            "stageStatus": "built",
+        }
+    ]
+
+    result = asyncio.run(
+        module.get_provider_treasury_rebalance(
+            "target-funding-1",
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "destination_pending"
+
+
+def test_hyperliquid_non_usdc_destination_does_not_reconcile(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_asset="ETH", destination_amount=Decimal("300"))
+
+    service._hl_balance = Decimal("800")
+    service.gateway_client.status_results = [{
+        "idempotencyKey": "target-funding-1",
+        "status": "destination_pending",
+        "stageIndex": 1,
+        "stageCount": 2,
+        "stageStatus": "source_confirmed",
+        "destinationAmount": "300",
+    }]
+
+    result = asyncio.run(module.get_provider_treasury_rebalance(
+        "target-funding-1", _authorized_request(), service,
+    ))
+
+    assert result.status == "destination_pending"
+
+
+def test_hyperliquid_execute_retry_balance_check_confirms(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_amount=Decimal("300"))
+
+    service._hl_balance = Decimal("800")
+    _REBALANCE_RECORDS["target-funding-1"].status = "pending"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stageIndex": 1,
+            "stageCount": 2,
+            "stageStatus": "source_confirmed",
+            "destinationAmount": "300",
+        },
+    ]
+
+    result = asyncio.run(
+        module.execute_provider_treasury_rebalance(
+            "target-funding-1",
+            module.ProviderTreasuryRebalanceExecuteRequest(
+                idempotency_key="target-funding-1",
+            ),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "confirmed"
+    assert service.gateway_client.execute_calls == []
+
+
+def test_hyperliquid_local_confirmation_never_regresses(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_amount=Decimal("300"))
+
+    staged = {
+        "idempotencyKey": "target-funding-1",
+        "status": "destination_pending",
+        "stageIndex": 1,
+        "stageCount": 2,
+        "stageStatus": "source_confirmed",
+        "destinationAmount": "300",
+    }
+    service._hl_balance = Decimal("800")
+    service.gateway_client.status_results = [staged]
+    first = asyncio.run(module.get_provider_treasury_rebalance(
+        "target-funding-1", _authorized_request(), service,
+    ))
+    service._hl_balance = Decimal("500")
+    service.gateway_client.status_results = [staged]
+    second = asyncio.run(module.get_provider_treasury_rebalance(
+        "target-funding-1", _authorized_request(), service,
+    ))
+
+    assert first.status == "confirmed"
+    assert second.status == "confirmed"
+    assert _REBALANCE_RECORDS["target-funding-1"].status == "confirmed"
+
+
+def test_confirmed_rebalance_rejects_stale_pending_writer(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch)
+    record = _REBALANCE_RECORDS["target-funding-1"]
+    record.status = "confirmed"
+    record.response_payload = {"id": "target-funding-1", "status": "confirmed"}
+
+    updated = asyncio.run(module._update_rebalance_status(
+        _authorized_request().app.state.db_manager,
+        "target-funding-1",
+        {"id": "target-funding-1", "status": "destination_pending"},
+    ))
+
+    assert updated.status == "confirmed"
+    assert updated.response_payload["status"] == "confirmed"
+
+
+def test_hyperliquid_response_does_not_leak_baseline(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    result = _hl_create(module, service, monkeypatch)
+
+    dumped = result.model_dump(exclude_none=True)
+    assert "_hl_baseline_usdc" not in dumped
+    assert "USDC" not in str(dumped.get("metadata", {}))
+    assert "baseline" not in str(dumped)
 
 
 def test_gateway_execute_forwards_internal_provider_intent_token(monkeypatch):

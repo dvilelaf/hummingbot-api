@@ -216,6 +216,27 @@ class TestGatewayRefreshSelection:
         service._update_gateway_balances.assert_awaited_once_with(chain_networks=None)
 
     @pytest.mark.asyncio
+    async def test_fresh_connector_state_is_account_scoped_and_propagates_refresh_failure(self):
+        from services.accounts_service import AccountsService
+
+        service = AccountsService.__new__(AccountsService)
+        service.accounts_state = {}
+        service._connector_service = MagicMock()
+        connector = MagicMock()
+        connector._update_balances = AsyncMock(side_effect=RuntimeError("refresh failed"))
+        service._connector_service.get_all_trading_connectors.return_value = {
+            "master_account": {"hyperliquid_perpetual": connector},
+            "other_account": {"hyperliquid_perpetual": MagicMock()},
+        }
+        service._get_connector_tokens_info = AsyncMock()
+
+        with pytest.raises(RuntimeError, match="refresh failed"):
+            await service.get_fresh_available_balance("master_account", "hyperliquid_perpetual", "USDC")
+
+        connector._update_balances.assert_awaited_once()
+        service._get_connector_tokens_info.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_marlin_gateway_balance_refresh_ensures_derived_wallet(self, monkeypatch):
         """Marlin runtime must rehydrate Gateway's mnemonic-derived wallet before balances."""
         from services.marlin_runtime import MARLIN_RUNTIME_PROFILE, MARLIN_RUNTIME_PROFILE_ENV
