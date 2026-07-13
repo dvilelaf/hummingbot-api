@@ -8,6 +8,8 @@ import pytest
 from services.hyperliquid_market import (
     connector_trading_pair,
     logical_observation,
+    logical_trading_pair,
+    logical_trading_rule,
 )
 
 
@@ -83,6 +85,67 @@ def test_logical_observation_normalizes_market_and_usd_fee_currency():
         "connector_name": "hyperliquid_perpetual",
         "fee_currency": "USDC",
         "trading_pair": "HYPE-USDC",
+    }
+
+
+def test_logical_trading_rule_response_restores_public_contract():
+    assert logical_trading_pair("hyperliquid_perpetual", "HYPE-USD") == "HYPE-USDC"
+    assert logical_trading_rule(
+        "hyperliquid_perpetual",
+        {
+            "buy_order_collateral_token": "USD",
+            "sell_order_collateral_token": "USD",
+            "min_order_size": 0.01,
+        },
+    ) == {
+        "buy_order_collateral_token": "USDC",
+        "sell_order_collateral_token": "USDC",
+        "min_order_size": 0.01,
+    }
+
+
+def test_trading_rules_endpoint_maps_provider_and_logical_markets(monkeypatch):
+    pytest.importorskip("hummingbot")
+    import routers.connectors as module
+
+    market_data = MagicMock()
+    market_data.get_trading_rules = AsyncMock(
+        return_value={
+            "HYPE-USD": {
+                "buy_order_collateral_token": "USD",
+                "sell_order_collateral_token": "USD",
+                "min_order_size": 0.01,
+            },
+        },
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                accounts_service=MagicMock(),
+                market_data_service=market_data,
+            ),
+        ),
+    )
+    monkeypatch.setattr(module, "_gateway_swap_connector", AsyncMock(return_value=False))
+
+    result = asyncio.run(
+        module.get_trading_rules(
+            request,
+            "hyperliquid_perpetual",
+            ["HYPE-USDC"],
+        ),
+    )
+
+    market_data.get_trading_rules.assert_awaited_once_with(
+        "hyperliquid_perpetual",
+        ["HYPE-USD"],
+    )
+    assert result == {
+        "HYPE-USDC": {
+            "buy_order_collateral_token": "USDC",
+            "sell_order_collateral_token": "USDC",
+            "min_order_size": 0.01,
+        },
     }
 
 

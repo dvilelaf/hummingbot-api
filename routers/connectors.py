@@ -13,6 +13,11 @@ from services.cowswap_runtime import (
     cowswap_supported_order_types,
 )
 from services.market_data_service import MarketDataService
+from services.hyperliquid_market import (
+    connector_trading_pair,
+    logical_trading_pair,
+    logical_trading_rule,
+)
 
 router = APIRouter(tags=["Connectors"], prefix="/connectors")
 
@@ -168,13 +173,24 @@ async def get_trading_rules(
 
         market_data_service: MarketDataService = request.app.state.market_data_service
 
-        # Get trading rules (filtered by trading pairs if provided)
-        rules = await market_data_service.get_trading_rules(connector_name, trading_pairs)
+        connector_pairs = (
+            [connector_trading_pair(connector_name, pair) for pair in trading_pairs]
+            if trading_pairs is not None
+            else None
+        )
+        rules = await market_data_service.get_trading_rules(connector_name, connector_pairs)
         
         if "error" in rules:
             raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found or error: {rules['error']}")
         
-        return rules
+        return {
+            logical_trading_pair(connector_name, pair): (
+                logical_trading_rule(connector_name, rule)
+                if isinstance(rule, dict) and "error" not in rule
+                else rule
+            )
+            for pair, rule in rules.items()
+        }
         
     except HTTPException:
         raise
