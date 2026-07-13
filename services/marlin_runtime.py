@@ -193,6 +193,15 @@ def is_marlin_runtime() -> bool:
     )
 
 
+def is_marlin_hyperliquid_bootstrap_scope(account_name: str, connector_name: str) -> bool:
+    """Return whether the single mnemonic-backed Hyperliquid account may bootstrap."""
+    return (
+        os.environ.get(MARLIN_RUNTIME_PROFILE_ENV, "").strip().lower() == MARLIN_RUNTIME_PROFILE
+        and account_name == "master_account"
+        and connector_name == "hyperliquid_perpetual"
+    )
+
+
 def is_mnemonic_credential_connector(connector_name: str) -> bool:
     """Identify connectors whose signing authority is derived from MARLIN_MNEMONIC."""
     return _normalize(connector_name) in MNEMONIC_DERIVED_CREDENTIAL_KEYS

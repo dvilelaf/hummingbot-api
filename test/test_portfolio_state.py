@@ -5,7 +5,7 @@ Run with: pytest test/test_portfolio_state.py -v
 """
 import inspect
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -314,6 +314,138 @@ class TestConnectorStartup:
 
         assert service._requires_network_before_initial_queries("xrpl")
         assert not service._requires_network_before_initial_queries("binance_perpetual_testnet")
+
+    def test_marlin_discovers_hyperliquid_only_for_master_account(self, monkeypatch):
+        from services.unified_connector_service import UnifiedConnectorService
+
+        service = UnifiedConnectorService.__new__(UnifiedConnectorService)
+        monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+        monkeypatch.setattr("services.unified_connector_service.fs_util.list_files", lambda path: [])
+
+        assert service.list_available_credentials("master_account") == ["hyperliquid_perpetual"]
+        assert service.list_available_credentials("secondary") == []
+
+    def test_marlin_hyperliquid_uses_ephemeral_derived_keys_after_login(self, monkeypatch):
+        import services.unified_connector_service as module
+        from services.unified_connector_service import UnifiedConnectorService
+
+        service = UnifiedConnectorService.__new__(UnifiedConnectorService)
+        service.secrets_manager = MagicMock()
+        setting = MagicMock()
+        setting.conn_init_parameters.return_value = {"credential": "derived"}
+        service._conn_settings = {"hyperliquid_perpetual": setting}
+        monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+        derived = {
+            "hyperliquid_perpetual_address": "0xderived",
+            "hyperliquid_perpetual_secret_key": "secret",
+        }
+
+        with (
+            patch.object(module, "_derive_marlin_credential_values", return_value=derived) as derive,
+            patch.object(module.BackendAPISecurity, "login_account", return_value=True) as login,
+            patch.object(module.BackendAPISecurity, "api_keys") as file_keys,
+            patch.object(module, "get_connector_class", return_value=lambda **kwargs: kwargs),
+        ):
+            connector = service._create_trading_connector(
+                account_name="master_account",
+                connector_name="hyperliquid_perpetual",
+            )
+
+        login.assert_called_once()
+        derive.assert_called_once_with("hyperliquid_perpetual")
+        file_keys.assert_not_called()
+        setting.conn_init_parameters.assert_called_once_with(
+            trading_pairs=[], trading_required=True, api_keys=derived,
+        )
+        assert connector == {"credential": "derived"}
+
+    def test_marlin_hyperliquid_failed_login_does_not_derive(self, monkeypatch):
+        import services.unified_connector_service as module
+        from services.unified_connector_service import UnifiedConnectorService
+
+        service = UnifiedConnectorService.__new__(UnifiedConnectorService)
+        service.secrets_manager = MagicMock()
+        service._conn_settings = {"hyperliquid_perpetual": MagicMock()}
+        monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+
+        with (
+            patch.object(module, "_derive_marlin_credential_values") as derive,
+            patch.object(module.BackendAPISecurity, "login_account", return_value=False),
+            pytest.raises(PermissionError, match="authentication failed"),
+        ):
+            service._create_trading_connector("master_account", "hyperliquid_perpetual")
+
+        derive.assert_not_called()
+
+    def test_marlin_hyperliquid_never_falls_back_to_file_credentials(self, monkeypatch):
+        import services.unified_connector_service as module
+        from services.unified_connector_service import UnifiedConnectorService
+
+        service = UnifiedConnectorService.__new__(UnifiedConnectorService)
+        service.secrets_manager = MagicMock()
+        service._conn_settings = {"hyperliquid_perpetual": MagicMock()}
+        monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+
+        with (
+            patch.object(module, "_derive_marlin_credential_values", return_value=None),
+            patch.object(module.BackendAPISecurity, "login_account", return_value=True),
+            patch.object(module.BackendAPISecurity, "api_keys") as file_keys,
+            pytest.raises(RuntimeError, match="credentials unavailable"),
+        ):
+            service._create_trading_connector("master_account", "hyperliquid_perpetual")
+
+        file_keys.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cached_marlin_hyperliquid_connector_is_idempotent(self, monkeypatch):
+        import services.unified_connector_service as module
+        from services.unified_connector_service import UnifiedConnectorService
+
+        cached = object()
+        service = UnifiedConnectorService.__new__(UnifiedConnectorService)
+        service._connector_locks = {}
+        service._trading_connectors = {
+            "master_account": {"hyperliquid_perpetual": cached},
+        }
+        monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+
+        with (
+            patch.object(module, "_derive_marlin_credential_values") as derive,
+            patch.object(module.BackendAPISecurity, "login_account") as login,
+        ):
+            result = await service.get_trading_connector(
+                "master_account", "hyperliquid_perpetual",
+            )
+
+        assert result is cached
+        derive.assert_not_called()
+        login.assert_not_called()
+
+    def test_non_marlin_hyperliquid_uses_file_backed_keys(self, monkeypatch):
+        import services.unified_connector_service as module
+        from services.unified_connector_service import UnifiedConnectorService
+
+        service = UnifiedConnectorService.__new__(UnifiedConnectorService)
+        service.secrets_manager = MagicMock()
+        setting = MagicMock()
+        setting.conn_init_parameters.return_value = {}
+        service._conn_settings = {"hyperliquid_perpetual": setting}
+        monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "provider")
+        persisted = {"hyperliquid_perpetual_address": "persisted"}
+
+        with (
+            patch.object(module, "_derive_marlin_credential_values") as derive,
+            patch.object(module.BackendAPISecurity, "login_account"),
+            patch.object(module.BackendAPISecurity, "api_keys", return_value=persisted) as file_keys,
+            patch.object(module, "get_connector_class", return_value=lambda **kwargs: kwargs),
+        ):
+            service._create_trading_connector("master_account", "hyperliquid_perpetual")
+
+        derive.assert_not_called()
+        file_keys.assert_called_once_with("hyperliquid_perpetual")
+        setting.conn_init_parameters.assert_called_once_with(
+            trading_pairs=[], trading_required=True, api_keys=persisted,
+        )
 
     def test_trading_connector_init_starts_early_network_before_balances(self):
         """Early-network connectors should not query balances before network start."""

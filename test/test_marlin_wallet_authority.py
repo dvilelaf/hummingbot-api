@@ -19,6 +19,7 @@ assert_gateway_config_update_allowed = marlin_runtime.assert_gateway_config_upda
 assert_connector_credential_deletion_allowed = marlin_runtime.assert_connector_credential_deletion_allowed
 assert_not_marlin_wallet_authority_surface = marlin_runtime.assert_not_marlin_wallet_authority_surface
 sanitize_account_credential_update = marlin_runtime.sanitize_account_credential_update
+is_marlin_hyperliquid_bootstrap_scope = marlin_runtime.is_marlin_hyperliquid_bootstrap_scope
 
 
 def _load_accounts_router(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
@@ -74,6 +75,29 @@ def test_marlin_runtime_blocks_wallet_authority_surfaces(monkeypatch: pytest.Mon
 
     with pytest.raises(HTTPException, match="wallet authority comes only from MARLIN_MNEMONIC"):
         assert_not_marlin_wallet_authority_surface("Gateway wallet send")
+
+
+@pytest.mark.parametrize(
+    ("profile", "account", "connector", "expected"),
+    [
+        ("marlin", "master_account", "hyperliquid_perpetual", True),
+        ("provider", "master_account", "hyperliquid_perpetual", False),
+        ("marlin", "secondary", "hyperliquid_perpetual", False),
+        ("marlin", "master_account", "hyperliquid", False),
+        ("marlin", "master_account", "hyperliquid_perpetual_testnet", False),
+        ("marlin", "master_account", "xrpl", False),
+    ],
+)
+def test_hyperliquid_bootstrap_scope_is_exact(
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+    account: str,
+    connector: str,
+    expected: bool,
+) -> None:
+    monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, profile)
+
+    assert is_marlin_hyperliquid_bootstrap_scope(account, connector) is expected
 
 
 def test_marlin_runtime_blocks_wallet_authority_config_updates(

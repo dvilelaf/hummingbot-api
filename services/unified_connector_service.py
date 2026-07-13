@@ -38,6 +38,10 @@ from services.cowswap_runtime import (
     CowSwapRuntimeUnavailableError,
     cowswap_order_submission_blocker,
 )
+from services.marlin_runtime import (
+    _derive_marlin_credential_values,
+    is_marlin_hyperliquid_bootstrap_scope,
+)
 from utils.file_system import fs_util
 from utils.hummingbot_api_config_adapter import HummingbotAPIConfigAdapter
 from utils.security import BackendAPISecurity
@@ -659,10 +663,13 @@ class UnifiedConnectorService:
             blocker = cowswap_order_submission_blocker(connector_name) or UNWIRED_RUNTIME_BLOCKER
             raise CowSwapRuntimeUnavailableError(blocker)
 
-        BackendAPISecurity.login_account(
+        authenticated = BackendAPISecurity.login_account(
             account_name=account_name,
             secrets_manager=self.secrets_manager
         )
+        marlin_hyperliquid_bootstrap = is_marlin_hyperliquid_bootstrap_scope(account_name, connector_name)
+        if marlin_hyperliquid_bootstrap and authenticated is not True:
+            raise PermissionError("Marlin Hyperliquid account authentication failed")
 
         # Check if this is a Gateway network connector
         # Gateway connectors are NOT in AllConnectorSettings (those are exchange connectors)
@@ -676,7 +683,13 @@ class UnifiedConnectorService:
             )
 
         conn_setting = self._conn_settings[connector_name]
-        keys = BackendAPISecurity.api_keys(connector_name)
+
+        if marlin_hyperliquid_bootstrap:
+            keys = _derive_marlin_credential_values(connector_name)
+            if keys is None:
+                raise RuntimeError("MARLIN_MNEMONIC-derived Hyperliquid credentials unavailable")
+        else:
+            keys = BackendAPISecurity.api_keys(connector_name)
 
         init_params = conn_setting.conn_init_parameters(
             trading_pairs=[],
@@ -1378,9 +1391,16 @@ class UnifiedConnectorService:
         """List connector credentials available for an account."""
         try:
             files = fs_util.list_files(f"credentials/{account_name}/connectors")
-            return [f.replace(".yml", "") for f in files if f.endswith(".yml")]
+            result = [f.replace(".yml", "") for f in files if f.endswith(".yml")]
         except FileNotFoundError:
-            return []
+            result = []
+
+        if is_marlin_hyperliquid_bootstrap_scope(account_name, "hyperliquid_perpetual"):
+            marlin_only = "hyperliquid_perpetual"
+            if marlin_only not in result:
+                result.append(marlin_only)
+
+        return result
 
     @staticmethod
     def get_connector_config_map(connector_name: str):
