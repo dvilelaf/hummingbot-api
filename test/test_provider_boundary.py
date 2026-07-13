@@ -326,7 +326,10 @@ class FakeAccountsService:
             owner_address="0xowner",
             token_map=self._cowswap_runtime.tokens,
             order_store=object(),
-            signer_provider=object(),
+            signer_provider=SimpleNamespace(
+                network="base",
+                wallet_ref="base:mainnet:evm_gateway",
+            ),
         )
         self.accounts_state = {
             "master_account": {
@@ -710,6 +713,120 @@ def test_cowswap_provider_snapshot_missing_reference_price_fails_closed():
             ],
         },
     }
+
+
+def test_cowswap_provider_snapshot_scopes_rows_when_request_matches_signer_identity():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["cowswap"] = []
+    request, market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                network="base",
+                route_id="cowswap-usdc-weth-base",
+                trading_pair="USDC-WETH",
+                wallet_ref="base:mainnet:evm_gateway",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "available"
+    rows = result.portfolio["master_account"]["cowswap"]
+    for row in rows:
+        assert row.get("balance_source") == "gateway"
+        assert row.get("network") == "base"
+        assert row.get("wallet_ref") == "base:mainnet:evm_gateway"
+        assert row.get("route_id") == "cowswap-usdc-weth-base"
+
+
+def test_cowswap_provider_snapshot_omits_scope_on_network_mismatch():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["cowswap"] = []
+    request, market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                network="ethereum-mainnet",
+                route_id="cowswap-usdc-weth-eth",
+                trading_pair="USDC-WETH",
+                wallet_ref="ethereum:mainnet:evm_gateway",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "available"
+    rows = result.portfolio["master_account"]["cowswap"]
+    for row in rows:
+        assert "balance_source" not in row
+        assert "network" not in row
+        assert "wallet_ref" not in row
+
+
+def test_cowswap_provider_snapshot_omits_scope_on_wallet_ref_mismatch():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["cowswap"] = []
+    request, market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                network="base",
+                route_id="cowswap-usdc-weth-base",
+                trading_pair="USDC-WETH",
+                wallet_ref="base:mainnet:evm_gateway_wrong",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "available"
+    rows = result.portfolio["master_account"]["cowswap"]
+    for row in rows:
+        assert "balance_source" not in row
+        assert "network" not in row
+        assert "wallet_ref" not in row
+
+
+def test_cowswap_provider_snapshot_omits_scope_when_request_missing_network_or_wallet_ref():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["cowswap"] = []
+    request, market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                trading_pair="USDC-WETH",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "available"
+    rows = result.portfolio["master_account"]["cowswap"]
+    for row in rows:
+        assert "balance_source" not in row
+        assert "network" not in row
+        assert "wallet_ref" not in row
 
 
 def test_cowswap_order_provider_preflight_accepts_runtime_gateway_balance_and_allowance(monkeypatch):
@@ -1720,3 +1837,100 @@ def test_reduce_order_rejects_non_reducing_position(monkeypatch, positions, side
     assert result.status == "rejected"
     assert error in result.provider_error
     assert service.place_trade_calls == []
+
+
+def test_cowswap_fallback_account_rows_are_not_scoped_when_evm_reader_fails():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["cowswap"] = [
+        {"available_units": 100.0, "token": "WETH", "units": 100.0, "value": 200000.0},
+        {"available_units": 50000.0, "token": "USDC", "units": 50000.0, "value": 50000.0},
+    ]
+    service.cowswap_evm_reader = None
+    service._cowswap_runtime_dependencies.evm_reader = None
+    request, market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                network="base",
+                route_id="cowswap-usdc-weth-base",
+                trading_pair="USDC-WETH",
+                wallet_ref="base:mainnet:evm_gateway",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "available"
+    rows = result.portfolio["master_account"]["cowswap"]
+    for row in rows:
+        assert "balance_source" not in row, f"unexpected balance_source in {row}"
+        assert "network" not in row, f"unexpected network in {row}"
+        assert "wallet_ref" not in row, f"unexpected wallet_ref in {row}"
+
+
+def test_cowswap_fallback_account_rows_are_not_scoped_when_signer_mismatch():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["cowswap"] = []
+    request, _market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                network="ethereum-mainnet",
+                route_id="cowswap-eth-usdc-eth",
+                trading_pair="USDC-WETH",
+                wallet_ref="ethereum:mainnet:evm_gateway",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "available"
+    rows = result.portfolio["master_account"]["cowswap"]
+    for row in rows:
+        assert "balance_source" not in row, f"unexpected balance_source in {row}"
+        assert "network" not in row, f"unexpected network in {row}"
+        assert "wallet_ref" not in row, f"unexpected wallet_ref in {row}"
+
+
+def test_cowswap_fallback_account_rows_preserve_stale_metadata_stripped():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["cowswap"] = [
+        {"available_units": 100.0, "token": "WETH", "units": 100.0, "value": 200000.0, "balance_source": "gateway", "network": "base", "wallet_ref": "base:mainnet:evm_gateway"},
+        {"available_units": 50000.0, "token": "USDC", "units": 50000.0, "value": 50000.0, "balance_source": "gateway", "network": "base", "wallet_ref": "base:mainnet:evm_gateway"},
+    ]
+    service.cowswap_evm_reader = None
+    service._cowswap_runtime_dependencies.evm_reader = None
+    request, market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                network="base",
+                route_id="cowswap-usdc-weth-base",
+                trading_pair="USDC-WETH",
+                wallet_ref="base:mainnet:evm_gateway",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "available"
+    rows = result.portfolio["master_account"]["cowswap"]
+    for row in rows:
+        assert "balance_source" not in row, f"unexpected balance_source in {row}"
+        assert "network" not in row, f"unexpected network in {row}"
+        assert "wallet_ref" not in row, f"unexpected wallet_ref in {row}"

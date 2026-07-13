@@ -1081,6 +1081,55 @@ def _gateway_verified_portfolio_rows(
     return rows
 
 
+def _strip_scoped_metadata(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stripped: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            stripped.append(row)
+            continue
+        stripped.append({
+            k: v
+            for k, v in row.items()
+            if k not in ("balance_source", "network", "route_id", "wallet_ref")
+        })
+    return stripped
+
+
+def _cowswap_scoped_portfolio_rows(
+    accounts_service: AccountsService,
+    *,
+    rows: list[dict[str, Any]],
+    network: str | None = None,
+    route_id: str | None = None,
+    wallet_ref: str | None = None,
+) -> list[dict[str, Any]]:
+    runtime_dependencies = getattr(accounts_service, "_cowswap_runtime_dependencies", None)
+    signer_provider = getattr(runtime_dependencies, "signer_provider", None) if runtime_dependencies else None
+    signer_network = getattr(signer_provider, "network", None) if signer_provider else None
+    signer_wallet_ref = getattr(signer_provider, "wallet_ref", None) if signer_provider else None
+    if not signer_network or not signer_wallet_ref:
+        return _strip_scoped_metadata(rows)
+    if not network or not wallet_ref:
+        return _strip_scoped_metadata(rows)
+    if _network_alias(network) != _network_alias(signer_network):
+        return _strip_scoped_metadata(rows)
+    if wallet_ref != signer_wallet_ref:
+        return _strip_scoped_metadata(rows)
+    scoped: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            scoped.append(row)
+            continue
+        scoped.append({
+            **row,
+            "balance_source": "gateway",
+            "network": _provider_snapshot_network_scope(network),
+            "wallet_ref": wallet_ref,
+            **(dict(route_id=route_id) if route_id else {}),
+        })
+    return scoped
+
+
 def _provider_snapshot_network_scope(network: str) -> str:
     normalized = _network_alias(network)
     if normalized == "ethereum-base":
@@ -1196,14 +1245,25 @@ async def _portfolio_with_cowswap_reference_prices(
     base_asset, quote_asset = _split_pair(snapshot_request.trading_pair)
     account_portfolio: dict[str, Any] = dict(portfolio or {})
     account_rows = dict(account_portfolio.get(snapshot_request.account_name) or {})
+    from_evm_reader = bool(connector_rows)
     if not connector_rows:
-        connector_rows = list(account_rows.get(COWSWAP_CONNECTOR_NAME) or [])
+        connector_rows = _strip_scoped_metadata(
+            list(account_rows.get(COWSWAP_CONNECTOR_NAME) or []),
+        )
     for token, price in _cowswap_reference_prices(
         http_request,
         base_asset=base_asset,
         quote_asset=quote_asset,
     ).items():
         connector_rows = _upsert_price_row(connector_rows, token=token, price=price)
+    if from_evm_reader:
+        connector_rows = _cowswap_scoped_portfolio_rows(
+            accounts_service,
+            rows=connector_rows,
+            network=snapshot_request.network,
+            route_id=snapshot_request.route_id,
+            wallet_ref=snapshot_request.wallet_ref,
+        )
     account_rows[COWSWAP_CONNECTOR_NAME] = connector_rows
     account_portfolio[snapshot_request.account_name] = account_rows
     return account_portfolio
