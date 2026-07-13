@@ -33,6 +33,30 @@ def main() -> None:
         'dex_name, coin = exchange_symbol.split(":")',
         'dex_name, coin = exchange_symbol.split(":", 1)',
     )
+    source = replace_once(
+        source,
+        "    def _should_inject_builder(self) -> bool:\n"
+        '        """Builder attribution applies only on mainnet, non-vault orders — the venue rejects the\n'
+        "        builder field on vault and testnet orders.\"\"\"\n"
+        "        if not CONSTANTS.BUILDER_SUPPORTED:\n"
+        "            return False\n"
+        "        if self._use_vault or self._is_testnet:\n"
+        "            return False\n"
+        "        return True",
+        "    def _should_inject_builder(self) -> bool:\n"
+        "        return False\n",
+    )
+    source = replace_once(
+        source,
+        "    def _build_builder_field(self) -> Optional[Dict[str, Any]]:\n"
+        '        """The ``{"b": <address>, "f": <tenths_of_bps>}`` order field, or None when omitted. Address\n'
+        "        is lowercased (the venue rejects mixed-case).\"\"\"\n"
+        "        if not self._should_inject_builder():\n"
+        "            return None\n"
+        '        return {"b": self._builder_address.lower(), "f": self._builder_fee_tenths_bps}',
+        "    def _build_builder_field(self) -> Optional[Dict[str, Any]]:\n"
+        "        return None\n",
+    )
     HYPERLIQUID_PERP.write_text(source)
 
 
