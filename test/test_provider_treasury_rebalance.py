@@ -1493,7 +1493,7 @@ def test_gateway_client_uses_exact_target_paths_and_payload(monkeypatch):
                 }
             },
         ),
-        ("POST", "bridge/rebalance/targets/target-funding-1/execute", {}),
+        ("POST", "bridge/rebalance/targets/target-funding-1/execute", {"json": {}}),
         ("GET", "bridge/rebalance/target-funding-1", {}),
     ]
 
@@ -2042,6 +2042,6 @@ def test_gateway_execute_forwards_internal_provider_intent_token(monkeypatch):
         (
             "POST",
             "bridge/rebalance/targets/target-funding-1/execute",
-            {"headers": {"x-marlin-gateway-provider-intent-token": "gateway-token"}},
+            {"headers": {"x-marlin-gateway-provider-intent-token": "gateway-token"}, "json": {}},
         )
     ]

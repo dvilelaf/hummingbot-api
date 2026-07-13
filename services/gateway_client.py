@@ -604,11 +604,12 @@ class GatewayClient:
         path = f"bridge/rebalance/targets/{rebalance_id}/execute"
         token = self._marlin_gateway_provider_intent_token()
         if not token:
-            return await self._request("POST", path)
+            return await self._request("POST", path, json={})
         return await self._request(
             "POST",
             path,
             headers={"x-marlin-gateway-provider-intent-token": token},
+            json={},
         )
 
     async def get_treasury_rebalance(self, rebalance_id: str) -> Dict:
