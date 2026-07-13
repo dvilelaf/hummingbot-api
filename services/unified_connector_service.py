@@ -949,11 +949,14 @@ class UnifiedConnectorService:
                 )
 
                 for order_record in active_orders:
+                    client_order_id = order_record.client_order_id
+                    if client_order_id in connector.in_flight_orders:
+                        continue
                     try:
                         in_flight_order = self._convert_db_order_to_in_flight(order_record)
-                        connector.in_flight_orders[in_flight_order.client_order_id] = in_flight_order
+                        connector.in_flight_orders[client_order_id] = in_flight_order
                     except Exception as e:
-                        logger.error(f"Error loading order {order_record.client_order_id}: {e}")
+                        logger.error(f"Error loading order {client_order_id}: {e}")
 
                 logger.info(
                     f"Loaded {len(connector.in_flight_orders)} orders for "
@@ -1079,13 +1082,15 @@ class UnifiedConnectorService:
                         async with self.db_manager.get_session_context() as session:
                             order_repo = OrderRepository(session)
                             trade_repo = TradeRepository(session)
-                            await self._persist_tracked_order_fill(order_repo, order)
-                            await self._persist_external_order_fills(
-                                order_repo=order_repo,
-                                trade_repo=trade_repo,
-                                order=order,
-                                fills=external_fills,
-                            )
+                            if external_fills:
+                                await self._persist_external_order_fills(
+                                    order_repo=order_repo,
+                                    trade_repo=trade_repo,
+                                    order=order,
+                                    fills=external_fills,
+                                )
+                            else:
+                                await self._persist_tracked_order_fill(order_repo, order)
                             await order_repo.update_order_status(
                                 client_order_id=client_order_id,
                                 status=db_status,
@@ -1206,7 +1211,13 @@ class UnifiedConnectorService:
         order: InFlightOrder,
         fills: List[Dict[str, Any]],
     ) -> None:
-        """Persist exchange fills idempotently for terminal orders missing websocket fill events."""
+        """Persist exchange fills idempotently for terminal orders missing websocket fill events.
+
+        Uses canonical trade_id = ``<client_order_id>_<provider_trade_id>`` matching
+        the identity used by ``OrdersRecorder._handle_order_filled``.  Both the
+        canonical id and the legacy raw ``tid`` are checked to prevent double-counting
+        when a previous version of this method already stored either form.
+        """
         if not fills:
             return
 
@@ -1215,8 +1226,13 @@ class UnifiedConnectorService:
             return
 
         for fill in sorted(fills, key=lambda item: int(item.get("time", 0) or 0)):
-            trade_id = str(fill.get("tid") or "")
-            if not trade_id or await trade_repo.get_trade_by_id(trade_id):
+            raw_tid = str(fill.get("tid") or "")
+            if not raw_tid:
+                continue
+            canonical_trade_id = f"{order.client_order_id}_{raw_tid}"
+            if await trade_repo.get_trade_by_id(canonical_trade_id):
+                continue
+            if await trade_repo.get_trade_by_id(raw_tid):
                 continue
 
             filled_amount = Decimal(str(fill["sz"]))
@@ -1228,7 +1244,7 @@ class UnifiedConnectorService:
             created_trade = await trade_repo.create_trade(
                 {
                     "order_id": db_order.id,
-                    "trade_id": trade_id,
+                    "trade_id": canonical_trade_id,
                     "timestamp": datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc),
                     "trading_pair": order.trading_pair,
                     "trade_type": trade_type,
@@ -1252,20 +1268,18 @@ class UnifiedConnectorService:
 
     async def sync_all_orders_to_database(self):
         """
-        Sync connector's in_flight_orders state to database for all trading connectors.
-
-        The connector's built-in polling already updates in_flight_orders from the exchange.
-        This method syncs that state to our database and cleans up closed orders.
+        Sync in_flight_orders to DB for every trading connector, then reconcile once.
         """
         for account_name, connectors in self._trading_connectors.items():
             for connector_name, connector in connectors.items():
                 try:
-                    if not connector.in_flight_orders:
-                        continue
-                    await self._sync_orders_to_database(connector, account_name, connector_name)
-                    logger.debug(f"Synced order state to DB for {account_name}/{connector_name}")
+                    await self._load_existing_orders(connector, account_name, connector_name)
+                    if connector.in_flight_orders:
+                        await self._sync_orders_to_database(connector, account_name, connector_name)
                 except Exception as e:
                     logger.error(f"Error syncing order state for {account_name}/{connector_name}: {e}")
+
+        await self.reconcile_active_orders()
 
     def _convert_db_order_to_in_flight(self, order_record) -> InFlightOrder:
         """Convert database order to InFlightOrder."""
