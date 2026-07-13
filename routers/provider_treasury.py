@@ -326,6 +326,9 @@ def _rebalance_response(
         quoted_native_gas_amount=_parse_gateway_decimal(result.get("quotedNativeGasAmount")),
         quoted_native_gas_asset=_parse_gateway_asset(result.get("quotedNativeGasAsset"), "quotedNativeGasAsset"),
         quoted_at=_parse_gateway_quoted_at(result.get("quotedAt")),
+        stage_index=_parse_gateway_stage_index(result.get("stageIndex")),
+        stage_count=_parse_gateway_stage_count(result.get("stageCount")),
+        stage_status=_parse_gateway_stage_status(result.get("stageStatus")),
     )
 
 
@@ -337,6 +340,39 @@ def _gateway_error_status(result: dict[str, Any]) -> int:
     if 400 <= status < 500:
         return status
     return 502
+
+
+def _parse_gateway_stage_index(value: Any) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int:
+        raise HTTPException(status_code=502, detail=f"Gateway returned non-integer stageIndex: {_redact_error(value)}")
+    v = value
+    if v < 0:
+        raise HTTPException(status_code=502, detail=f"Gateway returned negative stageIndex: {_redact_error(value)}")
+    return v
+
+
+def _parse_gateway_stage_count(value: Any) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int:
+        raise HTTPException(status_code=502, detail=f"Gateway returned non-integer stageCount: {_redact_error(value)}")
+    v = value
+    if v < 1:
+        raise HTTPException(status_code=502, detail=f"Gateway returned stageCount < 1: {_redact_error(value)}")
+    return v
+
+
+def _parse_gateway_stage_status(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=502, detail=f"Gateway returned non-string stageStatus: {_redact_error(value)}")
+    raw = value.strip()
+    if not raw:
+        raise HTTPException(status_code=502, detail=f"Gateway returned empty stageStatus: {_redact_error(value)}")
+    return raw
 
 
 def _parse_gateway_decimal(value: Any) -> Decimal | None:

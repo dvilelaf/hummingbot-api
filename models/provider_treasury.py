@@ -41,10 +41,20 @@ class ProviderTreasuryRebalanceResponse(BaseModel):
     quoted_native_gas_amount: Optional[Decimal] = Field(default=None, ge=0, allow_inf_nan=False)
     quoted_native_gas_asset: Optional[str] = Field(default=None, min_length=1)
     quoted_at: Optional[datetime] = None
+    stage_index: Optional[int] = Field(default=None, ge=0, strict=True)
+    stage_count: Optional[int] = Field(default=None, ge=1, strict=True)
+    stage_status: Optional[str] = Field(default=None, min_length=1, strict=True)
 
     @field_validator("quoted_at")
     @classmethod
     def quoted_at_must_be_timezone_aware(cls, value: Optional[datetime]) -> Optional[datetime]:
         if value is not None and value.utcoffset() is None:
             raise ValueError("quoted_at must be timezone-aware")
+        return value
+
+    @field_validator("stage_status")
+    @classmethod
+    def stage_status_must_not_be_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("stage_status must not be blank")
         return value

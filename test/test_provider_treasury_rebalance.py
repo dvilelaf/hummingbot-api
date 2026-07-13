@@ -1201,6 +1201,198 @@ def test_naive_quoted_at_raises_502():
     assert exc.value.status_code == 502
 
 
+def test_rebalance_response_maps_stage_fields():
+    module = _provider_treasury_module()
+
+    response = module._rebalance_response(
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "built",
+            "stageIndex": 0,
+            "stageCount": 2,
+            "stageStatus": "built",
+        }
+    )
+
+    assert response.stage_index == 0
+    assert response.stage_count == 2
+    assert response.stage_status == "built"
+
+
+def test_rebalance_response_stage_fields_default_to_none():
+    module = _provider_treasury_module()
+
+    response = module._rebalance_response(
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "built",
+        }
+    )
+
+    assert response.stage_index is None
+    assert response.stage_count is None
+    assert response.stage_status is None
+
+
+def test_rebalance_response_payload_persists_stage_fields():
+    module = _provider_treasury_module()
+
+    response = module._rebalance_response(
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "built",
+            "stageIndex": 0,
+            "stageCount": 2,
+            "stageStatus": "built",
+        }
+    )
+
+    payload = module._rebalance_response_payload(response)
+    assert payload["stage_index"] == 0
+    assert payload["stage_count"] == 2
+    assert payload["stage_status"] == "built"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_detail_fragment"),
+    [
+        ("stageIndex", "not-a-number", "non-integer stageIndex"),
+        ("stageIndex", True, "non-integer stageIndex"),
+        ("stageIndex", -1, "negative stageIndex"),
+        ("stageIndex", {"some": "dict"}, "non-integer stageIndex"),
+        ("stageCount", "not-a-number", "non-integer stageCount"),
+        ("stageCount", "2", "non-integer stageCount"),
+        ("stageCount", 0, "stageCount < 1"),
+        ("stageCount", -5, "stageCount < 1"),
+        ("stageCount", {"some": "dict"}, "non-integer stageCount"),
+        ("stageStatus", "", "empty stageStatus"),
+        ("stageStatus", "   ", "empty stageStatus"),
+        ("stageStatus", {"some": "dict"}, "non-string stageStatus"),
+    ],
+)
+def test_malformed_stage_fields_raise_502(field, value, expected_detail_fragment):
+    module = _provider_treasury_module()
+
+    with pytest.raises(module.HTTPException) as exc:
+        module._rebalance_response(
+            {
+                "idempotencyKey": "target-funding-1",
+                "status": "built",
+                field: value,
+            }
+        )
+    assert exc.value.status_code == 502
+    assert expected_detail_fragment in str(exc.value.detail)
+
+
+def test_response_model_rejects_noncompliant_stage_values_directly():
+    module = _provider_treasury_module()
+
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryRebalanceResponse(
+            id="target-funding-1", status="built", stage_index=-1
+        )
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryRebalanceResponse(
+            id="target-funding-1", status="built", stage_count=0
+        )
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryRebalanceResponse(
+            id="target-funding-1", status="built", stage_status=""
+        )
+    for field, value in (("stage_index", "1"), ("stage_count", True), ("stage_status", b"built")):
+        with pytest.raises(ValueError):
+            module.ProviderTreasuryRebalanceResponse(id="target-funding-1", status="built", **{field: value})
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryRebalanceResponse(id="target-funding-1", status="built", stage_status="   ")
+
+
+def test_execute_retry_stage0_built_repeated_after_claim(monkeypatch):
+    first_module = _provider_treasury_module()
+    first_service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        first_module.create_provider_treasury_rebalance(
+            _neutral_request(first_module),
+            _authorized_request(),
+            first_service,
+        )
+    )
+    _REBALANCE_RECORDS["target-funding-1"].status = "pending"
+
+    recreated_service = FakeAccountsService()
+    recreated_service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "built",
+            "stageIndex": 0,
+            "stageCount": 2,
+            "stageStatus": "built",
+        },
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "built",
+            "stageIndex": 1,
+            "stageCount": 2,
+            "stageStatus": "built",
+        },
+    ]
+    recreated_module = _provider_treasury_module()
+
+    result = asyncio.run(
+        recreated_module.execute_provider_treasury_rebalance(
+            "target-funding-1",
+            recreated_module.ProviderTreasuryRebalanceExecuteRequest(
+                idempotency_key="target-funding-1",
+            ),
+            _authorized_request(),
+            recreated_service,
+        )
+    )
+
+    assert result.status == "built"
+    assert recreated_service.gateway_client.execute_calls == ["target-funding-1"]
+    assert len(recreated_service.gateway_client.status_calls) == 2
+
+
+def test_execute_retry_destination_pending_does_not_re_execute(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        module.create_provider_treasury_rebalance(
+            _neutral_request(module),
+            _authorized_request(),
+            service,
+        )
+    )
+    _REBALANCE_RECORDS["target-funding-1"].status = "pending"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stageIndex": 1,
+            "stageCount": 2,
+            "stageStatus": "destination_pending",
+        }
+    ]
+
+    result = asyncio.run(
+        module.execute_provider_treasury_rebalance(
+            "target-funding-1",
+            module.ProviderTreasuryRebalanceExecuteRequest(
+                idempotency_key="target-funding-1",
+            ),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "destination_pending"
+    assert service.gateway_client.status_calls == ["target-funding-1"]
+    assert service.gateway_client.execute_calls == []
+
+
 def test_gateway_client_uses_exact_target_paths_and_payload(monkeypatch):
     calls = []
     client = GatewayClient()
