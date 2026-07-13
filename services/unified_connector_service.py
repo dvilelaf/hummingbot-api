@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from hummingbot.client.config.config_crypt import ETHKeyFileSecretManger
 from hummingbot.client.config.config_helpers import ClientConfigAdapter, api_keys_from_connector_config_map, get_connector_class
 from hummingbot.client.settings import AllConnectorSettings
+from hummingbot.client.config.security import Security
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.connector_metrics_collector import TradeVolumeMetricCollector
 from hummingbot.connector.exchange_py_base import ExchangePyBase
@@ -663,11 +664,20 @@ class UnifiedConnectorService:
             blocker = cowswap_order_submission_blocker(connector_name) or UNWIRED_RUNTIME_BLOCKER
             raise CowSwapRuntimeUnavailableError(blocker)
 
-        authenticated = BackendAPISecurity.login_account(
-            account_name=account_name,
-            secrets_manager=self.secrets_manager
-        )
         marlin_hyperliquid_bootstrap = is_marlin_hyperliquid_bootstrap_scope(account_name, connector_name)
+        if marlin_hyperliquid_bootstrap:
+            authenticated = BackendAPISecurity.validate_password(self.secrets_manager)
+            if authenticated:
+                BackendAPISecurity.secrets_manager = self.secrets_manager
+                Security.secrets_manager = self.secrets_manager
+                BackendAPISecurity._secure_configs.clear()
+                BackendAPISecurity._decryption_done.clear()
+                BackendAPISecurity._decryption_done.set()
+        else:
+            authenticated = BackendAPISecurity.login_account(
+                account_name=account_name,
+                secrets_manager=self.secrets_manager,
+            )
         if marlin_hyperliquid_bootstrap and authenticated is not True:
             raise PermissionError("Marlin Hyperliquid account authentication failed")
 
@@ -870,7 +880,17 @@ class UnifiedConnectorService:
         3. Order tracking and cancellation work without needing manual initialization
         """
         # Get list of all accounts
-        accounts = fs_util.list_folders('credentials')
+        marlin_bootstrap = is_marlin_hyperliquid_bootstrap_scope(
+            "master_account", "hyperliquid_perpetual"
+        )
+        try:
+            accounts = fs_util.list_folders('credentials')
+        except FileNotFoundError:
+            if not marlin_bootstrap:
+                raise
+            accounts = []
+        if marlin_bootstrap and "master_account" not in accounts:
+            accounts.append("master_account")
 
         total_initialized = 0
         for account_name in accounts:

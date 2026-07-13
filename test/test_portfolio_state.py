@@ -342,7 +342,8 @@ class TestConnectorStartup:
 
         with (
             patch.object(module, "_derive_marlin_credential_values", return_value=derived) as derive,
-            patch.object(module.BackendAPISecurity, "login_account", return_value=True) as login,
+            patch.object(module.BackendAPISecurity, "validate_password", return_value=True) as validate,
+            patch.object(module.BackendAPISecurity, "login_account") as file_login,
             patch.object(module.BackendAPISecurity, "api_keys") as file_keys,
             patch.object(module, "get_connector_class", return_value=lambda **kwargs: kwargs),
         ):
@@ -351,7 +352,8 @@ class TestConnectorStartup:
                 connector_name="hyperliquid_perpetual",
             )
 
-        login.assert_called_once()
+        validate.assert_called_once_with(service.secrets_manager)
+        file_login.assert_not_called()
         derive.assert_called_once_with("hyperliquid_perpetual")
         file_keys.assert_not_called()
         setting.conn_init_parameters.assert_called_once_with(
@@ -370,7 +372,7 @@ class TestConnectorStartup:
 
         with (
             patch.object(module, "_derive_marlin_credential_values") as derive,
-            patch.object(module.BackendAPISecurity, "login_account", return_value=False),
+            patch.object(module.BackendAPISecurity, "validate_password", return_value=False),
             pytest.raises(PermissionError, match="authentication failed"),
         ):
             service._create_trading_connector("master_account", "hyperliquid_perpetual")
@@ -388,12 +390,14 @@ class TestConnectorStartup:
 
         with (
             patch.object(module, "_derive_marlin_credential_values", return_value=None),
-            patch.object(module.BackendAPISecurity, "login_account", return_value=True),
+            patch.object(module.BackendAPISecurity, "validate_password", return_value=True),
+            patch.object(module.BackendAPISecurity, "login_account") as file_login,
             patch.object(module.BackendAPISecurity, "api_keys") as file_keys,
             pytest.raises(RuntimeError, match="credentials unavailable"),
         ):
             service._create_trading_connector("master_account", "hyperliquid_perpetual")
 
+        file_login.assert_not_called()
         file_keys.assert_not_called()
 
     @pytest.mark.asyncio
@@ -481,6 +485,45 @@ class TestConnectorStartup:
             "master_account",
             "binance_perpetual_testnet",
         )
+
+    @pytest.mark.asyncio
+    async def test_marlin_clean_container_starts_master_account_hyperliquid(self, monkeypatch):
+        """Without credentials folder, Marlin runtime still starts master_account hyperliquid_perpetual."""
+        import services.unified_connector_service as module
+        from services.unified_connector_service import UnifiedConnectorService
+
+        service = UnifiedConnectorService.__new__(UnifiedConnectorService)
+        service.get_trading_connector = AsyncMock()
+        monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+
+        def missing_credentials(path):
+            raise FileNotFoundError(f"Directory '{path}' not found")
+
+        monkeypatch.setattr(module.fs_util, "list_folders", missing_credentials)
+
+        await service.initialize_all_trading_connectors()
+
+        service.get_trading_connector.assert_awaited_once_with(
+            "master_account",
+            "hyperliquid_perpetual",
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_marlin_clean_container_still_raises_missing_credentials(self, monkeypatch):
+        """non-Marlin must propagate the missing credentials-directory error."""
+        import services.unified_connector_service as module
+        from services.unified_connector_service import UnifiedConnectorService
+
+        monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "provider")
+
+        def missing_credentials(path):
+            raise FileNotFoundError(f"Directory '{path}' not found")
+
+        monkeypatch.setattr(module.fs_util, "list_folders", missing_credentials)
+
+        service = UnifiedConnectorService.__new__(UnifiedConnectorService)
+        with pytest.raises(FileNotFoundError, match="credentials"):
+            await service.initialize_all_trading_connectors()
 
     @pytest.mark.asyncio
     async def test_account_state_connector_allowlist_skips_unlisted_credentials(self):
