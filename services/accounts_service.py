@@ -1785,13 +1785,12 @@ class AccountsService:
             in_flight_orders = getattr(connector, "in_flight_orders", {})
             order = in_flight_orders.get(order_id)
             order_state = getattr(order, "current_state", None)
-            if order_state is OrderState.FAILED:
-                saw_terminal_failure = True
-            elif order is not None and (
+            connector_accepted = order is not None and (
                 getattr(order, "exchange_order_id", None)
                 or order_state is not OrderState.PENDING_CREATE
-            ):
-                return
+            )
+            if order_state is OrderState.FAILED:
+                saw_terminal_failure = True
 
             failed, reason = await self._persisted_order_failure(
                 account_name=account_name,
@@ -1804,6 +1803,17 @@ class AccountsService:
                     order_id=order_id,
                     reason=reason,
                 )
+
+            if connector_accepted and not saw_terminal_failure:
+                return
+
+            if not saw_terminal_failure and await self._persisted_order_accepted(
+                account_name=account_name,
+                connector_name=connector_name,
+                order_id=order_id,
+            ):
+                return
+
             await asyncio.sleep(ORDER_TRACKING_CONFIRM_POLL_SECONDS)
 
         failed, reason = await self._persisted_order_failure(
@@ -1817,6 +1827,13 @@ class AccountsService:
                 order_id=order_id,
                 reason=reason,
             )
+
+        if await self._persisted_order_accepted(
+            account_name=account_name,
+            connector_name=connector_name,
+            order_id=order_id,
+        ):
+            return
 
         logger.error(
             "Connector %s returned order id %s for %s but did not confirm exchange acceptance",
@@ -1857,6 +1874,33 @@ class AccountsService:
         ):
             return False, None
         return True, order.error_message
+
+    async def _persisted_order_accepted(
+        self,
+        *,
+        account_name: str,
+        connector_name: str,
+        order_id: str,
+    ) -> bool:
+        """Return True if the recorder has an accepted (non-failure) row with exchange_order_id."""
+        if not self.db_manager:
+            return False
+        try:
+            async with self.db_manager.get_session_context() as session:
+                order = await OrderRepository(session).get_order_by_client_id(order_id)
+        except Exception as exc:
+            logger.warning("Could not inspect order %s acceptance state: %s", order_id, exc)
+            return False
+
+        if order is None:
+            return False
+        if order.account_name != account_name or order.connector_name != connector_name:
+            return False
+        if order.status == "FAILED":
+            return False
+        if not order.exchange_order_id:
+            return False
+        return True
 
     @staticmethod
     def _raise_terminal_order_rejection(
