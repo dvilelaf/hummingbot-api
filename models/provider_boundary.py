@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, Literal, Optional
 
@@ -54,3 +55,11 @@ class ProviderIntentResponse(BaseModel):
     provider_status: Optional[str] = None
     provider_error: Optional[str] = None
     retry_after_seconds: Optional[int] = Field(default=None, ge=1)
+    external_transaction_id: Optional[str] = None
+    sent_asset: Optional[str] = None
+    sent_quantity: Optional[Decimal] = Field(default=None, gt=0)
+    received_asset: Optional[str] = None
+    received_quantity: Optional[Decimal] = Field(default=None, gt=0)
+    fee_asset: Optional[str] = None
+    fee_amount: Optional[Decimal] = Field(default=None, ge=0)
+    executed_at: Optional[datetime] = None

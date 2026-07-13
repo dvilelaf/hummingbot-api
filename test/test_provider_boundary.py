@@ -1528,6 +1528,120 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash(m
     }
 
 
+@pytest.mark.parametrize(("raw_status", "expected_status"), [(1, "confirmed"), (True, "submitted")])
+def test_confirmed_swap_intent_preserves_provider_economics(
+    monkeypatch,
+    raw_status,
+    expected_status,
+):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(
+        provider_boundary,
+        "get_transaction_status_from_response",
+        lambda result: "CONFIRMED" if result.get("status") == 1 else "SUBMITTED",
+    )
+    service = FakeAccountsService()
+    monkeypatch.setattr(
+        service.gateway_client,
+        "execute_swap",
+        _async_return(
+            {
+                "signature": "tx-001",
+                "status": raw_status,
+                "data": {
+                    "tokenIn": "SOL",
+                    "tokenOut": "USDC",
+                    "amountIn": "0.001",
+                    "amountOut": "0.147",
+                    "feeAsset": "SOL",
+                    "fee": "0.000005",
+                },
+                "executedAt": "2026-07-13T12:30:00+00:00",
+            },
+        ),
+    )
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="swap",
+        connector_name="jupiter",
+        correlation_id="swap-confirmed-001",
+        market_id="SOL-USDC",
+        mode="mainnet",
+        quantity="0.001",
+        risk_metadata={"network": "solana-mainnet-beta"},
+        side="SELL",
+        wallet_identity={
+            "address": "9AtFd6KcR9tx5Etxc9SVkYrkZb7yC5BDibao7yPT5Ce1",
+            "chain": "solana",
+            "network": "mainnet-beta",
+            "wallet_ref": "solana:mainnet-beta:solana_gateway",
+        },
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(body, _authorized_request(), service),
+    )
+
+    common = {
+        "status": expected_status,
+        "correlation_id": "swap-confirmed-001",
+        "external_order_id": "tx-001",
+        "submitted_quantity": provider_boundary.Decimal("0.001"),
+        "provider_status": str(raw_status),
+    }
+    if raw_status is True:
+        assert result.model_dump(exclude_none=True) == common
+        return
+    assert result.model_dump(exclude_none=True) == {
+        **common,
+        "external_transaction_id": "tx-001",
+        "sent_asset": "SOL",
+        "sent_quantity": provider_boundary.Decimal("0.001"),
+        "received_asset": "USDC",
+        "received_quantity": provider_boundary.Decimal("0.147"),
+        "fee_asset": "SOL",
+        "fee_amount": provider_boundary.Decimal("0.000005"),
+        "executed_at": provider_boundary.datetime.fromisoformat("2026-07-13T12:30:00+00:00"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "data"),
+    [
+        ("SUBMITTED", {"tokenIn": "SOL", "tokenOut": "USDC", "amountIn": 1, "amountOut": 2}),
+        ("CONFIRMED", None),
+        ("CONFIRMED", {"tokenIn": "SOL", "tokenOut": "USDC", "amountIn": 1}),
+        ("CONFIRMED", {"tokenIn": "SOL", "tokenOut": "USDC", "amountIn": "nan", "amountOut": 2}),
+        ("CONFIRMED", {"tokenIn": {"symbol": "SOL"}, "tokenOut": "USDC", "amountIn": 1, "amountOut": 2}),
+        ("CONFIRMED", {"tokenIn": "   ", "tokenOut": "USDC", "amountIn": 1, "amountOut": 2}),
+        ("CONFIRMED", {"tokenIn": "SOL", "tokenOut": "USDC", "amountIn": 1, "amountOut": 2, "fee": "bad", "feeAsset": "SOL"}),
+        ("CONFIRMED", {"tokenIn": "SOL", "tokenOut": "USDC", "amountIn": 1, "amountOut": 2, "fee": 1}),
+    ],
+)
+def test_swap_economics_omits_non_terminal_or_incomplete_truth(status, data):
+    provider_boundary = _provider_boundary_module()
+
+    assert provider_boundary._confirmed_swap_economics(
+        {"status": 1, "data": data},
+        provider_status=status,
+        tx_hash="tx-001",
+    ) == {}
+
+
+def test_swap_economics_rejects_boolean_confirmation():
+    provider_boundary = _provider_boundary_module()
+
+    assert provider_boundary._confirmed_swap_economics(
+        {
+            "status": True,
+            "data": {"tokenIn": "SOL", "tokenOut": "USDC", "amountIn": 1, "amountOut": 2},
+        },
+        provider_status="CONFIRMED",
+        tx_hash="tx-001",
+    ) == {}
+
+
 def test_gateway_market_order_provider_intent_executes_as_authorized_swap(monkeypatch):
     monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
     LIVE_GATE_CALLS.clear()

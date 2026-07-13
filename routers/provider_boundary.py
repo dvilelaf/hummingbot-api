@@ -3,6 +3,7 @@ import os
 import re
 import secrets
 import time
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -908,13 +909,91 @@ async def _submit_swap_intent(
             else "swap response missing transaction hash",
             provider_status=str(result.get("status", "")),
         )
+    provider_status = _strict_swap_provider_status(result)
     return ProviderIntentResponse(
-        status=get_transaction_status_from_response(result).lower(),
+        status=provider_status.lower(),
         correlation_id=body.correlation_id,
         external_order_id=str(tx_hash),
         submitted_quantity=body.quantity,
         provider_status=str(result.get("status", "")),
+        **_confirmed_swap_economics(result, provider_status=provider_status, tx_hash=str(tx_hash)),
     )
+
+
+def _strict_swap_provider_status(result: dict[str, Any]) -> str:
+    provider_status = str(get_transaction_status_from_response(result))
+    raw_status = result.get("status")
+    if provider_status.upper() == "CONFIRMED" and (
+        type(raw_status) is not int or raw_status != 1
+    ):
+        return "SUBMITTED"
+    return provider_status
+
+
+def _confirmed_swap_economics(
+    result: dict[str, Any],
+    *,
+    provider_status: str,
+    tx_hash: str,
+) -> dict[str, Any]:
+    raw_status = result.get("status")
+    if (
+        provider_status.upper() != "CONFIRMED"
+        or type(raw_status) is not int
+        or raw_status != 1
+    ):
+        return {}
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return {}
+    sent_asset = _asset_or_none(data.get("tokenIn"))
+    received_asset = _asset_or_none(data.get("tokenOut"))
+    sent_quantity = _positive_decimal_or_none(data.get("amountIn"))
+    received_quantity = _positive_decimal_or_none(data.get("amountOut"))
+    if sent_asset is None or received_asset is None or sent_quantity is None or received_quantity is None:
+        return {}
+    economics: dict[str, Any] = {
+        "external_transaction_id": tx_hash,
+        "sent_asset": sent_asset,
+        "sent_quantity": sent_quantity,
+        "received_asset": received_asset,
+        "received_quantity": received_quantity,
+    }
+    fee_asset = _asset_or_none(data.get("feeAsset"))
+    fee_amount = _non_negative_decimal_or_none(data.get("fee"))
+    if "feeAsset" in data or "fee" in data:
+        if fee_asset is None or fee_amount is None:
+            return {}
+        economics.update(fee_asset=fee_asset, fee_amount=fee_amount)
+    executed_at = result.get("executedAt")
+    if executed_at is not None:
+        try:
+            economics["executed_at"] = datetime.fromisoformat(str(executed_at))
+        except ValueError:
+            return {}
+    return economics
+
+
+def _asset_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _positive_decimal_or_none(value: Any) -> Decimal | None:
+    parsed = _non_negative_decimal_or_none(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _non_negative_decimal_or_none(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return None
+    return parsed if parsed.is_finite() and parsed >= 0 else None
 
 
 def _gateway_swap_execution_terms(
