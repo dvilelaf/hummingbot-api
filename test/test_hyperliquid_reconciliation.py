@@ -101,6 +101,7 @@ def fill_ctx(service):
     db_order = SimpleNamespace(id=42, client_order_id="ORD-1", filled_amount=2.0)
     order_repo = MagicMock()
     order_repo.get_order_by_client_id = AsyncMock(return_value=db_order)
+    order_repo.get_order_by_client_id_with_lock = AsyncMock(return_value=db_order)
     order_repo.update_order_fill = AsyncMock()
     trade_repo = MagicMock()
     trade_repo.get_trade_by_id = AsyncMock(return_value=None)
@@ -113,7 +114,7 @@ def fill_ctx(service):
 
 
 @pytest.mark.asyncio
-async def test_fill_creates_canonical_updates_once(service, fill_ctx):
+async def test_fill_creates_canonical_trade(service, fill_ctx):
     await service._persist_external_order_fills(
         order_repo=fill_ctx.order_repo, trade_repo=fill_ctx.trade_repo,
         order=fill_ctx.order, fills=fill_ctx.fills,
@@ -121,7 +122,8 @@ async def test_fill_creates_canonical_updates_once(service, fill_ctx):
     fill_ctx.trade_repo.create_trade.assert_awaited_once()
     created_kwargs = fill_ctx.trade_repo.create_trade.await_args[0][0]
     assert created_kwargs["trade_id"] == "ORD-1_5001"
-    fill_ctx.order_repo.update_order_fill.assert_awaited_once()
+    fill_ctx.order_repo.get_order_by_client_id_with_lock.assert_awaited_once_with("ORD-1")
+    fill_ctx.order_repo.update_order_fill.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -195,6 +197,85 @@ async def test_recompute_order_aggregates_uses_persisted_trade_truth():
     assert order.fee_paid == pytest.approx(0.019)
     assert order.exchange_order_id == "999"
     assert order.status == "FILLED"
+
+
+@pytest.mark.asyncio
+async def test_order_fill_lock_uses_for_update():
+    from database.repositories.order_repository import OrderRepository
+
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = SimpleNamespace(id=42)
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+
+    await OrderRepository(session).get_order_by_client_id_with_lock("ORD-1")
+
+    statement = session.execute.await_args.args[0]
+    assert statement._for_update_arg is not None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_trade_rolls_back_only_savepoint():
+    from database.repositories.trade_repository import TradeRepository
+    from sqlalchemy.exc import IntegrityError
+
+    entered = False
+
+    class Savepoint:
+        async def __aenter__(self):
+            nonlocal entered
+            entered = True
+
+        async def __aexit__(self, *_args):
+            return False
+
+    missing = MagicMock()
+    missing.scalar_one_or_none.return_value = None
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=missing)
+    session.begin_nested.return_value = Savepoint()
+    session.add.side_effect = lambda _trade: entered or pytest.fail("insert outside savepoint")
+    session.flush = AsyncMock(side_effect=IntegrityError("duplicate", None, None))
+
+    result = await TradeRepository(session).create_trade({"trade_id": "T-1"})
+
+    assert result is None
+    session.rollback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_recorder_recomputes_from_durable_trades(monkeypatch):
+    from services.orders_recorder import OrdersRecorder
+
+    db_order = SimpleNamespace(id=42)
+    trades = [
+        SimpleNamespace(amount=0.50, price=31, fee_paid=0.015, fee_currency="USDC"),
+        SimpleNamespace(amount=0.14, price=32, fee_paid=0.004, fee_currency="USDC"),
+    ]
+    order_repo = MagicMock()
+    order_repo.get_order_by_client_id_with_lock = AsyncMock(return_value=db_order)
+    order_repo.recompute_order_aggregates = AsyncMock()
+    trade_repo = MagicMock()
+    trade_repo.get_trade_by_id = AsyncMock(return_value=None)
+    trade_repo.create_trade = AsyncMock(return_value=SimpleNamespace(id=1))
+    trade_repo.get_trades_by_order_id = AsyncMock(return_value=trades)
+    monkeypatch.setattr("services.orders_recorder.OrderRepository", lambda _session: order_repo)
+    monkeypatch.setattr("services.orders_recorder.TradeRepository", lambda _session: trade_repo)
+    db_manager = MagicMock()
+    db_manager.get_session_context.side_effect = _session_context
+    event = SimpleNamespace(
+        order_id="ORD-1", trading_pair="HYPE-USDC",
+        trade_type=SimpleNamespace(name="SELL"), amount=0.14, price=32,
+        timestamp=1718000001.0, trade_fee=None,
+        exchange_order_id="999", exchange_trade_id="5002",
+    )
+
+    await OrdersRecorder(db_manager, "acc", "hyperliquid_perpetual")._handle_order_filled(event)
+
+    order_repo.get_order_by_client_id_with_lock.assert_awaited_once_with("ORD-1")
+    order_repo.recompute_order_aggregates.assert_awaited_once_with(
+        "ORD-1", trades, exchange_order_id="999"
+    )
 
 
 @pytest.mark.asyncio

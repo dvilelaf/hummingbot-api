@@ -25,14 +25,16 @@ class TradeRepository:
             if existing:
                 return None  # Already exists, skip silently
 
-        trade = Trade(**trade_data)
-        self.session.add(trade)
         try:
-            await self.session.flush()  # Get the ID
+            # Use a nested savepoint so an IntegrityError rolls back only the
+            # trade insert, never the outer transaction (which may hold earlier
+            # order mutations from the same session).
+            async with self.session.begin_nested():
+                trade = Trade(**trade_data)
+                self.session.add(trade)
+                await self.session.flush()
             return trade
         except IntegrityError:
-            # Race condition: another concurrent insert succeeded first
-            await self.session.rollback()
             return None
 
     async def get_trade_by_id(self, trade_id: str) -> Optional[Trade]:

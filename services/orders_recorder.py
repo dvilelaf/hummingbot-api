@@ -198,6 +198,14 @@ class OrdersRecorder:
                 order_repo = OrderRepository(session)
                 trade_repo = TradeRepository(session)
 
+                # Lock the order row to serialize concurrent fill mutations and
+                # prevent two callers from each recomputing from an incomplete
+                # snapshot.
+                db_order = await order_repo.get_order_by_client_id_with_lock(event.order_id)
+                if db_order is None:
+                    logger.warning(f"Order {event.order_id} not found for fill event, skipping")
+                    return
+
                 # Calculate fees
                 trade_fee_paid = 0
                 trade_fee_currency = None
@@ -237,58 +245,59 @@ class OrdersRecorder:
                             logger.error(f"Fallback fee calculation also failed: {fallback_err}")
                             trade_fee_paid = 0
                             trade_fee_currency = None
-                # Update order with fill information (handle potential NaN values like Hummingbot does)
+
                 try:
                     filled_amount = Decimal(str(event.amount))
                     average_fill_price = Decimal(str(event.price))
-                    fee_paid_decimal = Decimal(str(trade_fee_paid)) if trade_fee_paid else None
-
-                    order = await order_repo.update_order_fill(
-                        client_order_id=event.order_id,
-                        filled_amount=filled_amount,
-                        average_fill_price=average_fill_price,
-                        fee_paid=fee_paid_decimal,
-                        fee_currency=trade_fee_currency
-                    )
                 except (ValueError, InvalidOperation) as e:
                     logger.error(f"Error processing order fill for {event.order_id}: {e}, skipping update")
                     return
 
-                # Create trade record using validated values
-                if order:
-                    try:
-                        # Validate all values before creating trade record
-                        validated_timestamp = event.timestamp if event.timestamp and not math.isnan(
-                            event.timestamp) else time.time()
-                        validated_fee = trade_fee_paid if trade_fee_paid and not math.isnan(trade_fee_paid) else 0
+                # Validate all values before creating trade record
+                validated_timestamp = event.timestamp if event.timestamp and not math.isnan(
+                    event.timestamp) else time.time()
+                validated_fee = trade_fee_paid if trade_fee_paid and not math.isnan(trade_fee_paid) else 0
 
-                        # Use exchange_trade_id if available (unique per fill), fallback to generated id
-                        exchange_trade_id = getattr(event, 'exchange_trade_id', None)
-                        if exchange_trade_id:
-                            trade_id = f"{event.order_id}_{exchange_trade_id}"
-                        else:
-                            # Fallback: include amount to differentiate partial fills at same timestamp
-                            trade_id = f"{event.order_id}_{validated_timestamp}_{float(filled_amount)}"
+                # Use exchange_trade_id if available (unique per fill), fallback to generated id
+                exchange_trade_id = getattr(event, 'exchange_trade_id', None)
+                if exchange_trade_id:
+                    trade_id = f"{event.order_id}_{exchange_trade_id}"
+                else:
+                    # Fallback: include amount to differentiate partial fills at same timestamp
+                    trade_id = f"{event.order_id}_{validated_timestamp}_{float(filled_amount)}"
 
-                        trade_data = {
-                            "order_id": order.id,
-                            "trade_id": trade_id,
-                            "timestamp": datetime.fromtimestamp(validated_timestamp),
-                            "trading_pair": event.trading_pair,
-                            "trade_type": event.trade_type.name,
-                            "amount": float(filled_amount),  # Use validated amount
-                            "price": float(average_fill_price),  # Use validated price
-                            "fee_paid": validated_fee,
-                            "fee_currency": trade_fee_currency
-                        }
-                        result = await trade_repo.create_trade(trade_data)
-                        if result is None:
-                            logger.debug(f"Trade {trade_id} already exists, skipping duplicate")
-                    except (ValueError, TypeError) as e:
-                        logger.error(f"Error creating trade record for {event.order_id}: {e}")
-                        logger.error(
-                            f"Trade data that failed: timestamp={event.timestamp}, "
-                            f"amount={event.amount}, price={event.price}, fee={trade_fee_paid}")
+                # Canonical duplicate check. Recompute even for an existing
+                # trade so retries converge stale aggregates to durable truth.
+                existing_trade = await trade_repo.get_trade_by_id(trade_id)
+                if existing_trade is None:
+                    trade_data = {
+                        "order_id": db_order.id,
+                        "trade_id": trade_id,
+                        "timestamp": datetime.fromtimestamp(validated_timestamp),
+                        "trading_pair": event.trading_pair,
+                        "trade_type": event.trade_type.name,
+                        "amount": float(filled_amount),
+                        "price": float(average_fill_price),
+                        "fee_paid": validated_fee,
+                        "fee_currency": trade_fee_currency,
+                    }
+
+                    # Idempotent insert: duplicate conflict rolls back only the
+                    # nested savepoint, never the outer transaction.
+                    created = await trade_repo.create_trade(trade_data)
+                    if created is None:
+                        logger.debug(f"Trade {trade_id} already exists (race)")
+
+                # Trade is now durable.  Recompute aggregates from ALL persisted
+                # trades so that concurrent fill events don't double-count.
+                all_trades = await trade_repo.get_trades_by_order_id(db_order.id)
+                if all_trades:
+                    exchange_order_id = getattr(event, 'exchange_order_id', None)
+                    await order_repo.recompute_order_aggregates(
+                        event.order_id,
+                        all_trades,
+                        exchange_order_id=exchange_order_id,
+                    )
 
             logger.debug(f"Recorded order fill: {event.order_id} - {event.amount} @ {event.price}")
         except Exception as e:

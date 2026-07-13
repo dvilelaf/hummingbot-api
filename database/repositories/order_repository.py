@@ -26,6 +26,19 @@ class OrderRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_order_by_client_id_with_lock(self, client_order_id: str) -> Optional[Order]:
+        """Get an order by its client order ID, locking the row for update.
+
+        Uses SELECT ... FOR UPDATE to serialize concurrent fill mutations on the
+        same order.  Must be called inside a transaction (the session's connection
+        must be in a transaction context, which it is when obtained from
+        get_session_context).
+        """
+        result = await self.session.execute(
+            select(Order).where(Order.client_order_id == client_order_id).with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def update_order_status(self, client_order_id: str, status: str, 
                                 error_message: Optional[str] = None) -> Optional[Order]:
         """Update order status and optional error message."""

@@ -1217,14 +1217,21 @@ class UnifiedConnectorService:
         the identity used by ``OrdersRecorder._handle_order_filled``.  Both the
         canonical id and the legacy raw ``tid`` are checked to prevent double-counting
         when a previous version of this method already stored either form.
+
+        The order row is locked (SELECT ... FOR UPDATE) before any trade mutation
+        to serialize concurrent fill processing.  Trade inserts use a nested
+        savepoint so a duplicate-key conflict never rolls back the outer transaction.
+        After all fills are persisted, aggregates are recomputed from every durable
+        trade for the order.
         """
         if not fills:
             return
 
-        db_order = await order_repo.get_order_by_client_id(order.client_order_id)
+        db_order = await order_repo.get_order_by_client_id_with_lock(order.client_order_id)
         if db_order is None:
             return
 
+        last_oid = None
         for fill in sorted(fills, key=lambda item: int(item.get("time", 0) or 0)):
             raw_tid = str(fill.get("tid") or "")
             if not raw_tid:
@@ -1256,20 +1263,12 @@ class UnifiedConnectorService:
             )
             if created_trade is None:
                 continue
-
-            await order_repo.update_order_fill(
-                client_order_id=order.client_order_id,
-                filled_amount=filled_amount,
-                average_fill_price=fill_price,
-                fee_paid=fee_paid,
-                fee_currency=fee_currency,
-                exchange_order_id=str(fill.get("oid") or order.exchange_order_id or ""),
-            )
+            last_oid = str(fill.get("oid") or order.exchange_order_id or "")
 
         all_trades = await trade_repo.get_trades_by_order_id(db_order.id)
         if not all_trades:
             return
-        exchange_oid = str(fill.get("oid") or order.exchange_order_id or "")
+        exchange_oid = last_oid or order.exchange_order_id or ""
         await order_repo.recompute_order_aggregates(
             order.client_order_id, all_trades, exchange_order_id=exchange_oid
         )
