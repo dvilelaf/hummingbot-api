@@ -231,6 +231,55 @@ def _order_intent_executes_as_gateway_swap(body: ProviderIntentRequest) -> bool:
     )
 
 
+def _reduce_side(market_side: str) -> str:
+    """Return the side that reduces the given market side."""
+    if market_side.upper() == "LONG":
+        return "SELL"
+    if market_side.upper() == "SHORT":
+        return "BUY"
+    return ""
+
+
+async def _resolve_reduce_order(
+    body: ProviderIntentRequest,
+    accounts_service: AccountsService,
+) -> tuple[Decimal, PositionAction]:
+    """Refresh positions, validate, clip quantity, return (clipped_amount, position_action)."""
+    positions = await accounts_service.get_account_positions(
+        body.account_name,
+        body.connector_name,
+    )
+    fresh_position = Decimal("0")
+    position_side = ""
+    connector_market = (
+        connector_trading_pair(body.connector_name, body.market_id)
+        if body.mode == "mainnet"
+        else body.market_id
+    )
+    for pos in positions:
+        if str(pos.get("trading_pair", "")).upper() == connector_market.upper():
+            fresh_position = abs(Decimal(str(pos.get("amount", "0"))))
+            position_side = str(pos.get("side", "")).upper()
+            break
+    if fresh_position == 0 or not position_side:
+        raise HTTPException(
+            status_code=400,
+            detail=f"no open position for {body.market_id}; reduce order requires a nonzero position",
+        )
+    expected_reduce_side = _reduce_side(position_side)
+    if not expected_reduce_side or body.side.upper() != expected_reduce_side:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"reduce side mismatch for {body.market_id}: "
+                f"position is {position_side}, requested {body.side}; "
+                f"must be {expected_reduce_side}"
+            ),
+        )
+    clipped = min(body.quantity, fresh_position)
+    return clipped, PositionAction.CLOSE
+
+
 async def _submit_order_intent(
     body: ProviderIntentRequest,
     request: Request,
@@ -247,6 +296,18 @@ async def _submit_order_intent(
         )
     if body.preflight_only:
         return await _preflight_order_intent(body, accounts_service, order_type=order_type)
+    try:
+        if body.position_effect == "reduce":
+            amount, position_action = await _resolve_reduce_order(body, accounts_service)
+        else:
+            amount = body.quantity
+            position_action = PositionAction.OPEN
+    except HTTPException as exc:
+        return ProviderIntentResponse(
+            status="rejected" if exc.status_code < 500 else "failed",
+            correlation_id=body.correlation_id,
+            provider_error=_redact_secret_text(exc.detail),
+        )
     connector_market = (
         connector_trading_pair(body.connector_name, body.market_id)
         if body.mode == "mainnet"
@@ -258,10 +319,10 @@ async def _submit_order_intent(
             connector_name=body.connector_name,
             trading_pair=connector_market,
             trade_type=TradeType[body.side],
-            amount=body.quantity,
+            amount=amount,
             order_type=OrderType[order_type],
             price=body.price,
-            position_action=PositionAction.OPEN,
+            position_action=position_action,
             safe_testnet=body.mode == "testnet",
             marlin_provider_intent_authorized=provider_intent_authorized,
         )
@@ -286,8 +347,8 @@ async def _submit_order_intent(
         status="submitted",
         correlation_id=body.correlation_id,
         external_order_id=str(order_id),
-        submitted_quantity=body.quantity,
-        submitted_notional=body.quantity * body.price if body.price is not None else None,
+        submitted_quantity=amount,
+        submitted_notional=amount * body.price if body.price is not None else None,
         provider_status="submitted",
     )
 

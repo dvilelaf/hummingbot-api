@@ -39,6 +39,7 @@ class ProviderIntentRequest(BaseModel):
     order_type: Optional[Literal["LIMIT", "LIMIT_MAKER", "MARKET"]] = None
     price: Optional[Decimal] = None
     correlation_id: Optional[str] = None
+    position_effect: Literal["open", "reduce"] = Field(default="open")
     preflight_only: bool = False
     risk_metadata: Dict[str, Any] = Field(default_factory=dict)
     wallet_identity: Optional[Dict[str, Any]] = None

@@ -335,6 +335,10 @@ class FakeAccountsService:
         }
         self.place_trade_error = None
         self.place_trade_calls = []
+        self.account_positions = []
+
+    async def get_account_positions(self, account_name, connector_name):
+        return list(self.account_positions)
 
     async def update_account_state(self, **kwargs):
         self.update_calls.append(kwargs)
@@ -1640,3 +1644,79 @@ def test_base_swap_provider_intent_buy_executes_as_gateway_sell(monkeypatch):
     assert EXECUTE_SWAP_CALLS[0]["quote_asset"] == "AERO"
     assert EXECUTE_SWAP_CALLS[0]["amount"] == provider_boundary.Decimal("0.00005")
     assert EXECUTE_SWAP_CALLS[0]["side"] == "SELL"
+
+
+def test_reduce_order_refreshes_position_clips_and_submits_close(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"SELL": "SELL"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"MARKET": "MARKET"})
+    monkeypatch.setattr(
+        provider_boundary,
+        "PositionAction",
+        SimpleNamespace(OPEN="OPEN", CLOSE="CLOSE"),
+    )
+    service = FakeAccountsService()
+    service.account_positions = [
+        {"trading_pair": "HYPE-USD", "side": "LONG", "amount": "0.64"},
+    ]
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="hyperliquid_perpetual",
+        market_id="HYPE-USDC",
+        mode="mainnet",
+        order_type="MARKET",
+        quantity="0.80",
+        side="SELL",
+        position_effect="reduce",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(body, _authorized_request(), service),
+    )
+
+    assert result.status == "submitted"
+    assert result.submitted_quantity == provider_boundary.Decimal("0.64")
+    assert service.place_trade_calls[0]["amount"] == provider_boundary.Decimal("0.64")
+    assert service.place_trade_calls[0]["position_action"] == "CLOSE"
+
+
+@pytest.mark.parametrize(
+    ("positions", "side", "error"),
+    [
+        ([], "SELL", "no open position"),
+        ([{"trading_pair": "HYPE-USD", "side": "LONG", "amount": "0.64"}], "BUY", "reduce side mismatch"),
+    ],
+)
+def test_reduce_order_rejects_non_reducing_position(monkeypatch, positions, side, error):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {side: side})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"MARKET": "MARKET"})
+    monkeypatch.setattr(
+        provider_boundary,
+        "PositionAction",
+        SimpleNamespace(OPEN="OPEN", CLOSE="CLOSE"),
+    )
+    service = FakeAccountsService()
+    service.account_positions = positions
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="hyperliquid_perpetual",
+        market_id="HYPE-USDC",
+        mode="mainnet",
+        order_type="MARKET",
+        quantity="0.64",
+        side=side,
+        position_effect="reduce",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(body, _authorized_request(), service),
+    )
+
+    assert result.status == "rejected"
+    assert error in result.provider_error
+    assert service.place_trade_calls == []
