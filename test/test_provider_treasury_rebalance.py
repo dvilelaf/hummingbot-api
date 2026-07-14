@@ -1277,6 +1277,79 @@ def test_rebalance_response_maps_stage_fields():
     assert response.stage_status == "built"
 
 
+def test_rebalance_response_maps_provider_neutral_stages_and_serializes_snake_case():
+    module = _provider_treasury_module()
+
+    response = module._rebalance_response(
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stages": [
+                {
+                    "index": 0,
+                    "kind": "conversion",
+                    "status": "confirmed",
+                    "sourceAmount": "100.50",
+                    "sourceAsset": "USDC",
+                    "destinationAmount": "99.50",
+                    "destinationAsset": "USDC.e",
+                    "transactionHash": "0xconversion",
+                },
+                {
+                    "index": 1,
+                    "kind": "funding",
+                    "status": "pending",
+                    "destinationAmount": "99.50",
+                    "destinationAsset": "USDC",
+                },
+            ],
+        }
+    )
+
+    assert response.stages[0].index == 0
+    assert response.stages[0].kind == "conversion"
+    assert response.stages[0].status == "confirmed"
+    assert response.stages[0].source_amount == Decimal("100.50")
+    assert response.stages[0].destination_asset == "USDC.e"
+    assert response.stages[0].transaction_hash == "0xconversion"
+    assert response.stages[1].kind == "funding"
+
+    assert module._rebalance_response_payload(response)["stages"] == [
+        {
+            "index": 0,
+            "kind": "conversion",
+            "status": "confirmed",
+            "source_amount": "100.50",
+            "source_asset": "USDC",
+            "destination_amount": "99.50",
+            "destination_asset": "USDC.e",
+            "transaction_hash": "0xconversion",
+        },
+        {
+            "index": 1,
+            "kind": "funding",
+            "status": "pending",
+            "destination_amount": "99.50",
+            "destination_asset": "USDC",
+        },
+    ]
+
+
+def test_rebalance_response_stage_list_can_be_empty():
+    module = _provider_treasury_module()
+
+    response = module._rebalance_response(
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "built",
+            "stages": [],
+        }
+    )
+
+    assert response.stages == []
+    assert module._rebalance_response_payload(response)["stages"] == []
+
+
 def test_rebalance_response_stage_fields_default_to_none():
     module = _provider_treasury_module()
 
@@ -1290,6 +1363,7 @@ def test_rebalance_response_stage_fields_default_to_none():
     assert response.stage_index is None
     assert response.stage_count is None
     assert response.stage_status is None
+    assert response.stages is None
 
 
 def test_rebalance_response_payload_persists_stage_fields():
@@ -1309,6 +1383,41 @@ def test_rebalance_response_payload_persists_stage_fields():
     assert payload["stage_index"] == 0
     assert payload["stage_count"] == 2
     assert payload["stage_status"] == "built"
+
+
+def test_persisted_rebalance_response_round_trips_snake_case_stages():
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    response = module._rebalance_response(
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "confirmed",
+            "stages": [
+                {
+                    "index": 0,
+                    "kind": "funding",
+                    "status": "confirmed",
+                    "destinationAmount": "100.00",
+                    "destinationAsset": "USDC",
+                }
+            ],
+        }
+    )
+    _REBALANCE_RECORDS["target-funding-1"] = types.SimpleNamespace(
+        status="confirmed",
+        response_payload=module._rebalance_response_payload(response),
+    )
+
+    restored = asyncio.run(
+        module._refresh_rebalance_status(
+            service,
+            _authorized_request().app.state.db_manager,
+            "target-funding-1",
+        )
+    )
+
+    assert restored.stages[0].destination_amount == Decimal("100.00")
+    assert service.gateway_client.status_calls == []
 
 
 @pytest.mark.parametrize(
@@ -1363,6 +1472,124 @@ def test_response_model_rejects_noncompliant_stage_values_directly():
             module.ProviderTreasuryRebalanceResponse(id="target-funding-1", status="built", **{field: value})
     with pytest.raises(ValueError):
         module.ProviderTreasuryRebalanceResponse(id="target-funding-1", status="built", stage_status="   ")
+
+
+def test_stage_model_rejects_invalid_values_and_extra_fields_directly():
+    module = _provider_treasury_module()
+    stage = {
+        "index": 0,
+        "kind": "conversion",
+        "status": "built",
+    }
+
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryStage(**{**stage, "index": -1})
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryStage(**{**stage, "kind": "bridge"})
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryStage(**{**stage, "status": "   "})
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryStage(**{**stage, "source_amount": Decimal("0")})
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryStage(**{**stage, "transaction_hash": "  "})
+    with pytest.raises(ValueError):
+        module.ProviderTreasuryStage(**{**stage, "provider_payload": {"secret": "value"}})
+
+
+@pytest.mark.parametrize(
+    "stages",
+    [
+        None,
+        {},
+        "not-a-list",
+        [None],
+        [{"index": -1, "kind": "conversion", "status": "built"}],
+        [{"index": 0, "kind": "bridge", "status": "built"}],
+        [{"index": 0, "kind": "conversion", "status": "   "}],
+        [{"index": 0, "kind": "conversion", "status": "built", "sourceAmount": "0"}],
+        [{"index": 0, "kind": "conversion", "status": "built", "sourceAmount": "NaN"}],
+        [{"index": 0, "kind": "conversion", "status": "built", "sourceAsset": "   "}],
+        [{"index": 0, "kind": "conversion", "status": "built", "transactionHash": "   "}],
+        [{"index": 0, "kind": "conversion", "status": "built", "error": "   "}],
+        [{"index": 0, "kind": "conversion", "status": "built", "source_amount": "1"}],
+        [{"index": 0, "kind": "conversion", "status": "built", "providerPayload": {"secret": "value"}}],
+        [{"index": 0, "kind": "conversion"}],
+    ],
+)
+def test_malformed_gateway_stages_raise_sanitized_502(stages):
+    module = _provider_treasury_module()
+
+    with pytest.raises(module.HTTPException) as exc:
+        module._rebalance_response(
+            {
+                "idempotencyKey": "target-funding-1",
+                "status": "built",
+                "stages": stages,
+            }
+        )
+
+    assert exc.value.status_code == 502
+    assert "secret" not in str(exc.value.detail).lower()
+
+
+@pytest.mark.parametrize(
+    "stages",
+    [
+        [{"index": 1, "kind": "conversion", "status": "built"}],
+        [
+            {"index": 0, "kind": "conversion", "status": "confirmed"},
+            {"index": 2, "kind": "funding", "status": "built"},
+        ],
+    ],
+)
+def test_gateway_stage_index_must_match_list_position(stages):
+    module = _provider_treasury_module()
+
+    with pytest.raises(module.HTTPException) as exc:
+        module._rebalance_response(
+            {
+                "idempotencyKey": "target-funding-1",
+                "status": "built",
+                "stages": stages,
+            }
+        )
+
+    assert exc.value.status_code == 502
+    assert "must match list position" in str(exc.value.detail)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "sourceAmount",
+        "sourceAsset",
+        "destinationAmount",
+        "destinationAsset",
+        "transactionHash",
+        "error",
+    ],
+)
+def test_gateway_stage_optional_fields_reject_explicit_null(field):
+    module = _provider_treasury_module()
+
+    with pytest.raises(module.HTTPException) as exc:
+        module._rebalance_response(
+            {
+                "idempotencyKey": "target-funding-1",
+                "status": "built",
+                "stages": [
+                    {
+                        "index": 0,
+                        "kind": "conversion",
+                        "status": "built",
+                        field: None,
+                    }
+                ],
+            }
+        )
+
+    assert exc.value.status_code == 502
+    assert field in str(exc.value.detail)
 
 
 def test_execute_retry_stage0_built_repeated_after_claim(monkeypatch):

@@ -16,6 +16,7 @@ from models.provider_treasury import (
     ProviderTreasuryRebalanceExecuteRequest,
     ProviderTreasuryRebalanceRequest,
     ProviderTreasuryRebalanceResponse,
+    ProviderTreasuryStage,
 )
 from services.accounts_service import AccountsService
 from services.marlin_runtime import _derive_marlin_credential_values
@@ -31,6 +32,21 @@ DESTINATION_WALLET_DEFAULT_FAILED_BLOCKER = "destination_wallet_default_failed"
 IDEMPOTENCY_KEY_CONFLICT_BLOCKER = "idempotency_key_conflict"
 HYPERLIQUID_MAINNET_WALLET_REF = "hyperliquid:mainnet:hyperliquid_trader"
 HL_BASELINE_FIELD = "_hl_baseline_usdc"
+GATEWAY_TREASURY_STAGE_FIELDS = frozenset(
+    {
+        "index",
+        "kind",
+        "status",
+        "sourceAmount",
+        "sourceAsset",
+        "destinationAmount",
+        "destinationAsset",
+        "transactionHash",
+        "error",
+    }
+)
+GATEWAY_TREASURY_STAGE_REQUIRED_FIELDS = frozenset({"index", "kind", "status"})
+_GATEWAY_TREASURY_STAGE_FIELD_MISSING = object()
 
 GATEWAY_RECOVERABLE_EXECUTION_STATUSES = frozenset(
     {
@@ -356,7 +372,24 @@ def _rebalance_response(
         stage_index=_parse_gateway_stage_index(result.get("stageIndex")),
         stage_count=_parse_gateway_stage_count(result.get("stageCount")),
         stage_status=_parse_gateway_stage_status(result.get("stageStatus")),
+        stages=_parse_gateway_stages(result["stages"]) if "stages" in result else None,
     )
+
+
+def _stored_rebalance_response(
+    payload: Any,
+    *,
+    rebalance_id: str | None = None,
+) -> ProviderTreasuryRebalanceResponse:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="Stored treasury rebalance response is malformed")
+    values = dict(payload)
+    if not values.get("id") and rebalance_id:
+        values["id"] = rebalance_id
+    try:
+        return ProviderTreasuryRebalanceResponse.model_validate(values)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=502, detail="Stored treasury rebalance response is malformed")
 
 
 def _gateway_error_status(result: dict[str, Any]) -> int:
@@ -400,6 +433,124 @@ def _parse_gateway_stage_status(value: Any) -> str | None:
     if not raw:
         raise HTTPException(status_code=502, detail=f"Gateway returned empty stageStatus: {_redact_error(value)}")
     return raw
+
+
+def _parse_gateway_stages(value: Any) -> list[ProviderTreasuryStage]:
+    if type(value) is not list:
+        raise HTTPException(status_code=502, detail="Gateway returned non-list treasury stages")
+
+    stages: list[ProviderTreasuryStage] = []
+    for position, item in enumerate(value):
+        if type(item) is not dict:
+            _raise_malformed_gateway_stage(position, "item must be an object")
+        fields = set(item)
+        if not fields.issubset(GATEWAY_TREASURY_STAGE_FIELDS):
+            _raise_malformed_gateway_stage(position, "contains unsupported fields")
+        if not GATEWAY_TREASURY_STAGE_REQUIRED_FIELDS.issubset(fields):
+            _raise_malformed_gateway_stage(position, "is missing required fields")
+        stages.append(
+            ProviderTreasuryStage(
+                index=_parse_gateway_stage_item_index(item["index"], position),
+                kind=_parse_gateway_stage_kind(item["kind"], position),
+                status=_parse_gateway_stage_item_status(item["status"], position),
+                source_amount=_parse_gateway_stage_amount(
+                    item.get("sourceAmount", _GATEWAY_TREASURY_STAGE_FIELD_MISSING),
+                    "sourceAmount",
+                    position,
+                ),
+                source_asset=_parse_gateway_stage_text(
+                    item.get("sourceAsset", _GATEWAY_TREASURY_STAGE_FIELD_MISSING),
+                    "sourceAsset",
+                    position,
+                ),
+                destination_amount=_parse_gateway_stage_amount(
+                    item.get("destinationAmount", _GATEWAY_TREASURY_STAGE_FIELD_MISSING),
+                    "destinationAmount",
+                    position,
+                ),
+                destination_asset=_parse_gateway_stage_text(
+                    item.get("destinationAsset", _GATEWAY_TREASURY_STAGE_FIELD_MISSING),
+                    "destinationAsset",
+                    position,
+                ),
+                transaction_hash=_parse_gateway_stage_text(
+                    item.get("transactionHash", _GATEWAY_TREASURY_STAGE_FIELD_MISSING),
+                    "transactionHash",
+                    position,
+                ),
+                error=_parse_gateway_stage_text(
+                    item.get("error", _GATEWAY_TREASURY_STAGE_FIELD_MISSING),
+                    "error",
+                    position,
+                    redact=True,
+                ),
+            )
+        )
+    return stages
+
+
+def _raise_malformed_gateway_stage(position: int, reason: str) -> None:
+    raise HTTPException(status_code=502, detail=f"Gateway returned malformed treasury stage {position}: {reason}")
+
+
+def _parse_gateway_stage_item_index(value: Any, position: int) -> int:
+    if type(value) is not int:
+        _raise_malformed_gateway_stage(position, "index must be an integer")
+    if value < 0:
+        _raise_malformed_gateway_stage(position, "index must be non-negative")
+    if value != position:
+        _raise_malformed_gateway_stage(position, "index must match list position")
+    return value
+
+
+def _parse_gateway_stage_kind(value: Any, position: int) -> str:
+    if type(value) is not str or value not in {"conversion", "funding"}:
+        _raise_malformed_gateway_stage(position, "kind must be conversion or funding")
+    return value
+
+
+def _parse_gateway_stage_item_status(value: Any, position: int) -> str:
+    if not isinstance(value, str):
+        _raise_malformed_gateway_stage(position, "status must be a string")
+    raw = value.strip()
+    if not raw:
+        _raise_malformed_gateway_stage(position, "status must not be blank")
+    return raw
+
+
+def _parse_gateway_stage_amount(value: Any, field: str, position: int) -> Decimal | None:
+    if value is _GATEWAY_TREASURY_STAGE_FIELD_MISSING:
+        return None
+    if value is None:
+        _raise_malformed_gateway_stage(position, f"{field} must not be null")
+    if not isinstance(value, str):
+        _raise_malformed_gateway_stage(position, f"{field} must be a decimal string")
+    try:
+        amount = Decimal(value.strip())
+    except (TypeError, ValueError, ArithmeticError):
+        _raise_malformed_gateway_stage(position, f"{field} must be a valid decimal")
+    if not amount.is_finite() or amount <= 0:
+        _raise_malformed_gateway_stage(position, f"{field} must be positive and finite")
+    return amount
+
+
+def _parse_gateway_stage_text(
+    value: Any,
+    field: str,
+    position: int,
+    *,
+    redact: bool = False,
+) -> str | None:
+    if value is _GATEWAY_TREASURY_STAGE_FIELD_MISSING:
+        return None
+    if value is None:
+        _raise_malformed_gateway_stage(position, f"{field} must not be null")
+    if not isinstance(value, str):
+        _raise_malformed_gateway_stage(position, f"{field} must be a string")
+    raw = value.strip()
+    if not raw:
+        _raise_malformed_gateway_stage(position, f"{field} must not be blank")
+    return _redact_error(raw) if redact else raw
 
 
 def _parse_gateway_decimal(value: Any) -> Decimal | None:
@@ -587,7 +738,7 @@ async def _refresh_rebalance_status(
         and isinstance(record.response_payload, dict)
         and str(record.response_payload.get("status", "")).lower() == "confirmed"
     ):
-        return _rebalance_response(record.response_payload, rebalance_id=rebalance_id)
+        return _stored_rebalance_response(record.response_payload, rebalance_id=rebalance_id)
     result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
     response = _rebalance_response(result, rebalance_id=rebalance_id)
     payload = _rebalance_response_payload(response)
@@ -633,7 +784,7 @@ async def _refresh_rebalance_status(
         and str(updated.status).lower() == "confirmed"
         and response.status.lower() != "confirmed"
     ):
-        return _rebalance_response(updated.response_payload, rebalance_id=rebalance_id)
+        return _stored_rebalance_response(updated.response_payload, rebalance_id=rebalance_id)
     return response
 
 

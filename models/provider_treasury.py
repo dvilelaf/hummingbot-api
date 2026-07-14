@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -26,6 +26,27 @@ class ProviderTreasuryRebalanceExecuteRequest(BaseModel):
     idempotency_key: str = Field(min_length=1)
 
 
+class ProviderTreasuryStage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    index: int = Field(ge=0, strict=True)
+    kind: Literal["conversion", "funding"]
+    status: str = Field(min_length=1, strict=True)
+    source_amount: Optional[Decimal] = Field(default=None, gt=0, allow_inf_nan=False)
+    source_asset: Optional[str] = Field(default=None, min_length=1, strict=True)
+    destination_amount: Optional[Decimal] = Field(default=None, gt=0, allow_inf_nan=False)
+    destination_asset: Optional[str] = Field(default=None, min_length=1, strict=True)
+    transaction_hash: Optional[str] = Field(default=None, min_length=1, strict=True)
+    error: Optional[str] = Field(default=None, min_length=1, strict=True)
+
+    @field_validator("status", "source_asset", "destination_asset", "transaction_hash", "error")
+    @classmethod
+    def text_fields_must_not_be_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("stage text fields must not be blank")
+        return value
+
+
 class ProviderTreasuryRebalanceResponse(BaseModel):
     id: str
     status: str
@@ -44,6 +65,7 @@ class ProviderTreasuryRebalanceResponse(BaseModel):
     stage_index: Optional[int] = Field(default=None, ge=0, strict=True)
     stage_count: Optional[int] = Field(default=None, ge=1, strict=True)
     stage_status: Optional[str] = Field(default=None, min_length=1, strict=True)
+    stages: Optional[list[ProviderTreasuryStage]] = None
 
     @field_validator("quoted_at")
     @classmethod
