@@ -99,6 +99,16 @@ def test_provider_runtime_does_not_eager_import_orchestration_services():
     assert "services.executor_service" not in top_level
 
 
+def test_provider_runtime_initializes_connectors_on_explicit_request_only():
+    source = _main_source()
+    startup = source[source.index('startup_connectors = env_csv_set("HUMMINGBOT_STARTUP_CONNECTORS")') :]
+    startup = startup[: startup.index("# AccountsService")]
+
+    assert 'startup_connectors = env_csv_set("HUMMINGBOT_STARTUP_CONNECTORS")' in startup
+    assert "if startup_connectors is None and provider_runtime_enabled():" in startup
+    assert "startup_connectors = set()" in startup
+
+
 def test_provider_runtime_excludes_raw_gateway_mutations():
     provider = _provider_router_section()
 
