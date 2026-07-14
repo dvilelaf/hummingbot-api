@@ -39,6 +39,7 @@ class ProviderSnapshotResponse(BaseModel):
     provider_actions: list[str] = Field(default_factory=list)
     positions: list[ProviderPosition] = Field(default_factory=list)
     portfolio: Optional[Dict[str, Any]] = None
+    portfolio_observed_at_utc: Optional[datetime] = None
     trading_rule: Optional[Dict[str, Any]] = None
 
 

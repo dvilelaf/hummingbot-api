@@ -3,7 +3,7 @@ import os
 import re
 import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -82,6 +82,7 @@ async def provider_snapshot(
     positions_status = "unsupported"
     issues: list[str] = []
     action_set = {action.lower() for action in provider_actions}
+    portfolio_observed_at_utc: datetime | None = None
 
     if not available:
         issues.append(f"provider not available: {connector_name}")
@@ -106,12 +107,14 @@ async def provider_snapshot(
                 )
             }
         try:
-            await accounts_service.update_account_state(
+            refresh_succeeded = await accounts_service.update_account_state(
                 account_names=[body.account_name],
                 connector_names=refresh_connector_names,
                 skip_gateway="swap" not in action_set,
                 tokens_by_chain_network=tokens_by_chain_network,
             )
+            if refresh_succeeded is True:
+                portfolio_observed_at_utc = datetime.now(timezone.utc)
         except Exception as exc:
             issues.append(f"portfolio refresh unavailable: {_redact_secret_text(exc)}")
         xrpl_refresh_error = _connector_balance_refresh_error(accounts_service, connector_name)
@@ -220,6 +223,7 @@ async def provider_snapshot(
         provider_actions=provider_actions,
         positions=positions,
         portfolio=portfolio,
+        portfolio_observed_at_utc=portfolio_observed_at_utc,
         trading_rule=trading_rule,
     )
 

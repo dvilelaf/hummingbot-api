@@ -859,7 +859,7 @@ class AccountsService:
         account_names: Optional[List[str]] = None,
         connector_names: Optional[List[str]] = None,
         tokens_by_chain_network: Optional[Dict[str, List[str]]] = None,
-    ):
+    ) -> bool:
         """Update account state for filtered connectors and optionally Gateway wallets.
 
         Args:
@@ -874,6 +874,7 @@ class AccountsService:
         # Prepare parallel tasks
         tasks = []
         task_meta = []  # (account_name, connector_name)
+        connector_refresh_success = True
 
         for account_name, connectors in all_connectors.items():
             # Filter by account_names if specified
@@ -901,6 +902,7 @@ class AccountsService:
         # Execute connectors + Gateway in parallel when Gateway is explicitly requested.
         if skip_gateway or gateway_filters == ():
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            gateway_result = True
         else:
             # Pass connector_names filter to gateway for chain-network filtering
             results = await asyncio.gather(
@@ -911,7 +913,7 @@ class AccountsService:
                 ),
                 return_exceptions=True
             )
-            # Remove gateway result from processing (it handles its own state internally)
+            gateway_result = results[-1]
             results = results[:-1]
 
         # Process results
@@ -919,8 +921,25 @@ class AccountsService:
             if isinstance(result, Exception):
                 logger.error(f"Error updating balances for connector {connector_name} in account {account_name}: {result}")
                 self.accounts_state[account_name][connector_name] = []
+                connector_refresh_success = False
             else:
                 self.accounts_state[account_name][connector_name] = result
+                if getattr(self, "_connector_balance_refresh_errors", {}).get(connector_name):
+                    connector_refresh_success = False
+
+        if connector_names is not None:
+            requested_connectors = {
+                connector_name
+                for connector_name in connector_names
+                if not connector_name.startswith(GATEWAY_CHAIN_PREFIXES)
+            }
+            refreshed_connectors = {connector_name for _, connector_name in task_meta}
+            if not requested_connectors.issubset(refreshed_connectors):
+                connector_refresh_success = False
+
+        if not (skip_gateway or gateway_filters == ()) and gateway_result is not True:
+            return False
+        return connector_refresh_success
 
     async def get_fresh_available_balance(
         self,
@@ -2442,7 +2461,7 @@ class AccountsService:
         self,
         chain_networks: Optional[List[str]] = None,
         tokens_by_chain_network: Optional[Dict[str, List[str]]] = None,
-    ):
+    ) -> bool:
         """Update Gateway wallet balances in master_account state.
 
         Only queries the defaultWallet on each network in defaultNetworks for each chain.
@@ -2458,25 +2477,25 @@ class AccountsService:
             # Check if Gateway is available
             if not await self.gateway_client.ping():
                 logger.debug("Gateway service is not available, skipping wallet balance update")
-                return
+                return False
 
             if "master_account" not in self.accounts_state:
                 self.accounts_state["master_account"] = {}
 
             if chain_networks:
-                await self._update_filtered_gateway_balances(
+                return await self._update_filtered_gateway_balances(
                     chain_networks=chain_networks,
                     tokens_by_chain_network=tokens_by_chain_network,
                 )
-                return
 
             # Get all available chains
             chains_result = await self.gateway_client.get_chains()
             if not chains_result or "chains" not in chains_result:
                 logger.error("Could not get chains from Gateway")
-                return
+                return False
 
             known_chains = {c["chain"] for c in chains_result["chains"]}
+            refresh_success = True
 
             # Ensure master_account exists in accounts_state
             if "master_account" not in self.accounts_state:
@@ -2493,6 +2512,7 @@ class AccountsService:
 
                 if not networks:
                     logger.debug(f"Chain '{chain}' has no networks configured, skipping")
+                    refresh_success = False
                     continue
 
                 # Get merged config using chain-network namespace (e.g., solana-mainnet-beta)
@@ -2502,6 +2522,7 @@ class AccountsService:
                     config = await self.gateway_client.get_config(f"{chain}-{first_network}")
                 except Exception as e:
                     logger.warning(f"Could not get config for '{chain}-{first_network}': {e}")
+                    refresh_success = False
                     continue
 
                 default_wallet = config.get("defaultWallet")
@@ -2509,11 +2530,13 @@ class AccountsService:
 
                 if not default_wallet:
                     logger.debug(f"Chain '{chain}' missing defaultWallet, skipping")
+                    refresh_success = False
                     continue
 
                 # Skip placeholder wallet addresses from Gateway templates (e.g., '<ethereum-wallet-address>')
                 if default_wallet.startswith("<") and default_wallet.endswith(">"):
                     logger.debug(f"Chain '{chain}' has placeholder defaultWallet '{default_wallet}', skipping")
+                    refresh_success = False
                     continue
 
                 if not default_networks:
@@ -2523,6 +2546,7 @@ class AccountsService:
                         default_networks = [default_network]
                     else:
                         logger.debug(f"Chain '{chain}' missing defaultNetworks, skipping")
+                        refresh_success = False
                         continue
 
                 # Create balance tasks for each default network
@@ -2563,6 +2587,7 @@ class AccountsService:
                         logger.error(f"Error updating Gateway balances for {chain}-{network} wallet {address}: {result}")
                         # Store empty list for error state
                         self.accounts_state["master_account"][chain_network] = []
+                        refresh_success = False
                     elif result:
                         # Only store if there are actual balances (non-empty list)
                         self.accounts_state["master_account"][chain_network] = result
@@ -2588,20 +2613,24 @@ class AccountsService:
                     logger.info(f"Removing stale Gateway balance data for {key} (no longer default network)")
                     del self.accounts_state["master_account"][key]
 
+            return refresh_success
         except Exception as e:
             logger.error(f"Error updating Gateway balances: {e}")
+            return False
 
     async def _update_filtered_gateway_balances(
         self,
         *,
         chain_networks: List[str],
         tokens_by_chain_network: Optional[Dict[str, List[str]]] = None,
-    ) -> None:
+    ) -> bool:
         balance_tasks = []
         task_metadata = []
+        refresh_success = True
         for chain_network in chain_networks:
             chain, _, network = chain_network.partition("-")
             if not chain or not network:
+                refresh_success = False
                 continue
             default_wallet = self._marlin_gateway_default_wallet_address(
                 chain=chain,
@@ -2609,6 +2638,7 @@ class AccountsService:
             )
             if not default_wallet:
                 logger.debug("Chain '%s' missing defaultWallet, skipping", chain)
+                refresh_success = False
                 continue
             if default_wallet.startswith("<") and default_wallet.endswith(">"):
                 logger.debug(
@@ -2616,6 +2646,7 @@ class AccountsService:
                     chain,
                     default_wallet,
                 )
+                refresh_success = False
                 continue
             tokens = (
                 tokens_by_chain_network.get(chain_network)
@@ -2633,7 +2664,7 @@ class AccountsService:
             task_metadata.append((chain, network, default_wallet))
 
         if not balance_tasks:
-            return
+            return False
         results = await asyncio.gather(*balance_tasks, return_exceptions=True)
         for result, (chain, network, address) in zip(results, task_metadata):
             chain_network = f"{chain}-{network}"
@@ -2645,8 +2676,10 @@ class AccountsService:
                     result,
                 )
                 self.accounts_state["master_account"][chain_network] = []
+                refresh_success = False
             else:
                 self.accounts_state["master_account"][chain_network] = result or []
+        return refresh_success
 
     @staticmethod
     def _marlin_gateway_wallet_identity(*, chain: str, network: str) -> Optional[dict[str, str]]:

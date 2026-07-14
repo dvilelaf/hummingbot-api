@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import sys
 import types
+from datetime import timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -339,6 +340,8 @@ class FakeAccountsService:
                 "jupiter": [{"token": "SOL", "units": "0"}],
             }
         }
+        self.update_error = None
+        self.update_success = True
         self.place_trade_error = None
         self.place_trade_calls = []
         self.account_positions = []
@@ -353,6 +356,8 @@ class FakeAccountsService:
 
     async def update_account_state(self, **kwargs):
         self.update_calls.append(kwargs)
+        if self.update_error is not None:
+            raise self.update_error
         if kwargs.get("connector_names") == ["ethereum-base"]:
             self.accounts_state["master_account"]["ethereum-base"] = [
                 {"token": "AERO", "units": "2"},
@@ -364,6 +369,7 @@ class FakeAccountsService:
                 {"token": "SOL", "units": "0.1"},
                 {"token": "USDC", "units": "5"},
             ]
+        return self.update_success
 
     def get_accounts_state(self):
         return self.accounts_state
@@ -428,6 +434,31 @@ def test_hyperliquid_perpetual_snapshot_uses_native_market_and_exposes_logical_c
             ],
         },
     }
+    assert result.portfolio_observed_at_utc is None
+
+
+def test_swap_provider_snapshot_omits_observation_time_when_gateway_refresh_fails():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.update_success = False
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="jupiter",
+                network="mainnet-beta",
+                route_id="jupiter-sol-usdc-mainnet",
+                trading_pair="SOL-USDC",
+                wallet_ref="solana:mainnet-beta:solana_gateway",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.portfolio_observed_at_utc is None
 
 
 def test_perpetual_provider_snapshot_refreshes_and_normalizes_positions():
@@ -627,6 +658,65 @@ def test_swap_provider_snapshot_uses_gateway_chain_network_portfolio():
             ]
         }
     }
+    assert result.portfolio_observed_at_utc is not None
+    assert result.portfolio_observed_at_utc.tzinfo == timezone.utc
+
+
+def test_provider_snapshot_exposes_aware_utc_observation_time_after_successful_refresh():
+    provider_boundary = _provider_boundary_module()
+    provider_boundary._provider_available = _async_return(True)  # noqa: SLF001
+    provider_boundary._provider_capabilities = _async_return((["MARKET"], ["order"]))  # noqa: SLF001
+    provider_boundary._provider_trading_rule = _async_return(None)  # noqa: SLF001
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["binance"] = [
+        {"token": "USDT", "units": "5"},
+    ]
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="binance",
+                trading_pair="BTC-USDT",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.portfolio_observed_at_utc is not None
+    assert result.portfolio_observed_at_utc.tzinfo == timezone.utc
+
+
+@pytest.mark.parametrize("failure", ["raised", "connector_error"])
+def test_provider_snapshot_omits_observation_time_when_refresh_is_not_proven(failure):
+    provider_boundary = _provider_boundary_module()
+    provider_boundary._provider_available = _async_return(True)  # noqa: SLF001
+    provider_boundary._provider_capabilities = _async_return((["MARKET"], ["order"]))  # noqa: SLF001
+    provider_boundary._provider_trading_rule = _async_return(None)  # noqa: SLF001
+    service = FakeAccountsService()
+    if failure == "raised":
+        service.update_error = RuntimeError("connector refresh failed")
+    else:
+        service.balance_refresh_errors["binance"] = "connector balance refresh failed"
+        service.update_success = False
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="binance",
+                trading_pair="BTC-USDT",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.portfolio_observed_at_utc is None
+
 
 
 def test_base_swap_provider_snapshot_scopes_gateway_balance_tokens():
