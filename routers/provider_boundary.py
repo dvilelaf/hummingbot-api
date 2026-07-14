@@ -47,6 +47,7 @@ GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS = {
     "orca": "solana-mainnet-beta",
 }
 COWSWAP_DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS = 1800
+COWSWAP_ADAPTER_ORDER_TYPES = {"LIMIT", "MARKET"}
 
 
 @router.post("/snapshot", response_model=ProviderSnapshotResponse)
@@ -286,7 +287,15 @@ async def _submit_order_intent(
     request: Request,
     accounts_service: AccountsService,
 ) -> ProviderIntentResponse:
-    order_type = body.order_type or "MARKET"
+    order_type = (body.order_type or "MARKET").upper()
+    if body.connector_name == COWSWAP_CONNECTOR_NAME:
+        order_error = _cowswap_order_request_error(order_type, body.price)
+        if order_error is not None:
+            return ProviderIntentResponse(
+                status="rejected",
+                correlation_id=body.correlation_id,
+                provider_error=order_error,
+            )
     try:
         provider_intent_authorized = _mainnet_provider_intent_authorized(body, request)
     except HTTPException as exc:
@@ -417,11 +426,12 @@ async def _preflight_cowswap_order_intent(
     *,
     order_type: str,
 ) -> ProviderIntentResponse:
-    if order_type != "MARKET":
+    order_error = _cowswap_order_request_error(order_type, body.price)
+    if order_error is not None:
         return ProviderIntentResponse(
             status="rejected",
             correlation_id=body.correlation_id,
-            provider_error="CowSwap only supports MARKET orders",
+            provider_error=order_error,
         )
     runtime = getattr(accounts_service, "_cowswap_runtime", None)
     runtime_dependencies = getattr(accounts_service, "_cowswap_runtime_dependencies", None)
@@ -448,6 +458,7 @@ async def _preflight_cowswap_order_intent(
             runtime=runtime,
             sell_token=sell_token,
             buy_token=buy_token,
+            order_type=order_type,
         )
         evm_reader = runtime_dependencies.evm_reader
         owner = runtime_dependencies.owner_address
@@ -501,13 +512,48 @@ def _cowswap_tokens_for_pair(runtime: Any, trading_pair: str) -> tuple[Any, Any]
         raise ValueError(f"unsupported CowSwap trading pair {trading_pair}: {exc}") from exc
 
 
+def _cowswap_order_request_error(order_type: str, price: Decimal | None) -> str | None:
+    advertised_order_types = {
+        str(value).upper()
+        for value in (cowswap_supported_order_types() or ())
+    }
+    supported_order_types = sorted(advertised_order_types & COWSWAP_ADAPTER_ORDER_TYPES)
+    if order_type not in supported_order_types:
+        return (
+            f"CowSwap order type '{order_type}' not announced; "
+            f"supported types: {supported_order_types}"
+        )
+    if order_type == "LIMIT" and (
+        price is None
+        or not price.is_finite()
+        or price <= Decimal("0")
+    ):
+        return "CowSwap LIMIT orders require a positive price"
+    return None
+
+
 async def _cowswap_spend_requirement_atomic(
     body: ProviderIntentRequest,
     *,
     runtime: Any,
     sell_token: Any,
     buy_token: Any,
+    order_type: str,
 ) -> tuple[Any, str]:
+    if order_type == "LIMIT":
+        if body.side == "SELL":
+            return sell_token, _cowswap_amount_to_atomic(
+                str(body.quantity),
+                int(sell_token.decimals),
+            )
+        if body.side == "BUY":
+            if body.price is None:
+                raise ValueError("CowSwap LIMIT orders require a positive price")
+            return buy_token, _cowswap_amount_to_atomic(
+                str(body.quantity * body.price),
+                int(buy_token.decimals),
+            )
+        raise ValueError("CowSwap side must be BUY or SELL")
     if body.side == "SELL":
         _cowswap_amount_to_atomic(str(body.quantity), int(sell_token.decimals))
         connector = getattr(runtime, "_connector", None)
@@ -1271,13 +1317,17 @@ async def _provider_trading_rule(
         runtime = getattr(accounts_service, "_cowswap_runtime", None)
         rules = getattr(runtime, "trading_rules", {}) if runtime is not None else {}
         rule = rules.get(trading_pair)
+        supported_order_types = {
+            str(value).upper()
+            for value in (cowswap_supported_order_types() or ())
+        }
         return None if rule is None else {
             "min_order_size": float(getattr(rule, "min_order_size", 0)),
             "min_notional_size": 0.0,
             "min_price_increment": float(getattr(rule, "min_price_increment", 0)),
             "min_base_amount_increment": float(getattr(rule, "min_base_amount_increment", 0)),
-            "supports_limit_orders": False,
-            "supports_market_orders": True,
+            "supports_limit_orders": "LIMIT" in supported_order_types,
+            "supports_market_orders": "MARKET" in supported_order_types,
         }
     connector_market = connector_trading_pair(connector_name, trading_pair)
     try:

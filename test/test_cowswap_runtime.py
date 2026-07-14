@@ -20,7 +20,7 @@ cowswap_supported_order_types = cowswap_runtime.cowswap_supported_order_types
 cowswap_token_map_from_json = cowswap_runtime.cowswap_token_map_from_json
 get_cowswap_runtime_status = cowswap_runtime.get_cowswap_runtime_status
 poll_cowswap_order = cowswap_runtime.poll_cowswap_order
-place_cowswap_market_order = cowswap_runtime.place_cowswap_market_order
+place_cowswap_order = cowswap_runtime.place_cowswap_order
 build_cowswap_runtime = cowswap_runtime.build_cowswap_runtime
 CowSwapRuntimeDependencies = cowswap_runtime.CowSwapRuntimeDependencies
 CowSwapRuntimeUnavailableError = cowswap_runtime.CowSwapRuntimeUnavailableError
@@ -338,12 +338,12 @@ class FakeCowSwapRuntime:
             quote=SimpleNamespace(buyAmount=SimpleNamespace(root="2500000000")),
         ), "2487500000"
 
-    async def sell(self, *, trading_pair, amount):
-        self.calls.append(("sell", trading_pair, amount))
+    async def sell(self, *, trading_pair, amount, order_type, price):
+        self.calls.append(("sell", trading_pair, amount, order_type, price))
         return SimpleNamespace(client_order_id="sell-1")
 
-    async def buy(self, *, trading_pair, amount):
-        self.calls.append(("buy", trading_pair, amount))
+    async def buy(self, *, trading_pair, amount, order_type, price):
+        self.calls.append(("buy", trading_pair, amount, order_type, price))
         return {"client_order_id": "buy-1"}
 
     async def cancel(self, client_order_id):
@@ -359,20 +359,21 @@ class FakeCowSwapRuntime:
         }
 
 
-def test_place_cowswap_market_order_delegates_sell():
+def test_place_cowswap_order_delegates_market_sell():
     runtime = FakeCowSwapRuntime()
 
     client_order_id = asyncio.run(
-        place_cowswap_market_order(
+        place_cowswap_order(
             runtime=runtime,
             trading_pair="WETH-USDC",
             side="SELL",
             amount="0.01",
+            order_type="MARKET",
         ),
     )
 
     assert client_order_id == "sell-1"
-    assert runtime.calls == [("sell", "WETH-USDC", "0.01")]
+    assert runtime.calls == [("sell", "WETH-USDC", "0.01", "MARKET", None)]
 
 
 def test_cowswap_runtime_prices_quotes_configured_pair():
@@ -386,30 +387,50 @@ def test_cowswap_runtime_prices_quotes_configured_pair():
     assert runtime.calls == [("quote_sell", "WETH", "USDC", "1")]
 
 
-def test_place_cowswap_market_order_delegates_buy():
+def test_place_cowswap_order_delegates_market_buy():
     runtime = FakeCowSwapRuntime()
 
     client_order_id = asyncio.run(
-        place_cowswap_market_order(
+        place_cowswap_order(
             runtime=runtime,
             trading_pair="WETH-USDC",
             side="BUY",
             amount="5",
+            order_type="MARKET",
         ),
     )
 
     assert client_order_id == "buy-1"
-    assert runtime.calls == [("buy", "WETH-USDC", "5")]
+    assert runtime.calls == [("buy", "WETH-USDC", "5", "MARKET", None)]
 
 
-def test_place_cowswap_market_order_fails_closed_without_runtime():
+def test_place_cowswap_order_delegates_limit_with_price():
+    runtime = FakeCowSwapRuntime()
+
+    client_order_id = asyncio.run(
+        place_cowswap_order(
+            runtime=runtime,
+            trading_pair="WETH-USDC",
+            side="BUY",
+            amount="0.01",
+            order_type="LIMIT",
+            price="2500",
+        ),
+    )
+
+    assert client_order_id == "buy-1"
+    assert runtime.calls == [("buy", "WETH-USDC", "0.01", "LIMIT", "2500")]
+
+
+def test_place_cowswap_order_fails_closed_without_runtime():
     try:
         asyncio.run(
-            place_cowswap_market_order(
+            place_cowswap_order(
                 runtime=None,
                 trading_pair="WETH-USDC",
                 side="SELL",
                 amount="0.01",
+                order_type="MARKET",
             ),
         )
     except CowSwapRuntimeUnavailableError as exc:
@@ -418,14 +439,15 @@ def test_place_cowswap_market_order_fails_closed_without_runtime():
         raise AssertionError("expected CowSwapRuntimeUnavailableError")
 
 
-def test_place_cowswap_market_order_rejects_unsupported_side():
+def test_place_cowswap_order_rejects_unsupported_side():
     try:
         asyncio.run(
-            place_cowswap_market_order(
+            place_cowswap_order(
                 runtime=FakeCowSwapRuntime(),
                 trading_pair="WETH-USDC",
                 side="HOLD",
                 amount="0.01",
+                order_type="MARKET",
             ),
         )
     except ValueError as exc:
@@ -586,13 +608,13 @@ def test_api_files_wire_cowswap_through_fail_closed_gate():
 def test_accounts_service_uses_runtime_delegate_only_after_cowswap_dependency_gate():
     accounts_source = (ROOT / "services" / "accounts_service.py").read_text()
 
-    assert "place_cowswap_market_order" in accounts_source
+    assert "place_cowswap_order" in accounts_source
     assert "CowSwapRuntimeDependencies" in accounts_source
 
     place_trade_index = accounts_source.index("async def place_trade")
     dependencies_index = accounts_source.index("_cowswap_runtime_dependencies", place_trade_index)
     blocker_index = accounts_source.index("cowswap_order_submission_blocker", dependencies_index)
-    runtime_delegate_index = accounts_source.index("place_cowswap_market_order", blocker_index)
+    runtime_delegate_index = accounts_source.index("place_cowswap_order", blocker_index)
     connector_lookup_index = accounts_source.index(
         "get_trading_connector(account_name, connector_name)",
         blocker_index,
@@ -600,7 +622,8 @@ def test_accounts_service_uses_runtime_delegate_only_after_cowswap_dependency_ga
     cowswap_branch_source = accounts_source[dependencies_index:connector_lookup_index]
 
     assert "_cowswap_runtime_dependencies" in cowswap_branch_source
-    assert "order_type != OrderType.MARKET" in cowswap_branch_source
+    assert "order_type not in" in cowswap_branch_source
+    assert "price <= Decimal(\"0\")" in cowswap_branch_source
     assert runtime_delegate_index < connector_lookup_index
 
 

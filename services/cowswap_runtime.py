@@ -376,28 +376,46 @@ def cowswap_order_submission_blocker(
     return "; ".join(status.blockers)
 
 
-async def place_cowswap_market_order(
+async def place_cowswap_order(
     *,
     live_action_authorization: Mapping[str, Any] | None = None,
     runtime: Any | None,
     trading_pair: str,
     side: str,
     amount: str,
+    order_type: str = "MARKET",
+    price: str | None = None,
 ) -> str:
-    """Delegate a CowSwap MARKET order to an initialized runtime bridge."""
+    """Delegate a CowSwap order to an initialized runtime bridge."""
     if runtime is None:
         raise CowSwapRuntimeUnavailableError("CowSwap runtime is not initialized")
+
+    normalized_order_type = str(order_type).upper()
+    if normalized_order_type not in {"LIMIT", "MARKET"}:
+        raise ValueError("CowSwap order type must be LIMIT or MARKET")
+    normalized_price = str(price) if price is not None else None
+    if normalized_order_type == "LIMIT":
+        try:
+            parsed_price = Decimal(normalized_price) if normalized_price is not None else Decimal("0")
+        except ArithmeticError as exc:
+            raise ValueError("CowSwap LIMIT orders require a positive price") from exc
+        if not parsed_price.is_finite() or parsed_price <= 0:
+            raise ValueError("CowSwap LIMIT orders require a positive price")
 
     normalized_side = side.upper()
     if normalized_side == "SELL":
         result = await runtime.sell(
             trading_pair=trading_pair,
             amount=amount,
+            order_type=normalized_order_type,
+            price=normalized_price,
         )
     elif normalized_side == "BUY":
         result = await runtime.buy(
             trading_pair=trading_pair,
             amount=amount,
+            order_type=normalized_order_type,
+            price=normalized_price,
         )
     else:
         raise ValueError("CowSwap side must be BUY or SELL")

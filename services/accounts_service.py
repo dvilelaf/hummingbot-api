@@ -21,7 +21,8 @@ from services.cowswap_runtime import (
     cowswap_connector_config_map,
     cowswap_order_records,
     cowswap_order_submission_blocker,
-    place_cowswap_market_order,
+    cowswap_supported_order_types,
+    place_cowswap_order,
     poll_cowswap_order,
 )
 from services.gateway_client import GatewayClient
@@ -1609,8 +1610,29 @@ class AccountsService:
             raise HTTPException(status_code=503, detail=blocker)
 
         if connector_name == COWSWAP_CONNECTOR_NAME:
-            if order_type != OrderType.MARKET:
-                raise HTTPException(status_code=400, detail="CowSwap only supports MARKET orders")
+            advertised_order_types = {
+                str(value).upper()
+                for value in (cowswap_supported_order_types() or ())
+            }
+            supported_order_types = sorted(advertised_order_types & {"LIMIT", "MARKET"})
+            requested_order_type = order_type.name.upper()
+            if requested_order_type not in supported_order_types:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"CowSwap order type '{requested_order_type}' not announced; "
+                        f"supported types: {supported_order_types}"
+                    ),
+                )
+            if requested_order_type == "LIMIT" and (
+                price is None
+                or not price.is_finite()
+                or price <= Decimal("0")
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="CowSwap LIMIT orders require a positive price",
+                )
             try:
                 if (
                     not marlin_provider_intent_authorized
@@ -1624,12 +1646,14 @@ class AccountsService:
                         live_action_authorization=live_action_authorization,
                         source="accounts_service.place_trade",
                     )
-                order_id = await place_cowswap_market_order(
+                order_id = await place_cowswap_order(
                     live_action_authorization=live_action_authorization,
                     runtime=self._cowswap_runtime,
                     trading_pair=trading_pair,
                     side=trade_type.name,
                     amount=str(amount),
+                    order_type=requested_order_type,
+                    price=str(price) if price is not None else None,
                 )
                 logger.info(
                     f"Placed {trade_type} order for {amount} {trading_pair} on {connector_name} "
