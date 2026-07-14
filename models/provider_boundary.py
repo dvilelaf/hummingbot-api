@@ -15,6 +15,17 @@ class ProviderSnapshotRequest(BaseModel):
     wallet_ref: Optional[str] = Field(default=None, min_length=1)
 
 
+class ProviderPosition(BaseModel):
+    account_name: str
+    connector_name: str
+    trading_pair: str
+    side: Literal["LONG", "SHORT"]
+    quantity: Decimal = Field(gt=0)
+    entry_price: Optional[Decimal] = None
+    unrealized_pnl: Optional[Decimal] = None
+    leverage: Optional[Decimal] = None
+
+
 class ProviderSnapshotResponse(BaseModel):
     account_name: str
     connector_name: str
@@ -25,6 +36,7 @@ class ProviderSnapshotResponse(BaseModel):
     limit_maker_order_supported: bool = False
     order_types: list[str] = Field(default_factory=list)
     provider_actions: list[str] = Field(default_factory=list)
+    positions: list[ProviderPosition] = Field(default_factory=list)
     portfolio: Optional[Dict[str, Any]] = None
     trading_rule: Optional[Dict[str, Any]] = None
 

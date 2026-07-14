@@ -15,6 +15,7 @@ from deps import get_accounts_service, get_database_manager
 from models.provider_boundary import (
     ProviderIntentRequest,
     ProviderIntentResponse,
+    ProviderPosition,
     ProviderSnapshotRequest,
     ProviderSnapshotResponse,
 )
@@ -77,7 +78,9 @@ async def provider_snapshot(
         body.trading_pair,
     )
     portfolio: dict[str, Any] | None = None
+    positions: list[ProviderPosition] = []
     issues: list[str] = []
+    action_set = {action.lower() for action in provider_actions}
 
     if not available:
         issues.append(f"provider not available: {connector_name}")
@@ -86,7 +89,6 @@ async def provider_snapshot(
 
     if body.refresh_portfolio:
         refresh_connector_names = [connector_name]
-        action_set = {action.lower() for action in provider_actions}
         tokens_by_chain_network = None
         if "swap" in action_set:
             chain_network_key = GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS.get(
@@ -117,6 +119,23 @@ async def provider_snapshot(
                 issues,
                 "account not activated: fund derived XRPL mainnet account reserve",
             )
+
+    if _provider_snapshot_positions_enabled(metadata_connector, action_set):
+        try:
+            raw_positions = await accounts_service.get_account_positions(
+                body.account_name,
+                connector_name,
+            )
+            positions = [
+                _normalize_provider_position(
+                    position,
+                    account_name=body.account_name,
+                    connector_name=connector_name,
+                )
+                for position in raw_positions
+            ]
+        except Exception as exc:
+            issues.append(f"positions refresh unavailable: {_redact_secret_text(exc)}")
 
     try:
         portfolio_state = accounts_service.get_accounts_state()
@@ -195,9 +214,68 @@ async def provider_snapshot(
         limit_maker_order_supported="LIMIT_MAKER" in {item.upper() for item in order_types},
         order_types=order_types,
         provider_actions=provider_actions,
+        positions=positions,
         portfolio=portfolio,
         trading_rule=trading_rule,
     )
+
+
+def _provider_snapshot_positions_enabled(
+    metadata_connector: str,
+    provider_actions: list[str],
+) -> bool:
+    return (
+        "_perpetual" in metadata_connector.lower()
+        and "order" in {action.lower() for action in provider_actions}
+    )
+
+
+def _normalize_provider_position(
+    position: Any,
+    *,
+    account_name: str,
+    connector_name: str,
+) -> ProviderPosition:
+    if not isinstance(position, dict):
+        raise ValueError("position row is not an object")
+
+    trading_pair = str(position.get("trading_pair", "")).strip()
+    if not trading_pair:
+        raise ValueError("position row is missing trading_pair")
+
+    side = str(position.get("side", "")).upper()
+    if side not in {"LONG", "SHORT"}:
+        raise ValueError(f"position row has unsupported side: {side or '<missing>'}")
+
+    try:
+        quantity = abs(Decimal(str(position.get("amount"))))
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise ValueError("position amount is not a valid decimal") from exc
+    if not quantity.is_finite() or quantity <= 0:
+        raise ValueError("position amount must be finite and nonzero")
+
+    return ProviderPosition(
+        account_name=account_name,
+        connector_name=connector_name,
+        trading_pair=trading_pair,
+        side=side,
+        quantity=quantity,
+        entry_price=_optional_position_decimal(position.get("entry_price"), "entry_price"),
+        unrealized_pnl=_optional_position_decimal(position.get("unrealized_pnl"), "unrealized_pnl"),
+        leverage=_optional_position_decimal(position.get("leverage"), "leverage"),
+    )
+
+
+def _optional_position_decimal(value: Any, field_name: str) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise ValueError(f"position {field_name} is not a valid decimal") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"position {field_name} must be finite")
+    return parsed
 
 
 @router.post("/intents", response_model=ProviderIntentResponse)

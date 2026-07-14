@@ -342,8 +342,13 @@ class FakeAccountsService:
         self.place_trade_error = None
         self.place_trade_calls = []
         self.account_positions = []
+        self.position_calls = []
+        self.position_refresh_error = None
 
     async def get_account_positions(self, account_name, connector_name):
+        self.position_calls.append((account_name, connector_name))
+        if self.position_refresh_error is not None:
+            raise self.position_refresh_error
         return list(self.account_positions)
 
     async def update_account_state(self, **kwargs):
@@ -420,6 +425,106 @@ def test_hyperliquid_perpetual_snapshot_uses_native_market_and_exposes_logical_c
             ],
         },
     }
+
+
+def test_perpetual_provider_snapshot_refreshes_and_normalizes_positions():
+    provider_boundary = _provider_boundary_module()
+    provider_boundary._provider_available = _async_return(True)  # noqa: SLF001
+    provider_boundary._provider_capabilities = _async_return((['MARKET'], ['order', 'cancel']))  # noqa: SLF001
+    service = FakeAccountsService()
+    service.account_positions = [
+        {
+            "account_name": "master_account",
+            "connector_name": "hyperliquid_perpetual",
+            "trading_pair": "HYPE-USD",
+            "side": "LONG",
+            "amount": "-0.64",
+            "entry_price": "25.5",
+            "unrealized_pnl": "1.25",
+            "leverage": "3",
+        },
+    ]
+    request, _market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="hyperliquid_perpetual",
+                refresh_portfolio=False,
+                trading_pair="HYPE-USDC",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert service.position_calls == [("master_account", "hyperliquid_perpetual")]
+    assert len(result.positions) == 1
+    position = result.positions[0]
+    assert position.account_name == "master_account"
+    assert position.connector_name == "hyperliquid_perpetual"
+    assert position.trading_pair == "HYPE-USD"
+    assert position.side == "LONG"
+    assert position.quantity == Decimal("0.64")
+    assert position.entry_price == Decimal("25.5")
+    assert position.unrealized_pnl == Decimal("1.25")
+    assert position.leverage == Decimal("3")
+
+
+@pytest.mark.parametrize("connector_name", ["binance", "aerodrome"])
+def test_non_perpetual_provider_snapshot_returns_no_positions(connector_name):
+    provider_boundary = _provider_boundary_module()
+    provider_boundary._provider_available = _async_return(True)  # noqa: SLF001
+    provider_boundary._provider_capabilities = _async_return((['MARKET'], ['order']))  # noqa: SLF001
+    service = FakeAccountsService()
+    service.account_positions = [
+        {"trading_pair": "HYPE-USD", "side": "LONG", "amount": "0.64"},
+    ]
+    request, _market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name=connector_name,
+                refresh_portfolio=False,
+                trading_pair="HYPE-USDC",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.positions == []
+    assert service.position_calls == []
+
+
+def test_perpetual_provider_snapshot_reports_position_refresh_failure_without_flat_state():
+    provider_boundary = _provider_boundary_module()
+    provider_boundary._provider_available = _async_return(True)  # noqa: SLF001
+    provider_boundary._provider_capabilities = _async_return((['MARKET'], ['order', 'cancel']))  # noqa: SLF001
+    service = FakeAccountsService()
+    service.position_refresh_error = RuntimeError("exchange position endpoint unavailable")
+    request, _market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="hyperliquid_perpetual",
+                refresh_portfolio=False,
+                trading_pair="HYPE-USDC",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert service.position_calls == [("master_account", "hyperliquid_perpetual")]
+    assert result.positions == []
+    assert result.status == "issues"
+    assert "positions refresh unavailable: exchange position endpoint unavailable" in result.operator_issues
 
 
 @pytest.mark.parametrize(
