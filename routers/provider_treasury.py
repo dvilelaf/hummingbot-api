@@ -336,6 +336,24 @@ async def _hl_usdc_balance(accounts_service: AccountsService, account_name: str)
     return val
 
 
+def _hyperliquid_destination_amount(response: ProviderTreasuryRebalanceResponse) -> Decimal:
+    amount = response.destination_amount
+    if amount is None:
+        if response.stage_index is None or response.stages is None:
+            raise HTTPException(status_code=502, detail="Hyperliquid treasury destination amount unavailable")
+        funding_stages = [
+            stage
+            for stage in response.stages
+            if stage.kind == "funding" and stage.index == response.stage_index
+        ]
+        if len(funding_stages) != 1:
+            raise HTTPException(status_code=502, detail="Hyperliquid treasury destination amount unavailable")
+        amount = funding_stages[0].destination_amount
+    if amount is None or not amount.is_finite() or amount <= 0:
+        raise HTTPException(status_code=502, detail="Hyperliquid treasury destination amount unavailable")
+    return amount
+
+
 def _rebalance_response(
     result: dict[str, Any] | None,
     *,
@@ -764,13 +782,12 @@ async def _refresh_rebalance_status(
                     raise HTTPException(status_code=502, detail="Hyperliquid treasury baseline malformed")
                 if not baseline.is_finite() or baseline < 0:
                     raise HTTPException(status_code=502, detail="Hyperliquid treasury baseline malformed")
-                if response.destination_amount is None or response.destination_amount <= 0:
-                    raise HTTPException(status_code=502, detail="Hyperliquid treasury destination amount unavailable")
+                destination_amount = _hyperliquid_destination_amount(response)
                 account_name = str(rp.get("account_name", "")).strip()
                 if not account_name:
                     raise HTTPException(status_code=502, detail="Hyperliquid treasury account unavailable")
                 fresh = await _hl_usdc_balance(accounts_service, account_name)
-                if fresh - baseline >= response.destination_amount:
+                if fresh - baseline >= destination_amount:
                     response = response.model_copy(update={"status": "confirmed"})
                     payload = _rebalance_response_payload(response)
 

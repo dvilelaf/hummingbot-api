@@ -1869,6 +1869,46 @@ def test_hyperliquid_delta_exact_confirms(monkeypatch):
     assert result.status == "confirmed"
 
 
+def test_hyperliquid_delta_uses_funding_stage_destination_amount(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service._hl_balance = Decimal("500")
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    _stub_hl_credentials(module, monkeypatch)
+    _hl_create(module, service, monkeypatch, destination_amount=Decimal("300"))
+
+    service._hl_balance = Decimal("800")
+    _REBALANCE_RECORDS["target-funding-1"].status = "destination_pending"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "destination_pending",
+            "stageIndex": 1,
+            "stageCount": 2,
+            "stageStatus": "source_confirmed",
+            "stages": [
+                {"index": 0, "kind": "conversion", "status": "confirmed"},
+                {
+                    "index": 1,
+                    "kind": "funding",
+                    "status": "source_confirmed",
+                    "destinationAmount": "300",
+                },
+            ],
+        }
+    ]
+
+    result = asyncio.run(
+        module.get_provider_treasury_rebalance(
+            "target-funding-1",
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "confirmed"
+
+
 def test_hyperliquid_delta_greater_confirms(monkeypatch):
     module = _provider_treasury_module()
     service = FakeAccountsService()
