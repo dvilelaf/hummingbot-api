@@ -79,6 +79,7 @@ async def provider_snapshot(
     )
     portfolio: dict[str, Any] | None = None
     positions: list[ProviderPosition] = []
+    positions_status = "unsupported"
     issues: list[str] = []
     action_set = {action.lower() for action in provider_actions}
 
@@ -134,7 +135,9 @@ async def provider_snapshot(
                 )
                 for position in raw_positions
             ]
+            positions_status = "available"
         except Exception as exc:
+            positions_status = "issues"
             issues.append(f"positions refresh unavailable: {_redact_secret_text(exc)}")
 
     try:
@@ -210,6 +213,7 @@ async def provider_snapshot(
         trading_pair=body.trading_pair,
         provider_available=available,
         status="available" if not issues else "issues",
+        positions_status=positions_status,
         operator_issues=issues,
         limit_maker_order_supported="LIMIT_MAKER" in {item.upper() for item in order_types},
         order_types=order_types,

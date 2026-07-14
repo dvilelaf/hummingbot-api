@@ -413,6 +413,9 @@ def test_hyperliquid_perpetual_snapshot_uses_native_market_and_exposes_logical_c
         ("hyperliquid_perpetual", ["HYPE-USD"]),
     ]
     assert result.trading_pair == "HYPE-USDC"
+    assert result.positions_status == "available"
+    assert result.positions == []
+    assert service.position_calls == [("master_account", "hyperliquid_perpetual")]
     assert result.trading_rule == {
         "buy_order_collateral_token": "USDC",
         "min_notional_size": 10.0,
@@ -497,6 +500,7 @@ def test_non_perpetual_provider_snapshot_returns_no_positions(connector_name):
     )
 
     assert result.positions == []
+    assert result.positions_status == "unsupported"
     assert service.position_calls == []
 
 
@@ -523,6 +527,7 @@ def test_perpetual_provider_snapshot_reports_position_refresh_failure_without_fl
 
     assert service.position_calls == [("master_account", "hyperliquid_perpetual")]
     assert result.positions == []
+    assert result.positions_status == "issues"
     assert result.status == "issues"
     assert "positions refresh unavailable: exchange position endpoint unavailable" in result.operator_issues
 

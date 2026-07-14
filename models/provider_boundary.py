@@ -32,6 +32,7 @@ class ProviderSnapshotResponse(BaseModel):
     trading_pair: str
     provider_available: bool
     status: Literal["available", "issues"]
+    positions_status: Literal["unsupported", "available", "issues"]
     operator_issues: list[str] = Field(default_factory=list)
     limit_maker_order_supported: bool = False
     order_types: list[str] = Field(default_factory=list)
