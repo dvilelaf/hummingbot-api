@@ -1003,6 +1003,7 @@ async def _submit_swap_intent(
                 correlation_id=body.correlation_id,
                 provider_status="preflight_accepted",
                 submitted_quantity=body.quantity,
+                submitted_notional=spend_amount,
             )
         base, quote, amount, side = _gateway_swap_execution_terms(body)
         result = await accounts_service.gateway_client.execute_swap(
@@ -1060,6 +1061,7 @@ async def _submit_swap_intent(
         correlation_id=body.correlation_id,
         external_order_id=str(tx_hash),
         submitted_quantity=body.quantity,
+        submitted_notional=spend_amount,
         provider_status=str(result.get("status", "")),
         **_confirmed_swap_economics(result, provider_status=provider_status, tx_hash=str(tx_hash)),
     )

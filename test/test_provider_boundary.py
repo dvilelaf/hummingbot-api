@@ -1830,6 +1830,7 @@ def test_confirmed_swap_intent_preserves_provider_economics(
         "correlation_id": "swap-confirmed-001",
         "external_order_id": "tx-001",
         "submitted_quantity": provider_boundary.Decimal("0.001"),
+        "submitted_notional": provider_boundary.Decimal("0.001"),
         "provider_status": str(raw_status),
     }
     if raw_status is True:
@@ -1966,6 +1967,8 @@ def test_swap_provider_intent_preflight_does_not_execute_swap(monkeypatch):
 
     assert result.status == "accepted"
     assert result.provider_status == "preflight_accepted"
+    assert result.submitted_quantity == provider_boundary.Decimal("0.0001")
+    assert result.submitted_notional == provider_boundary.Decimal("0.0001")
     assert len(LIVE_GATE_CALLS) == 1
     assert SET_DEFAULT_WALLET_CALLS == [
         {
@@ -2118,6 +2121,51 @@ def test_base_swap_provider_intent_buy_executes_as_gateway_sell(monkeypatch):
     assert EXECUTE_SWAP_CALLS[0]["quote_asset"] == "AERO"
     assert EXECUTE_SWAP_CALLS[0]["amount"] == provider_boundary.Decimal("10")
     assert EXECUTE_SWAP_CALLS[0]["side"] == "SELL"
+
+
+def test_buy_swap_provider_intent_reports_quote_spend_notional(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    LIVE_GATE_CALLS.clear()
+    EXECUTE_SWAP_CALLS.clear()
+    SET_DEFAULT_WALLET_CALLS.clear()
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    monkeypatch.setattr(
+        service.gateway_client,
+        "execute_swap",
+        _async_return({"signature": "tx-buy-001", "status": "SUBMITTED"}),
+    )
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="swap",
+        connector_name="aerodrome",
+        correlation_id="swap-base-buy-submitted-001",
+        market_id="AERO-USDC",
+        mode="mainnet",
+        quantity="0.1",
+        notional="10",
+        risk_metadata={"network": "ethereum-base"},
+        side="BUY",
+        wallet_identity={
+            "address": "0x1111111111111111111111111111111111111111",
+            "chain": "ethereum",
+            "network": "ethereum-base",
+            "wallet_ref": "base:mainnet:evm_gateway",
+        },
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "submitted"
+    assert result.submitted_quantity == provider_boundary.Decimal("0.1")
+    assert result.submitted_notional == provider_boundary.Decimal("10")
 
 
 @pytest.mark.parametrize("notional", [None, "0", "-1"])
