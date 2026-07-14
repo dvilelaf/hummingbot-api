@@ -303,6 +303,102 @@ class TestGatewayRefreshSelection:
         assert len(service.gateway_client.balance_calls) == 2
 
 
+class TestGatewayBalances:
+    """Tests for Gateway balance response formatting."""
+
+    @pytest.fixture
+    def accounts_service(self):
+        """Create an AccountsService with isolated Gateway dependencies."""
+        from services.accounts_service import AccountsService
+
+        service = AccountsService.__new__(AccountsService)
+        service.gateway_client = MagicMock()
+        service.gateway_client.ping = AsyncMock(return_value=True)
+        service.gateway_client.get_balances = AsyncMock()
+        service._ensure_marlin_gateway_wallet = AsyncMock()
+        service._fetch_gateway_prices_immediate = AsyncMock()
+        return service
+
+    @pytest.mark.asyncio
+    async def test_requested_zero_balances_are_returned_and_priced(
+        self, accounts_service
+    ):
+        """Explicitly requested zero balances remain observable and priceable."""
+        accounts_service.gateway_client.get_balances.return_value = {
+            "balances": {
+                "WETH": "0",
+                "USDC": "0",
+                "ETH": "2",
+                "UNREQUESTED": "0",
+            }
+        }
+        accounts_service._fetch_gateway_prices_immediate.return_value = {
+            "WETH": Decimal("3000"),
+            "ETH": Decimal("2000"),
+        }
+
+        result = await accounts_service.get_gateway_balances(
+            "ethereum",
+            "0xwallet",
+            network="ethereum-base",
+            tokens=["WETH", "USDC", "ETH", "MISSING"],
+        )
+
+        assert result == [
+            {
+                "token": "WETH",
+                "units": 0.0,
+                "price": 3000.0,
+                "value": 0.0,
+                "available_units": 0.0,
+            },
+            {
+                "token": "USDC",
+                "units": 0.0,
+                "price": 1.0,
+                "value": 0.0,
+                "available_units": 0.0,
+            },
+            {
+                "token": "ETH",
+                "units": 2.0,
+                "price": 2000.0,
+                "value": 4000.0,
+                "available_units": 2.0,
+            },
+        ]
+        accounts_service._fetch_gateway_prices_immediate.assert_awaited_once_with(
+            "ethereum", "ethereum-base", ["WETH", "USDC", "ETH"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_unfiltered_gateway_balances_still_omit_zero_rows(self, accounts_service):
+        """Unfiltered Gateway reads preserve the existing non-zero-only result."""
+        accounts_service.gateway_client.get_balances.return_value = {
+            "balances": {"USDC": "0", "ETH": "2"}
+        }
+        accounts_service._fetch_gateway_prices_immediate.return_value = {
+            "ETH": Decimal("2000")
+        }
+
+        result = await accounts_service.get_gateway_balances(
+            "ethereum", "0xwallet", network="ethereum-base"
+        )
+
+        assert result == [
+            {
+                "token": "ETH",
+                "units": 2.0,
+                "price": 2000.0,
+                "value": 4000.0,
+                "available_units": 2.0,
+            }
+        ]
+        accounts_service._fetch_gateway_prices_immediate.assert_awaited_once_with(
+            "ethereum", "ethereum-base", ["ETH"]
+        )
+
+
 class TestConnectorStartup:
     """Tests for connector startup ordering."""
 

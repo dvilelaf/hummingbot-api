@@ -2735,7 +2735,12 @@ class AccountsService:
             balances_list = []
 
             for token, balance in balances.items():
-                if balance and float(balance) > 0:
+                if balance is None or balance == "":
+                    continue
+                numeric_balance = float(balance)
+                if numeric_balance > 0 or (
+                    tokens is not None and token in tokens and numeric_balance == 0
+                ):
                     balances_list.append({
                         "token": token,
                         "units": Decimal(str(balance))
