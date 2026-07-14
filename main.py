@@ -214,8 +214,6 @@ async def lifespan(app: FastAPI):
     logging.info("TradingService initialized")
 
     startup_connectors = env_csv_set("HUMMINGBOT_STARTUP_CONNECTORS")
-    if startup_connectors is None and provider_runtime_enabled():
-        startup_connectors = set()
 
     # AccountsService - account management, balances, portfolio (simplified)
     accounts_service = AccountsService(
