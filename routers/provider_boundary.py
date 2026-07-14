@@ -854,7 +854,16 @@ def _preflight_swap_spend_requirement(body: ProviderIntentRequest) -> tuple[str,
     base, quote = body.market_id.split("-", 1)
     if body.side == "SELL":
         return base, body.quantity
-    return quote, body.quantity
+    return quote, _gateway_swap_spend_amount(body)
+
+
+def _gateway_swap_spend_amount(body: ProviderIntentRequest) -> Decimal:
+    if body.side == "SELL":
+        return body.quantity
+    notional = body.notional
+    if notional is None or not notional.is_finite() or notional <= 0:
+        raise ValueError("BUY swap requires a positive finite notional")
+    return notional
 
 
 def _available_units_for_asset(rows: list[Any], asset: str) -> Decimal:
@@ -943,6 +952,14 @@ async def _submit_swap_intent(
             provider_error=f"invalid trading pair: {body.market_id}",
         )
     try:
+        spend_amount = _gateway_swap_spend_amount(body)
+    except ValueError as exc:
+        return ProviderIntentResponse(
+            status="rejected",
+            correlation_id=body.correlation_id,
+            provider_error=str(exc),
+        )
+    try:
         if not await accounts_service.gateway_client.ping():
             return ProviderIntentResponse(
                 status="failed",
@@ -957,7 +974,7 @@ async def _submit_swap_intent(
             chain=chain,
             expected_connector_id=body.connector_name,
             expected_instrument=body.market_id,
-            expected_notional=body.quantity,
+            expected_notional=spend_amount,
             expected_slippage_bps=slippage_pct * Decimal("100"),
             marlin_provider_intent_authorized=provider_intent_authorized,
             network=network,
@@ -1002,7 +1019,7 @@ async def _submit_swap_intent(
                 connector_id=body.connector_name,
                 network=network,
                 wallet_address=wallet_address,
-                notional=body.quantity,
+                notional=spend_amount,
                 slippage_bps=slippage_pct * Decimal("100"),
             ),
             marlin_provider_intent_authorized=provider_intent_authorized,
@@ -1129,7 +1146,7 @@ def _gateway_swap_execution_terms(
 ) -> tuple[str, str, Decimal, str]:
     base, quote = body.market_id.split("-", 1)
     if body.side == "BUY":
-        return quote, base, body.quantity, "SELL"
+        return quote, base, _gateway_swap_spend_amount(body), "SELL"
     return base, quote, body.quantity, body.side
 
 

@@ -50,6 +50,7 @@ class ProviderIntentRequest(BaseModel):
     mode: Literal["testnet", "mainnet"]
     side: Literal["BUY", "SELL"]
     quantity: Decimal = Field(gt=0)
+    notional: Optional[Decimal] = Field(default=None, allow_inf_nan=False)
     order_type: Optional[Literal["LIMIT", "LIMIT_MAKER", "MARKET"]] = None
     price: Optional[Decimal] = None
     correlation_id: Optional[str] = None

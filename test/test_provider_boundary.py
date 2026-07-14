@@ -1753,6 +1753,10 @@ def test_swap_provider_intent_preserves_gateway_error_without_transaction_hash(m
         }
     ]
     assert EXECUTE_SWAP_CALLS[0]["network"] == "mainnet-beta"
+    assert EXECUTE_SWAP_CALLS[0]["base_asset"] == "SOL"
+    assert EXECUTE_SWAP_CALLS[0]["quote_asset"] == "USDC"
+    assert EXECUTE_SWAP_CALLS[0]["amount"] == provider_boundary.Decimal("0.0001")
+    assert EXECUTE_SWAP_CALLS[0]["side"] == "SELL"
     assert EXECUTE_SWAP_CALLS[0]["marlin_provider_intent_authorized"] is True
     assert EXECUTE_SWAP_CALLS[0]["live_action_authorization"] == {
         "action": "gateway_swap",
@@ -2087,7 +2091,8 @@ def test_base_swap_provider_intent_buy_executes_as_gateway_sell(monkeypatch):
         correlation_id="swap-base-buy-001",
         market_id="AERO-USDC",
         mode="mainnet",
-        quantity="0.00005",
+        quantity="0.1",
+        notional="10",
         risk_metadata={"network": "ethereum-base"},
         side="BUY",
         wallet_identity={
@@ -2108,11 +2113,58 @@ def test_base_swap_provider_intent_buy_executes_as_gateway_sell(monkeypatch):
 
     assert result.provider_error == "Insufficient funds for transaction."
     assert LIVE_GATE_CALLS[0]["expected_instrument"] == "AERO-USDC"
-    assert LIVE_GATE_CALLS[0]["expected_notional"] == provider_boundary.Decimal("0.00005")
+    assert LIVE_GATE_CALLS[0]["expected_notional"] == provider_boundary.Decimal("10")
     assert EXECUTE_SWAP_CALLS[0]["base_asset"] == "USDC"
     assert EXECUTE_SWAP_CALLS[0]["quote_asset"] == "AERO"
-    assert EXECUTE_SWAP_CALLS[0]["amount"] == provider_boundary.Decimal("0.00005")
+    assert EXECUTE_SWAP_CALLS[0]["amount"] == provider_boundary.Decimal("10")
     assert EXECUTE_SWAP_CALLS[0]["side"] == "SELL"
+
+
+@pytest.mark.parametrize("notional", [None, "0", "-1"])
+def test_buy_swap_rejects_missing_or_invalid_notional_before_provider_mutation(
+    monkeypatch,
+    notional,
+):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    LIVE_GATE_CALLS.clear()
+    EXECUTE_SWAP_CALLS.clear()
+    SET_DEFAULT_WALLET_CALLS.clear()
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    body_kwargs = {
+        "account_name": "master_account",
+        "action": "swap",
+        "connector_name": "aerodrome",
+        "correlation_id": "swap-base-buy-invalid-notional-001",
+        "market_id": "AERO-USDC",
+        "mode": "mainnet",
+        "quantity": "0.1",
+        "risk_metadata": {"network": "ethereum-base"},
+        "side": "BUY",
+        "wallet_identity": {
+            "address": "0x1111111111111111111111111111111111111111",
+            "chain": "ethereum",
+            "network": "ethereum-base",
+            "wallet_ref": "base:mainnet:evm_gateway",
+        },
+    }
+    if notional is not None:
+        body_kwargs["notional"] = notional
+    body = provider_boundary.ProviderIntentRequest(**body_kwargs)
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert result.provider_error == "BUY swap requires a positive finite notional"
+    assert LIVE_GATE_CALLS == []
+    assert SET_DEFAULT_WALLET_CALLS == []
+    assert EXECUTE_SWAP_CALLS == []
 
 
 def test_reduce_order_refreshes_position_clips_and_submits_close(monkeypatch):
