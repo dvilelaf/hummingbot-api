@@ -1193,6 +1193,7 @@ def test_execute_rejects_idempotency_key_mismatch_before_gateway(monkeypatch):
         "approval_confirmed",
         "submission_pending",
         "submission_ambiguous",
+        "submission_insufficient_funds",
         "submitted",
         "wrap_submission_pending",
         "wrap_submission_ambiguous",
@@ -1249,7 +1250,8 @@ def test_execute_restart_recovers_pending_claim_from_gateway_recoverable_status(
     assert _REBALANCE_RECORDS["target-funding-1"].status == "confirmed"
 
 
-def test_execute_retry_recovers_persisted_gateway_recoverable_status(monkeypatch):
+@pytest.mark.parametrize("gateway_status", ["submission_ambiguous", "submission_insufficient_funds"])
+def test_execute_retry_recovers_persisted_gateway_recoverable_status(monkeypatch, gateway_status):
     first_module = _provider_treasury_module()
     first_service = FakeAccountsService()
     monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
@@ -1261,7 +1263,7 @@ def test_execute_retry_recovers_persisted_gateway_recoverable_status(monkeypatch
         )
     )
     first_service.gateway_client.status_results = [
-        {"idempotencyKey": "target-funding-1", "status": "submission_ambiguous"},
+        {"idempotencyKey": "target-funding-1", "status": gateway_status},
     ]
     refresh_status = first_module._refresh_rebalance_status
 
@@ -1286,12 +1288,12 @@ def test_execute_retry_recovers_persisted_gateway_recoverable_status(monkeypatch
 
     assert exc.value.status_code == 500
     assert first_service.gateway_client.execute_calls == ["target-funding-1"]
-    assert _REBALANCE_RECORDS["target-funding-1"].status == "submission_ambiguous"
+    assert _REBALANCE_RECORDS["target-funding-1"].status == gateway_status
 
     recreated_module = _provider_treasury_module()
     recreated_service = FakeAccountsService()
     recreated_service.gateway_client.status_results = [
-        {"idempotencyKey": "target-funding-1", "status": "submission_ambiguous"},
+        {"idempotencyKey": "target-funding-1", "status": gateway_status},
         {"idempotencyKey": "target-funding-1", "status": "confirmed"},
     ]
 
@@ -1308,7 +1310,7 @@ def test_execute_retry_recovers_persisted_gateway_recoverable_status(monkeypatch
 
     assert result.status == "confirmed"
     assert recreated_service.gateway_client.execute_calls == ["target-funding-1"]
-    assert recreated_service.gateway_client.statuses_at_execute == ["submission_ambiguous"]
+    assert recreated_service.gateway_client.statuses_at_execute == [gateway_status]
     assert _REBALANCE_RECORDS["target-funding-1"].status == "confirmed"
 
 
@@ -1416,6 +1418,37 @@ def test_status_reconciles_durable_record_after_router_recreation(monkeypatch):
     assert result.transaction_hash == "0xconfirmed"
     assert recreated_service.gateway_client.status_calls == ["target-funding-1"]
     assert _REBALANCE_RECORDS["target-funding-1"].status == "confirmed"
+
+
+def test_status_transports_submission_insufficient_funds(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        module.create_provider_treasury_rebalance(
+            _neutral_request(module),
+            _authorized_request(),
+            service,
+        )
+    )
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "submission_insufficient_funds",
+        }
+    ]
+
+    result = asyncio.run(
+        module.get_provider_treasury_rebalance(
+            "target-funding-1",
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "submission_insufficient_funds"
+    assert result.error is None
+    assert _REBALANCE_RECORDS["target-funding-1"].status == "submission_insufficient_funds"
 
 
 def test_response_ignores_protocol_selection_fields_and_redacts_error():
