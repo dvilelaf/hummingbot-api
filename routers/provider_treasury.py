@@ -455,7 +455,7 @@ async def _build_hyperliquid_egress(
         accounts_service,
         str(stored_request["account_name"]),
     )
-    logger.info(
+    logger.warning(
         "Hyperliquid treasury capacity check: available_usdc=%s required_usdc=%s",
         source_baseline,
         source_debit,
