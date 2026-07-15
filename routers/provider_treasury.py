@@ -4,10 +4,13 @@ import logging
 import os
 import re
 import secrets
+import time
 from datetime import datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any
 
+import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from database.repositories import ProviderTreasuryRebalanceRepository
@@ -19,6 +22,14 @@ from models.provider_treasury import (
     ProviderTreasuryStage,
 )
 from services.accounts_service import AccountsService
+from services.hyperliquid_treasury import (
+    HyperliquidWithdrawalEnvelope,
+    ProviderRejected,
+    SubmissionAmbiguous,
+    build_withdrawal_envelope,
+    source_debit_for_destination,
+    submit_withdrawal,
+)
 from services.marlin_runtime import _derive_marlin_credential_values
 
 logger = logging.getLogger(__name__)
@@ -32,6 +43,8 @@ DESTINATION_WALLET_DEFAULT_FAILED_BLOCKER = "destination_wallet_default_failed"
 IDEMPOTENCY_KEY_CONFLICT_BLOCKER = "idempotency_key_conflict"
 HYPERLIQUID_MAINNET_WALLET_REF = "hyperliquid:mainnet:hyperliquid_trader"
 HL_BASELINE_FIELD = "_hl_baseline_usdc"
+HL_EGRESS_FIELD = "_hl_egress"
+HL_EGRESS_ARBITRUM_NETWORK = "arbitrum-mainnet"
 GATEWAY_TREASURY_STAGE_FIELDS = frozenset(
     {
         "index",
@@ -58,6 +71,7 @@ GATEWAY_RECOVERABLE_EXECUTION_STATUSES = frozenset(
         "submission_ambiguous",
         "submission_pending",
         "submitted",
+        "source_pending",
         "wrap_confirmed",
         "wrap_submission_ambiguous",
         "wrap_submission_pending",
@@ -147,6 +161,13 @@ async def create_provider_treasury_rebalance(
         if body.destination_amount is not None:
             gateway_kwargs["destination_amount"] = _decimal_payload_value(body.destination_amount)
         result = await accounts_service.gateway_client.create_treasury_rebalance_target(**gateway_kwargs)
+        if _needs_hyperliquid_egress(result, destination_chain, destination_network):
+            return await _build_hyperliquid_egress(
+                accounts_service,
+                database_manager,
+                body.idempotency_key,
+                stored_request,
+            )
         if isinstance(result, dict):
             result.setdefault("id", body.idempotency_key)
             result.setdefault("status", "built")
@@ -189,7 +210,31 @@ async def execute_provider_treasury_rebalance(
 
         stored_status = str(stored_record.status).lower()
         claimed_record = await _claim_rebalance_for_execution(database_manager, rebalance_id)
+        egress = _hyperliquid_egress(stored_record.response_payload)
+        if claimed_record is not None and egress is not None:
+            response = await _submit_hyperliquid_egress(
+                accounts_service,
+                database_manager,
+                claimed_record,
+            )
+            if response.status.lower() != "built":
+                return response
+            result = await accounts_service.gateway_client.execute_treasury_rebalance_target(rebalance_id)
+            _rebalance_response(result, rebalance_id=rebalance_id)
+            return await _refresh_rebalance_status(
+                accounts_service,
+                database_manager,
+                rebalance_id,
+            )
         if claimed_record is None:
+            if egress is not None and egress.get("status") == "submission_ambiguous":
+                response = await _submit_hyperliquid_egress(
+                    accounts_service,
+                    database_manager,
+                    stored_record,
+                )
+                if response.status.lower() != "built":
+                    return response
             stored_status_is_recoverable = stored_status == "pending" or (
                 stored_status != "built" and stored_status in GATEWAY_RECOVERABLE_EXECUTION_STATUSES
             )
@@ -334,6 +379,286 @@ async def _hl_usdc_balance(accounts_service: AccountsService, account_name: str)
     if not val.is_finite() or val < 0:
         raise HTTPException(status_code=502, detail="Hyperliquid USDC balance non-finite or negative")
     return val
+
+
+async def _gateway_usdc_balance(
+    accounts_service: AccountsService,
+    *,
+    address: str,
+) -> Decimal:
+    """Return a fresh Arbitrum USDC balance from Gateway."""
+    result = await accounts_service.gateway_client.get_balances(
+        "ethereum",
+        HL_EGRESS_ARBITRUM_NETWORK,
+        address,
+        tokens=["USDC"],
+    )
+    if not isinstance(result, dict) or result.get("error"):
+        raise HTTPException(status_code=502, detail="Arbitrum USDC balance refresh failed")
+    balances = result.get("balances")
+    if not isinstance(balances, dict):
+        raise HTTPException(status_code=502, detail="Arbitrum USDC balance response malformed")
+    raw = next((value for token, value in balances.items() if str(token).upper() == "USDC"), "0")
+    try:
+        balance = Decimal(str(raw))
+    except (TypeError, ValueError, ArithmeticError):
+        raise HTTPException(status_code=502, detail="Arbitrum USDC balance response malformed")
+    if not balance.is_finite() or balance < 0:
+        raise HTTPException(status_code=502, detail="Arbitrum USDC balance response malformed")
+    return balance
+
+
+def _needs_hyperliquid_egress(
+    result: Any,
+    destination_chain: str,
+    destination_network: str,
+) -> bool:
+    return (
+        (destination_chain, destination_network) != ("hyperliquid", "mainnet")
+        and isinstance(result, dict)
+        and result.get("error") == "insufficient_source_or_gas"
+        and result.get("status") == 409
+    )
+
+
+async def _build_hyperliquid_egress(
+    accounts_service: AccountsService,
+    database_manager,
+    rebalance_id: str,
+    stored_request: dict[str, Any],
+) -> ProviderTreasuryRebalanceResponse:
+    credentials = _derive_marlin_credential_values("hyperliquid")
+    source_address = str(
+        credentials.get("hyperliquid_address") if isinstance(credentials, dict) else ""
+    ).strip()
+    private_key = str(
+        credentials.get("hyperliquid_secret_key") if isinstance(credentials, dict) else ""
+    ).strip()
+    if not source_address or not private_key:
+        raise HTTPException(status_code=409, detail="insufficient_source_or_gas")
+    destination = _marlin_destination_wallet_identity(
+        accounts_service,
+        chain="ethereum",
+        network=HL_EGRESS_ARBITRUM_NETWORK,
+    )
+    if source_address.lower() != destination["address"].lower():
+        raise HTTPException(status_code=400, detail=DESTINATION_WALLET_IDENTITY_UNAVAILABLE_BLOCKER)
+
+    target = Decimal(str(stored_request["target_notional_eur"]))
+    source_debit = source_debit_for_destination(target)
+    max_cost_bps = Decimal(str(stored_request["max_cost_bps"]))
+    fixed_cost_bps = (source_debit - target) * Decimal(10000) / target
+    if fixed_cost_bps > max_cost_bps:
+        raise HTTPException(status_code=409, detail="max_cost_exceeded")
+    source_baseline = await _hl_usdc_balance(
+        accounts_service,
+        str(stored_request["account_name"]),
+    )
+    if source_baseline < source_debit:
+        raise HTTPException(status_code=409, detail="insufficient_source_or_gas")
+    destination_baseline = await _gateway_usdc_balance(
+        accounts_service,
+        address=destination["address"],
+    )
+    envelope = build_withdrawal_envelope(
+        source_address=source_address,
+        private_key=private_key,
+        destination_address=destination["address"],
+        amount=target,
+        nonce_ms=time.time_ns() // 1_000_000,
+    )
+    egress = {
+        "action": dict(envelope.action),
+        "destination_address": destination["address"],
+        "destination_baseline_usdc": str(destination_baseline),
+        "destination_target_usdc": str(target),
+        "nonce": envelope.nonce,
+        "signature": dict(envelope.signature),
+        "source_address": source_address,
+        "source_baseline_usdc": str(source_baseline),
+        "source_debit_usdc": str(source_debit),
+        "status": "built",
+    }
+    response = _hyperliquid_egress_response(rebalance_id, egress, status="built")
+    payload = _rebalance_response_payload(response)
+    payload[HL_EGRESS_FIELD] = egress
+    await _update_rebalance_status(database_manager, rebalance_id, payload)
+    return response
+
+
+async def _submit_hyperliquid_egress(
+    accounts_service: AccountsService,
+    database_manager,
+    record,
+) -> ProviderTreasuryRebalanceResponse:
+    egress = _hyperliquid_egress(record.response_payload)
+    if egress is None:
+        raise HTTPException(status_code=502, detail="Hyperliquid egress envelope unavailable")
+    envelope = _stored_hyperliquid_envelope(egress)
+    prior_status = str(egress.get("status") or "")
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            await submit_withdrawal(envelope, session)
+    except SubmissionAmbiguous:
+        egress["status"] = "submission_ambiguous"
+        response = _hyperliquid_egress_response(record.rebalance_id, egress, status="source_pending")
+        await _store_hyperliquid_egress(database_manager, record.rebalance_id, response, egress)
+        return response
+    except ProviderRejected as exc:
+        if prior_status == "submission_ambiguous":
+            response = _hyperliquid_egress_response(
+                record.rebalance_id,
+                egress,
+                status="source_pending",
+            )
+            await _store_hyperliquid_egress(
+                database_manager,
+                record.rebalance_id,
+                response,
+                egress,
+            )
+            return response
+        egress["status"] = "failed"
+        response = _hyperliquid_egress_response(
+            record.rebalance_id,
+            egress,
+            status="failed",
+            error=_redact_error(exc),
+        )
+        await _store_hyperliquid_egress(database_manager, record.rebalance_id, response, egress)
+        return response
+
+    egress["status"] = "accepted"
+    response = _hyperliquid_egress_response(record.rebalance_id, egress, status="source_pending")
+    await _store_hyperliquid_egress(database_manager, record.rebalance_id, response, egress)
+    return await _refresh_hyperliquid_egress(
+        accounts_service,
+        database_manager,
+        record.rebalance_id,
+    )
+
+
+def _stored_hyperliquid_envelope(egress: dict[str, Any]) -> HyperliquidWithdrawalEnvelope:
+    action = egress.get("action")
+    signature = egress.get("signature")
+    nonce = egress.get("nonce")
+    if not isinstance(action, dict) or not isinstance(signature, dict) or type(nonce) is not int:
+        raise HTTPException(status_code=502, detail="Stored Hyperliquid egress envelope malformed")
+    return HyperliquidWithdrawalEnvelope(
+        action=MappingProxyType(dict(action)),
+        nonce=nonce,
+        signature=MappingProxyType(dict(signature)),
+    )
+
+
+async def _refresh_hyperliquid_egress(
+    accounts_service: AccountsService,
+    database_manager,
+    rebalance_id: str,
+) -> ProviderTreasuryRebalanceResponse:
+    record = await _get_rebalance(database_manager, rebalance_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Treasury rebalance not found")
+    egress = _hyperliquid_egress(record.response_payload)
+    if egress is None:
+        raise HTTPException(status_code=502, detail="Hyperliquid egress envelope unavailable")
+    if egress.get("status") == "gateway_built":
+        return _stored_rebalance_response(record.response_payload, rebalance_id=rebalance_id)
+    if egress.get("status") == "failed":
+        return _stored_rebalance_response(record.response_payload, rebalance_id=rebalance_id)
+
+    source_fresh = await _hl_usdc_balance(
+        accounts_service,
+        str(record.request_payload.get("account_name", "")),
+    )
+    destination_fresh = await _gateway_usdc_balance(
+        accounts_service,
+        address=str(egress["destination_address"]),
+    )
+    source_baseline = Decimal(str(egress["source_baseline_usdc"]))
+    destination_baseline = Decimal(str(egress["destination_baseline_usdc"]))
+    source_debit = Decimal(str(egress["source_debit_usdc"]))
+    destination_target = Decimal(str(egress["destination_target_usdc"]))
+    source_delta = source_baseline - source_fresh
+    destination_delta = destination_fresh - destination_baseline
+    if source_delta < source_debit or destination_delta < destination_target:
+        response = _hyperliquid_egress_response(rebalance_id, egress, status="source_pending")
+        await _store_hyperliquid_egress(database_manager, rebalance_id, response, egress)
+        return response
+
+    actual_fee = source_delta - destination_delta
+    if not actual_fee.is_finite() or actual_fee < 0:
+        raise HTTPException(status_code=502, detail="Hyperliquid egress balance deltas malformed")
+    egress.update(
+        {
+            "actual_destination_usdc": str(destination_delta),
+            "actual_fee_usdc": str(actual_fee),
+            "actual_source_debit_usdc": str(source_delta),
+            "status": "source_confirmed",
+        }
+    )
+    result = await accounts_service.gateway_client.create_treasury_rebalance_target(
+        **_gateway_kwargs_from_stored_request(rebalance_id, record.request_payload)
+    )
+    response = _rebalance_response(result, rebalance_id=rebalance_id)
+    egress["status"] = "gateway_built"
+    await _store_hyperliquid_egress(database_manager, rebalance_id, response, egress)
+    return response
+
+
+def _gateway_kwargs_from_stored_request(
+    rebalance_id: str,
+    request_payload: dict[str, Any],
+) -> dict[str, Any]:
+    values = {
+        "idempotency_key": rebalance_id,
+        "destination_chain": request_payload["destination_chain"],
+        "destination_network": request_payload["destination_network"],
+        "destination_asset": request_payload["destination_asset"],
+        "destination_address": request_payload["destination_address"],
+        "target_notional_eur": request_payload["target_notional_eur"],
+        "max_cost_bps": request_payload["max_cost_bps"],
+    }
+    if "destination_amount" in request_payload:
+        values["destination_amount"] = request_payload["destination_amount"]
+    return values
+
+
+def _hyperliquid_egress(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get(HL_EGRESS_FIELD)
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _hyperliquid_egress_response(
+    rebalance_id: str,
+    egress: dict[str, Any],
+    *,
+    status: str,
+    error: str | None = None,
+) -> ProviderTreasuryRebalanceResponse:
+    return ProviderTreasuryRebalanceResponse(
+        id=rebalance_id,
+        status=status,
+        error=error,
+        source_amount=Decimal(str(egress["source_debit_usdc"])),
+        source_asset="USDC",
+        destination_amount=Decimal(str(egress["destination_target_usdc"])),
+        destination_asset="USDC",
+    )
+
+
+async def _store_hyperliquid_egress(
+    database_manager,
+    rebalance_id: str,
+    response: ProviderTreasuryRebalanceResponse,
+    egress: dict[str, Any],
+) -> None:
+    payload = _rebalance_response_payload(response)
+    payload[HL_EGRESS_FIELD] = egress
+    await _update_rebalance_status(database_manager, rebalance_id, payload)
 
 
 def _hyperliquid_destination_amount(response: ProviderTreasuryRebalanceResponse) -> Decimal:
@@ -735,12 +1060,18 @@ async def _update_rebalance_status(
     rebalance_id: str,
     response_payload: dict[str, Any],
 ):
+    existing = await _get_rebalance(db_manager, rebalance_id)
+    payload = dict(response_payload)
+    if existing is not None and isinstance(existing.response_payload, dict):
+        for key, value in existing.response_payload.items():
+            if str(key).startswith("_"):
+                payload.setdefault(key, value)
     status = str(response_payload.get("status") or "unknown").lower()
     async with db_manager.get_session_context() as session:
         return await ProviderTreasuryRebalanceRepository(session).update_status(
             rebalance_id,
             status,
-            response_payload,
+            payload,
         )
 
 
@@ -750,6 +1081,13 @@ async def _refresh_rebalance_status(
     rebalance_id: str,
 ) -> ProviderTreasuryRebalanceResponse:
     record = await _get_rebalance(database_manager, rebalance_id)
+    egress = _hyperliquid_egress(record.response_payload) if record is not None else None
+    if egress is not None and egress.get("status") != "gateway_built":
+        return await _refresh_hyperliquid_egress(
+            accounts_service,
+            database_manager,
+            rebalance_id,
+        )
     if (
         record is not None
         and str(record.status).lower() == "confirmed"

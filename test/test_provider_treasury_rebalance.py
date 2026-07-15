@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from eth_account import Account
 from pydantic import ValidationError
 
 from services.gateway_client import GatewayClient
@@ -164,6 +165,8 @@ class FakeGatewayClient:
         self.status_calls = []
         self.statuses_at_target = []
         self.wallet_calls = []
+        self.balance_calls = []
+        self.balance_result = {"balances": {"USDC": "0"}}
         self.statuses_at_execute = []
         self.execute_delay = 0
         self.target_result = {"idempotencyKey": "target-funding-1", "status": "built"}
@@ -182,6 +185,10 @@ class FakeGatewayClient:
         self.statuses_at_target.append(None if record is None else record.status)
         self.target_calls.append(kwargs)
         return dict(self.target_result)
+
+    async def get_balances(self, chain, network, address, tokens=None):
+        self.balance_calls.append((chain, network, address, tokens))
+        return dict(self.balance_result)
 
     async def execute_treasury_rebalance_target(self, rebalance_id):
         self.statuses_at_execute.append(_REBALANCE_RECORDS[rebalance_id].status)
@@ -653,6 +660,146 @@ def test_gateway_neutral_blocker_and_status_code_are_preserved(monkeypatch):
     assert exc.value.status_code == 409
     assert exc.value.detail == "insufficient_source_or_gas"
     assert _REBALANCE_RECORDS["target-funding-1"].status == "built"
+
+
+def _enable_hyperliquid_egress(module, service, monkeypatch):
+    private_key = bytes.fromhex("0123456789" * 6 + "0123")
+    address = Account.from_key(private_key).address
+    service.identities[("ethereum", "arbitrum-mainnet")] = {
+        "address": address,
+        "wallet_ref": "arbitrum:mainnet:evm_gateway",
+    }
+    service._hl_balance = Decimal("8")
+    service.gateway_client.target_result = {
+        "error": "insufficient_source_or_gas",
+        "status": 409,
+    }
+    monkeypatch.setattr(
+        module,
+        "_derive_marlin_credential_values",
+        lambda namespace: {
+            "hyperliquid_address": address,
+            "hyperliquid_secret_key": "0x" + private_key.hex(),
+        }
+        if namespace == "hyperliquid"
+        else None,
+    )
+    return address
+
+
+def test_insufficient_gateway_source_builds_durable_hyperliquid_egress(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    address = _enable_hyperliquid_egress(module, service, monkeypatch)
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+
+    result = asyncio.run(
+        module.create_provider_treasury_rebalance(
+            _neutral_request(module, max_cost_bps=2000),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    record = _REBALANCE_RECORDS["target-funding-1"]
+    egress = record.response_payload[module.HL_EGRESS_FIELD]
+    assert result.status == "built"
+    assert egress["status"] == "built"
+    assert egress["action"]["amount"] == "6"
+    assert egress["source_debit_usdc"] == "7"
+    assert egress["destination_address"] == address
+    assert "private" not in str(egress).lower()
+    assert "secret" not in str(egress).lower()
+    assert result.model_dump().get(module.HL_EGRESS_FIELD) is None
+
+
+def test_hyperliquid_egress_confirms_balances_then_resumes_gateway(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    _enable_hyperliquid_egress(module, service, monkeypatch)
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    submitted = []
+
+    async def accept(envelope, _session):
+        submitted.append(envelope.payload())
+        return {"status": "ok", "response": {"type": "default"}}
+
+    monkeypatch.setattr(module, "submit_withdrawal", accept)
+    body = _neutral_request(module, max_cost_bps=2000)
+    asyncio.run(
+        module.create_provider_treasury_rebalance(body, _authorized_request(), service)
+    )
+
+    pending = asyncio.run(
+        module.execute_provider_treasury_rebalance(
+            body.idempotency_key,
+            module.ProviderTreasuryRebalanceExecuteRequest(idempotency_key=body.idempotency_key),
+            _authorized_request(),
+            service,
+        )
+    )
+    assert pending.status == "source_pending"
+
+    service._hl_balance = Decimal("1")
+    service.gateway_client.balance_result = {"balances": {"USDC": "6"}}
+    service.gateway_client.target_result = {
+        "idempotencyKey": body.idempotency_key,
+        "status": "built",
+    }
+    confirmed = asyncio.run(
+        module.execute_provider_treasury_rebalance(
+            body.idempotency_key,
+            module.ProviderTreasuryRebalanceExecuteRequest(idempotency_key=body.idempotency_key),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    egress = _REBALANCE_RECORDS[body.idempotency_key].response_payload[module.HL_EGRESS_FIELD]
+    assert confirmed.status == "confirmed"
+    assert egress["actual_fee_usdc"] == "1"
+    assert len(submitted) == 1
+    assert len(service.gateway_client.target_calls) == 2
+    assert service.gateway_client.execute_calls == [body.idempotency_key]
+
+
+def test_ambiguous_hyperliquid_retry_resubmits_identical_envelope(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    _enable_hyperliquid_egress(module, service, monkeypatch)
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    submitted = []
+
+    async def ambiguous_then_accept(envelope, _session):
+        submitted.append(envelope.payload())
+        if len(submitted) == 1:
+            raise module.SubmissionAmbiguous("timeout")
+        return {"status": "ok", "response": {"type": "default"}}
+
+    monkeypatch.setattr(module, "submit_withdrawal", ambiguous_then_accept)
+    body = _neutral_request(module, max_cost_bps=2000)
+    asyncio.run(
+        module.create_provider_treasury_rebalance(body, _authorized_request(), service)
+    )
+    execute_body = module.ProviderTreasuryRebalanceExecuteRequest(
+        idempotency_key=body.idempotency_key
+    )
+
+    first = asyncio.run(
+        module.execute_provider_treasury_rebalance(
+            body.idempotency_key, execute_body, _authorized_request(), service
+        )
+    )
+    second = asyncio.run(
+        module.execute_provider_treasury_rebalance(
+            body.idempotency_key, execute_body, _authorized_request(), service
+        )
+    )
+
+    assert first.status == "source_pending"
+    assert second.status == "source_pending"
+    assert len(submitted) == 2
+    assert submitted[0] == submitted[1]
 
 
 def test_same_idempotency_key_with_different_target_fails_before_gateway(monkeypatch):
