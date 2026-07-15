@@ -1316,6 +1316,55 @@ def test_execute_retry_recovers_persisted_gateway_recoverable_status(monkeypatch
 
 @pytest.mark.parametrize(
     "gateway_status",
+    ["submission_ambiguous", "submission_insufficient_funds"],
+)
+def test_execute_retry_delegates_absence_recovery_status_with_provider_error(
+    monkeypatch,
+    gateway_status,
+):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    asyncio.run(
+        module.create_provider_treasury_rebalance(
+            _neutral_request(module),
+            _authorized_request(),
+            service,
+        )
+    )
+    _REBALANCE_RECORDS["target-funding-1"].status = gateway_status
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": gateway_status,
+            "providerError": "Squid 429",
+        },
+        {
+            "idempotencyKey": "target-funding-1",
+            "status": "confirmed",
+            "transactionHash": "0xconfirmed",
+        },
+    ]
+
+    result = asyncio.run(
+        module.execute_provider_treasury_rebalance(
+            "target-funding-1",
+            module.ProviderTreasuryRebalanceExecuteRequest(
+                idempotency_key="target-funding-1",
+            ),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.status == "confirmed"
+    assert service.gateway_client.execute_calls == ["target-funding-1"]
+    assert service.gateway_client.statuses_at_execute == [gateway_status]
+    assert _REBALANCE_RECORDS["target-funding-1"].status == "confirmed"
+
+
+@pytest.mark.parametrize(
+    "gateway_status",
     ["confirmed", "destination_pending", "failed", "unknown", "cancelled"],
 )
 def test_execute_pending_claim_never_resubmits_non_recoverable_gateway_status(

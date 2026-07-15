@@ -82,6 +82,9 @@ GATEWAY_RECOVERABLE_EXECUTION_STATUSES = frozenset(
         "wrap_submitted",
     }
 )
+GATEWAY_PROVIDER_ERROR_RECOVERY_STATUSES = frozenset(
+    {"submission_ambiguous", "submission_insufficient_funds"}
+)
 
 
 @router.post("/rebalances", response_model=ProviderTreasuryRebalanceResponse)
@@ -258,7 +261,10 @@ async def execute_provider_treasury_rebalance(
             if (
                 not stored_status_is_recoverable
                 or response.status.lower() not in GATEWAY_RECOVERABLE_EXECUTION_STATUSES
-                or response.error is not None
+                or (
+                    response.error is not None
+                    and response.status.lower() not in GATEWAY_PROVIDER_ERROR_RECOVERY_STATUSES
+                )
             ):
                 return response
 
