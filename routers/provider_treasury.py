@@ -44,7 +44,8 @@ IDEMPOTENCY_KEY_CONFLICT_BLOCKER = "idempotency_key_conflict"
 HYPERLIQUID_MAINNET_WALLET_REF = "hyperliquid:mainnet:hyperliquid_trader"
 HL_BASELINE_FIELD = "_hl_baseline_usdc"
 HL_EGRESS_FIELD = "_hl_egress"
-HL_EGRESS_ARBITRUM_NETWORK = "arbitrum-mainnet"
+HL_EGRESS_ARBITRUM_IDENTITY_NETWORK = "arbitrum-mainnet"
+HL_EGRESS_ARBITRUM_GATEWAY_NETWORK = "arbitrum"
 GATEWAY_TREASURY_STAGE_FIELDS = frozenset(
     {
         "index",
@@ -389,7 +390,7 @@ async def _gateway_usdc_balance(
     """Return a fresh Arbitrum USDC balance from Gateway."""
     result = await accounts_service.gateway_client.get_balances(
         "ethereum",
-        HL_EGRESS_ARBITRUM_NETWORK,
+        HL_EGRESS_ARBITRUM_GATEWAY_NETWORK,
         address,
         tokens=["USDC"],
     )
@@ -439,7 +440,7 @@ async def _build_hyperliquid_egress(
     destination = _marlin_destination_wallet_identity(
         accounts_service,
         chain="ethereum",
-        network=HL_EGRESS_ARBITRUM_NETWORK,
+        network=HL_EGRESS_ARBITRUM_IDENTITY_NETWORK,
     )
     if source_address.lower() != destination["address"].lower():
         raise HTTPException(status_code=400, detail=DESTINATION_WALLET_IDENTITY_UNAVAILABLE_BLOCKER)

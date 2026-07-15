@@ -708,6 +708,9 @@ def test_insufficient_gateway_source_builds_durable_hyperliquid_egress(monkeypat
     assert egress["action"]["amount"] == "6"
     assert egress["source_debit_usdc"] == "7"
     assert egress["destination_address"] == address
+    assert service.gateway_client.balance_calls == [
+        ("ethereum", "arbitrum", address, ["USDC"])
+    ]
     assert "private" not in str(egress).lower()
     assert "secret" not in str(egress).lower()
     assert result.model_dump().get(module.HL_EGRESS_FIELD) is None
