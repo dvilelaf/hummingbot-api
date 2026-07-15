@@ -212,15 +212,19 @@ async def execute_provider_treasury_rebalance(
             return _rebalance_response(result, rebalance_id=rebalance_id)
 
         stored_status = str(stored_record.status).lower()
-        claimed_record = await _claim_rebalance_for_execution(database_manager, rebalance_id)
         egress = _hyperliquid_egress(stored_record.response_payload)
+        claimed_record = (
+            None
+            if egress is not None and egress.get("status") in {"gateway_built", "source_confirmed"}
+            else await _claim_rebalance_for_execution(database_manager, rebalance_id)
+        )
         if claimed_record is not None and egress is not None:
             response = await _submit_hyperliquid_egress(
                 accounts_service,
                 database_manager,
                 claimed_record,
             )
-            if response.status.lower() != "built":
+            if response.status.lower() != "built" or response.error is not None:
                 return response
             result = await accounts_service.gateway_client.execute_treasury_rebalance_target(rebalance_id)
             _rebalance_response(result, rebalance_id=rebalance_id)
@@ -240,6 +244,10 @@ async def execute_provider_treasury_rebalance(
                     return response
             stored_status_is_recoverable = stored_status == "pending" or (
                 stored_status != "built" and stored_status in GATEWAY_RECOVERABLE_EXECUTION_STATUSES
+            ) or (
+                stored_status in {"built", "unknown"}
+                and egress is not None
+                and egress.get("status") == "gateway_built"
             )
             response = await _refresh_rebalance_status(
                 accounts_service,
@@ -249,6 +257,7 @@ async def execute_provider_treasury_rebalance(
             if (
                 not stored_status_is_recoverable
                 or response.status.lower() not in GATEWAY_RECOVERABLE_EXECUTION_STATUSES
+                or response.error is not None
             ):
                 return response
 
@@ -614,8 +623,6 @@ async def _refresh_hyperliquid_egress(
     egress = _hyperliquid_egress(record.response_payload)
     if egress is None:
         raise HTTPException(status_code=502, detail="Hyperliquid egress envelope unavailable")
-    if egress.get("status") == "gateway_built":
-        return _stored_rebalance_response(record.response_payload, rebalance_id=rebalance_id)
     if egress.get("status") == "failed":
         return _stored_rebalance_response(record.response_payload, rebalance_id=rebalance_id)
 
@@ -654,8 +661,16 @@ async def _refresh_hyperliquid_egress(
     result = await accounts_service.gateway_client.create_treasury_rebalance_target(
         **_gateway_kwargs_from_stored_request(rebalance_id, record.request_payload)
     )
+    if isinstance(result, dict):
+        result.setdefault("id", rebalance_id)
+        if not any(result.get(field) for field in ("error", "providerError", "provider_error")):
+            result.setdefault("status", "built")
     response = _rebalance_response(result, rebalance_id=rebalance_id)
-    egress["status"] = "gateway_built"
+    egress["status"] = (
+        "gateway_built"
+        if response.status.lower() == "built" and response.error is None
+        else "source_confirmed"
+    )
     await _store_hyperliquid_egress(database_manager, rebalance_id, response, egress)
     return response
 
@@ -1150,6 +1165,14 @@ async def _refresh_rebalance_status(
     ):
         return _stored_rebalance_response(record.response_payload, rebalance_id=rebalance_id)
     result = await accounts_service.gateway_client.get_treasury_rebalance(rebalance_id)
+    if (
+        egress is not None
+        and egress.get("status") == "gateway_built"
+        and isinstance(result, dict)
+        and not any(result.get(field) for field in ("error", "providerError", "provider_error"))
+    ):
+        result.setdefault("id", rebalance_id)
+        result.setdefault("status", "built")
     response = _rebalance_response(result, rebalance_id=rebalance_id)
     payload = _rebalance_response_payload(response)
 

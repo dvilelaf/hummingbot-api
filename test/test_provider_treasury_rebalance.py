@@ -827,7 +827,6 @@ def test_hyperliquid_egress_confirms_balances_then_resumes_gateway(monkeypatch):
     service.gateway_client.balance_result = {"balances": {"USDC": "5"}}
     service.gateway_client.target_result = {
         "idempotencyKey": body.idempotency_key,
-        "status": "built",
     }
     confirmed = asyncio.run(
         module.execute_provider_treasury_rebalance(
@@ -854,6 +853,145 @@ def test_hyperliquid_egress_confirms_balances_then_resumes_gateway(monkeypatch):
     assert len(submitted) == 1
     assert len(service.gateway_client.target_calls) == 2
     assert service.gateway_client.execute_calls == [body.idempotency_key]
+
+
+@pytest.mark.parametrize(
+    "stored_status,should_execute",
+    [("unknown", True), ("built", True), ("failed", False)],
+)
+def test_gateway_built_missing_status_recovers_only_unknown_record(
+    monkeypatch,
+    stored_status,
+    should_execute,
+):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    _enable_hyperliquid_egress(module, service, monkeypatch)
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    body = _neutral_request(module, max_cost_bps=2000)
+    asyncio.run(module.create_provider_treasury_rebalance(body, _authorized_request(), service))
+    record = _REBALANCE_RECORDS[body.idempotency_key]
+    record.status = stored_status
+    record.response_payload[module.HL_EGRESS_FIELD]["status"] = "gateway_built"
+    service.gateway_client.status_results = [{"idempotencyKey": body.idempotency_key}]
+
+    asyncio.run(
+        module.execute_provider_treasury_rebalance(
+            body.idempotency_key,
+            module.ProviderTreasuryRebalanceExecuteRequest(idempotency_key=body.idempotency_key),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert service.gateway_client.execute_calls == (
+        [body.idempotency_key] if should_execute else []
+    )
+
+
+def test_gateway_built_provider_error_does_not_execute(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    _enable_hyperliquid_egress(module, service, monkeypatch)
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    body = _neutral_request(module, max_cost_bps=2000)
+    asyncio.run(module.create_provider_treasury_rebalance(body, _authorized_request(), service))
+    record = _REBALANCE_RECORDS[body.idempotency_key]
+    record.status = "unknown"
+    record.response_payload[module.HL_EGRESS_FIELD]["status"] = "gateway_built"
+    service.gateway_client.status_results = [
+        {
+            "idempotencyKey": body.idempotency_key,
+            "providerError": "provider rejected route",
+            "status": "built",
+        }
+    ]
+
+    result = asyncio.run(
+        module.execute_provider_treasury_rebalance(
+            body.idempotency_key,
+            module.ProviderTreasuryRebalanceExecuteRequest(idempotency_key=body.idempotency_key),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.error == "provider rejected route"
+    assert service.gateway_client.execute_calls == []
+
+
+def test_claimed_hyperliquid_provider_error_does_not_execute_gateway(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    _enable_hyperliquid_egress(module, service, monkeypatch)
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    body = _neutral_request(module, max_cost_bps=2000)
+    asyncio.run(module.create_provider_treasury_rebalance(body, _authorized_request(), service))
+
+    async def provider_error(*_args):
+        return module.ProviderTreasuryRebalanceResponse(
+            id=body.idempotency_key,
+            status="built",
+            error="provider rejected route",
+        )
+
+    monkeypatch.setattr(module, "_submit_hyperliquid_egress", provider_error)
+    result = asyncio.run(
+        module.execute_provider_treasury_rebalance(
+            body.idempotency_key,
+            module.ProviderTreasuryRebalanceExecuteRequest(idempotency_key=body.idempotency_key),
+            _authorized_request(),
+            service,
+        )
+    )
+
+    assert result.error == "provider rejected route"
+    assert service.gateway_client.execute_calls == []
+
+
+def test_gateway_build_provider_error_does_not_mark_egress_executable(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    _enable_hyperliquid_egress(module, service, monkeypatch)
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    body = _neutral_request(module, max_cost_bps=2000)
+    asyncio.run(module.create_provider_treasury_rebalance(body, _authorized_request(), service))
+    record = _REBALANCE_RECORDS[body.idempotency_key]
+    record.response_payload[module.HL_EGRESS_FIELD]["status"] = "accepted"
+    service._hl_withdrawable = Decimal("1")
+    service.gateway_client.balance_result = {"balances": {"USDC": "6"}}
+    service.gateway_client.target_result = {
+        "idempotencyKey": body.idempotency_key,
+        "providerError": "provider rejected route",
+        "status": "built",
+    }
+
+    result = asyncio.run(
+        module._refresh_hyperliquid_egress(
+            service,
+            _authorized_request().app.state.db_manager,
+            body.idempotency_key,
+        )
+    )
+
+    egress = _REBALANCE_RECORDS[body.idempotency_key].response_payload[module.HL_EGRESS_FIELD]
+    assert result.error == "provider rejected route"
+    assert egress["status"] == "source_confirmed"
+    assert service.gateway_client.execute_calls == []
+
+    async def forbidden_submit(*_args):
+        raise AssertionError("settled Hyperliquid withdrawal must not be resubmitted")
+
+    monkeypatch.setattr(module, "_submit_hyperliquid_egress", forbidden_submit)
+    asyncio.run(
+        module.execute_provider_treasury_rebalance(
+            body.idempotency_key,
+            module.ProviderTreasuryRebalanceExecuteRequest(idempotency_key=body.idempotency_key),
+            _authorized_request(),
+            service,
+        )
+    )
+    assert service.gateway_client.execute_calls == []
 
 
 def test_ambiguous_hyperliquid_retry_resubmits_identical_envelope(monkeypatch):
