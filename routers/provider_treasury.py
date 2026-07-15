@@ -393,6 +393,34 @@ async def _hl_withdrawable_balance(source_address: str) -> Decimal:
             raise HTTPException(status_code=502, detail="Hyperliquid balance refresh failed")
 
 
+async def _provision_hyperliquid_egress_destination(
+    accounts_service: AccountsService,
+    expected_address: str,
+) -> dict[str, str]:
+    destination = _marlin_destination_wallet_identity(
+        accounts_service,
+        chain="ethereum",
+        network=HL_EGRESS_ARBITRUM_IDENTITY_NETWORK,
+    )
+    if expected_address.lower() != destination["address"].lower():
+        raise HTTPException(status_code=400, detail=DESTINATION_WALLET_IDENTITY_UNAVAILABLE_BLOCKER)
+    wallet_result = await accounts_service.gateway_client.set_marlin_default_wallet(
+        chain=destination["chain"],
+        network=destination["network"],
+        address=destination["address"],
+        wallet_ref=destination["wallet_ref"],
+    )
+    if not isinstance(wallet_result, dict) or wallet_result.get("error"):
+        error = _redact_error(
+            wallet_result.get("error") if isinstance(wallet_result, dict) else "wallet provisioning unavailable"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"{DESTINATION_WALLET_DEFAULT_FAILED_BLOCKER}: {error}",
+        )
+    return destination
+
+
 async def _gateway_usdc_balance(
     accounts_service: AccountsService,
     *,
@@ -448,13 +476,7 @@ async def _build_hyperliquid_egress(
     ).strip()
     if not source_address or not private_key:
         raise HTTPException(status_code=409, detail="insufficient_source_or_gas")
-    destination = _marlin_destination_wallet_identity(
-        accounts_service,
-        chain="ethereum",
-        network=HL_EGRESS_ARBITRUM_IDENTITY_NETWORK,
-    )
-    if source_address.lower() != destination["address"].lower():
-        raise HTTPException(status_code=400, detail=DESTINATION_WALLET_IDENTITY_UNAVAILABLE_BLOCKER)
+    destination = await _provision_hyperliquid_egress_destination(accounts_service, source_address)
 
     target = Decimal(str(stored_request["target_notional_eur"]))
     source_debit = source_debit_for_destination(target)
@@ -578,6 +600,10 @@ async def _refresh_hyperliquid_egress(
         return _stored_rebalance_response(record.response_payload, rebalance_id=rebalance_id)
 
     source_fresh = await _hl_withdrawable_balance(str(egress["source_address"]))
+    await _provision_hyperliquid_egress_destination(
+        accounts_service,
+        str(egress["destination_address"]),
+    )
     destination_fresh = await _gateway_usdc_balance(
         accounts_service,
         address=str(egress["destination_address"]),

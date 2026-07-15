@@ -165,7 +165,9 @@ class FakeGatewayClient:
         self.status_calls = []
         self.statuses_at_target = []
         self.wallet_calls = []
+        self.wallet_result = {"status": "default_set"}
         self.balance_calls = []
+        self.events = []
         self.balance_result = {"balances": {"USDC": "0"}}
         self.statuses_at_execute = []
         self.execute_delay = 0
@@ -178,7 +180,8 @@ class FakeGatewayClient:
 
     async def set_marlin_default_wallet(self, **kwargs):
         self.wallet_calls.append(kwargs)
-        return {"status": "default_set"}
+        self.events.append(("wallet", kwargs["network"], kwargs["address"]))
+        return self.wallet_result
 
     async def create_treasury_rebalance_target(self, **kwargs):
         record = _REBALANCE_RECORDS.get(kwargs["idempotency_key"])
@@ -188,6 +191,7 @@ class FakeGatewayClient:
 
     async def get_balances(self, chain, network, address, tokens=None):
         self.balance_calls.append((chain, network, address, tokens))
+        self.events.append(("balance", network, address))
         return dict(self.balance_result)
 
     async def execute_treasury_rebalance_target(self, rebalance_id):
@@ -722,6 +726,16 @@ def test_insufficient_gateway_source_builds_durable_hyperliquid_egress(monkeypat
     assert service.gateway_client.balance_calls == [
         ("ethereum", "arbitrum", address, ["USDC"])
     ]
+    assert service.gateway_client.wallet_calls[-1] == {
+        "address": address,
+        "chain": "ethereum",
+        "network": "arbitrum-mainnet",
+        "wallet_ref": "arbitrum:mainnet:evm_gateway",
+    }
+    assert service.gateway_client.events[-2:] == [
+        ("wallet", "arbitrum-mainnet", address),
+        ("balance", "arbitrum", address),
+    ]
     assert "private" not in str(egress).lower()
     assert "secret" not in str(egress).lower()
     assert result.model_dump().get(module.HL_EGRESS_FIELD) is None
@@ -740,6 +754,41 @@ def test_hyperliquid_egress_maps_provider_balance_failure_to_502(monkeypatch):
 
     assert exc.value.status_code == 502
     assert exc.value.detail == "Hyperliquid balance refresh failed"
+
+
+def test_hyperliquid_egress_fails_before_balance_read_when_wallet_provisioning_is_unavailable():
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    service.gateway_client.wallet_result = None
+
+    with pytest.raises(module.HTTPException) as exc:
+        asyncio.run(
+            module._provision_hyperliquid_egress_destination(
+                service,
+                "0x00000000000000000000000000000000000000A1",
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail.startswith("destination_wallet_default_failed")
+    assert service.gateway_client.balance_calls == []
+
+
+def test_hyperliquid_egress_rejects_identity_mismatch_before_wallet_mutation():
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+
+    with pytest.raises(module.HTTPException) as exc:
+        asyncio.run(
+            module._provision_hyperliquid_egress_destination(
+                service,
+                "0x00000000000000000000000000000000000000B2",
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "destination_wallet_identity_unavailable"
+    assert service.gateway_client.wallet_calls == []
 
 
 def test_hyperliquid_egress_confirms_balances_then_resumes_gateway(monkeypatch):
@@ -788,6 +837,11 @@ def test_hyperliquid_egress_confirms_balances_then_resumes_gateway(monkeypatch):
     assert confirmed.status == "confirmed"
     assert egress["actual_fee_usdc"] == "1"
     assert service.fresh_balance_calls == []
+    assert service.gateway_client.wallet_calls[-1]["network"] == "arbitrum-mainnet"
+    assert service.gateway_client.events[-2:] == [
+        ("wallet", "arbitrum-mainnet", egress["destination_address"]),
+        ("balance", "arbitrum", egress["destination_address"]),
+    ]
     assert len(submitted) == 1
     assert len(service.gateway_client.target_calls) == 2
     assert service.gateway_client.execute_calls == [body.idempotency_key]
