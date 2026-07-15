@@ -2464,8 +2464,9 @@ class AccountsService:
     ) -> bool:
         """Update Gateway wallet balances in master_account state.
 
-        Only queries the defaultWallet on each network in defaultNetworks for each chain.
-        This is more efficient than querying all wallets on all networks.
+        Non-Marlin refreshes query the configured defaultWallet on each default network;
+        Marlin refreshes derive its mnemonic wallet separately for every selected network.
+        Both paths avoid querying all wallets on all networks.
 
         Args:
             chain_networks: If provided, only update these chain-network combinations
@@ -2505,7 +2506,9 @@ class AccountsService:
             balance_tasks = []
             task_metadata = []  # Store (chain, network, address) for each task
 
-            # For each chain, get its config with defaultWallet and defaultNetworks
+            marlin_runtime = is_marlin_runtime()
+
+            # For each chain, get the merged chain/network configuration.
             for chain_info in chains_result["chains"]:
                 chain = chain_info["chain"]
                 networks = chain_info.get("networks", [])
@@ -2525,29 +2528,46 @@ class AccountsService:
                     refresh_success = False
                     continue
 
-                default_wallet = config.get("defaultWallet")
                 default_networks = config.get("defaultNetworks", [])
 
-                if not default_wallet:
-                    logger.debug(f"Chain '{chain}' missing defaultWallet, skipping")
-                    refresh_success = False
-                    continue
-
-                # Skip placeholder wallet addresses from Gateway templates (e.g., '<ethereum-wallet-address>')
-                if default_wallet.startswith("<") and default_wallet.endswith(">"):
-                    logger.debug(f"Chain '{chain}' has placeholder defaultWallet '{default_wallet}', skipping")
-                    refresh_success = False
-                    continue
-
-                if not default_networks:
-                    # Fall back to defaultNetwork (singular) if defaultNetworks not set
+                if marlin_runtime:
+                    # Gateway's chain config may keep the active network in defaultNetwork
+                    # while defaultNetworks contains only the configured refresh defaults.
                     default_network = config.get("defaultNetwork")
-                    if default_network:
-                        default_networks = [default_network]
-                    else:
-                        logger.debug(f"Chain '{chain}' missing defaultNetworks, skipping")
+                    if not default_networks:
+                        if default_network:
+                            default_networks = [default_network]
+                        else:
+                            logger.error(
+                                "Chain '%s' has no configured Marlin default network, skipping",
+                                chain,
+                            )
+                            refresh_success = False
+                            continue
+                    elif default_network and default_network not in default_networks:
+                        default_networks = [*default_networks, default_network]
+                else:
+                    default_wallet = config.get("defaultWallet")
+                    if not default_wallet:
+                        logger.debug(f"Chain '{chain}' missing defaultWallet, skipping")
                         refresh_success = False
                         continue
+
+                    # Skip placeholder wallet addresses from Gateway templates (e.g., '<ethereum-wallet-address>')
+                    if default_wallet.startswith("<") and default_wallet.endswith(">"):
+                        logger.debug(f"Chain '{chain}' has placeholder defaultWallet '{default_wallet}', skipping")
+                        refresh_success = False
+                        continue
+
+                    if not default_networks:
+                        # Fall back to defaultNetwork (singular) if defaultNetworks not set
+                        default_network = config.get("defaultNetwork")
+                        if default_network:
+                            default_networks = [default_network]
+                        else:
+                            logger.debug(f"Chain '{chain}' missing defaultNetworks, skipping")
+                            refresh_success = False
+                            continue
 
                 # Create balance tasks for each default network
                 for network in default_networks:
@@ -2557,6 +2577,22 @@ class AccountsService:
                     if chain_networks and chain_network_key not in chain_networks:
                         continue
 
+                    if marlin_runtime:
+                        wallet_address = self._marlin_gateway_default_wallet_address(
+                            chain=chain,
+                            network=network,
+                        )
+                        if not wallet_address:
+                            logger.error(
+                                "Unsupported Marlin wallet derivation for %s/%s; skipping balance query",
+                                chain,
+                                network,
+                            )
+                            refresh_success = False
+                            continue
+                    else:
+                        wallet_address = default_wallet
+
                     tokens = (
                         tokens_by_chain_network.get(chain_network_key)
                         if tokens_by_chain_network
@@ -2565,12 +2601,12 @@ class AccountsService:
                     balance_tasks.append(
                         self.get_gateway_balances(
                             chain,
-                            default_wallet,
+                            wallet_address,
                             network=network,
                             tokens=tokens,
                         )
                     )
-                    task_metadata.append((chain, network, default_wallet))
+                    task_metadata.append((chain, network, wallet_address))
 
             # Build set of active chain-network keys
             active_chain_networks = {f"{chain}-{network}" for chain, network, _ in task_metadata}

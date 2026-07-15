@@ -5,7 +5,7 @@ Run with: pytest test/test_portfolio_state.py -v
 """
 import inspect
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -301,6 +301,52 @@ class TestGatewayRefreshSelection:
             },
         ]
         assert len(service.gateway_client.balance_calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_marlin_unfiltered_gateway_refresh_derives_each_network_wallet(self, monkeypatch):
+        """Unfiltered Marlin refresh derives distinct wallets and includes active default network."""
+        from services.marlin_runtime import MARLIN_RUNTIME_PROFILE, MARLIN_RUNTIME_PROFILE_ENV
+        from services.accounts_service import AccountsService
+
+        monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, MARLIN_RUNTIME_PROFILE)
+        monkeypatch.setenv(
+            "MARLIN_MNEMONIC",
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        expected_base = AccountsService._marlin_gateway_default_wallet_address(
+            chain="ethereum", network="base"
+        )
+        expected_arbitrum = AccountsService._marlin_gateway_default_wallet_address(
+            chain="ethereum", network="arbitrum"
+        )
+        assert expected_base and expected_arbitrum
+        assert expected_base != expected_arbitrum
+
+        class FakeGatewayClient:
+            async def ping(self):
+                return True
+
+            async def get_chains(self):
+                return {"chains": [{"chain": "ethereum", "networks": ["base", "arbitrum"]}]}
+
+            async def get_config(self, namespace):
+                assert namespace == "ethereum-base"
+                return {
+                    "defaultWallet": expected_arbitrum,
+                    "defaultNetworks": ["base"],
+                    "defaultNetwork": "arbitrum",
+                }
+
+        service = AccountsService.__new__(AccountsService)
+        service.accounts_state = {}
+        service.gateway_client = FakeGatewayClient()
+        service.get_gateway_balances = AsyncMock(return_value=[])
+
+        assert await service._update_gateway_balances() is True
+        assert service.get_gateway_balances.await_args_list == [
+            call("ethereum", expected_base, network="base", tokens=None),
+            call("ethereum", expected_arbitrum, network="arbitrum", tokens=None),
+        ]
 
 
 class TestGatewayBalances:
