@@ -7,9 +7,12 @@ from eth_account import Account
 
 from services.hyperliquid_treasury import (
     HYPERLIQUID_EXCHANGE_URL,
+    HYPERLIQUID_INFO_URL,
+    HyperliquidTreasuryError,
     ProviderRejected,
     SubmissionAmbiguous,
     build_withdrawal_envelope,
+    fetch_withdrawable_balance,
     source_debit_for_destination,
     submit_withdrawal,
 )
@@ -130,3 +133,53 @@ def test_build_rejects_invalid_usdc_amount(amount):
 
 def test_source_debit_includes_current_provider_fee():
     assert source_debit_for_destination(Decimal("13.86191")) == Decimal("14.86191")
+
+
+def test_fetch_withdrawable_balance_uses_clearinghouse_state():
+    session = _Session(_Response({"withdrawable": "14.86191"}))
+
+    balance = asyncio.run(fetch_withdrawable_balance(SOURCE_ADDRESS, session))
+
+    assert balance == Decimal("14.86191")
+    assert session.calls == [
+        (
+            HYPERLIQUID_INFO_URL,
+            {"type": "clearinghouseState", "user": SOURCE_ADDRESS},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        [],
+        {"withdrawable": "not-a-number"},
+        {"withdrawable": "NaN"},
+        {"withdrawable": "Infinity"},
+        {"withdrawable": "-1"},
+    ],
+)
+def test_fetch_withdrawable_balance_rejects_invalid_provider_state(body):
+    with pytest.raises(HyperliquidTreasuryError):
+        asyncio.run(fetch_withdrawable_balance(SOURCE_ADDRESS, _Session(_Response(body))))
+
+
+def test_fetch_withdrawable_balance_rejects_provider_http_error():
+    with pytest.raises(HyperliquidTreasuryError, match="HTTP 500"):
+        asyncio.run(
+            fetch_withdrawable_balance(
+                SOURCE_ADDRESS,
+                _Session(_Response({"withdrawable": "14.86191"}, status=500)),
+            )
+        )
+
+
+def test_fetch_withdrawable_balance_rejects_transport_error():
+    with pytest.raises(HyperliquidTreasuryError, match="balance read failed"):
+        asyncio.run(
+            fetch_withdrawable_balance(
+                SOURCE_ADDRESS,
+                _Session(error=aiohttp.ClientConnectionError()),
+            )
+        )

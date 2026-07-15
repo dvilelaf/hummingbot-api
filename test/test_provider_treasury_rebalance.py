@@ -222,6 +222,7 @@ class FakeAccountsService:
         self._connector_balance_refresh_errors = {}
         self.accounts_state = {}
         self._hl_balance = None
+        self.fresh_balance_calls = []
         self._refresh_error = None
         self.update_account_state_calls = []
         self.identities = identities if identities is not None else {
@@ -273,6 +274,7 @@ class FakeAccountsService:
                         self.accounts_state[acct]["hyperliquid_perpetual"] = []
 
     async def get_fresh_available_balance(self, account_name, connector_name, token):
+        self.fresh_balance_calls.append((account_name, connector_name, token))
         await self.update_account_state(
             skip_gateway=True,
             account_names=[account_name],
@@ -669,7 +671,9 @@ def _enable_hyperliquid_egress(module, service, monkeypatch):
         "address": address,
         "wallet_ref": "arbitrum:mainnet:evm_gateway",
     }
-    service._hl_balance = Decimal("8")
+    service._hl_balance = Decimal("0")
+    service._hl_withdrawable = Decimal("8")
+    service.hl_withdrawable_calls = []
     service.gateway_client.target_result = {
         "error": "insufficient_source_or_gas",
         "status": 409,
@@ -684,6 +688,11 @@ def _enable_hyperliquid_egress(module, service, monkeypatch):
         if namespace == "hyperliquid"
         else None,
     )
+    async def withdrawable_balance(_source_address):
+        service.hl_withdrawable_calls.append(_source_address)
+        return service._hl_withdrawable
+
+    monkeypatch.setattr(module, "_hl_withdrawable_balance", withdrawable_balance)
     return address
 
 
@@ -708,12 +717,29 @@ def test_insufficient_gateway_source_builds_durable_hyperliquid_egress(monkeypat
     assert egress["action"]["amount"] == "6"
     assert egress["source_debit_usdc"] == "7"
     assert egress["destination_address"] == address
+    assert service.hl_withdrawable_calls == [address]
+    assert service.fresh_balance_calls == []
     assert service.gateway_client.balance_calls == [
         ("ethereum", "arbitrum", address, ["USDC"])
     ]
     assert "private" not in str(egress).lower()
     assert "secret" not in str(egress).lower()
     assert result.model_dump().get(module.HL_EGRESS_FIELD) is None
+
+
+def test_hyperliquid_egress_maps_provider_balance_failure_to_502(monkeypatch):
+    module = _provider_treasury_module()
+
+    async def unavailable(_source_address, _session):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(module, "fetch_withdrawable_balance", unavailable)
+
+    with pytest.raises(module.HTTPException) as exc:
+        asyncio.run(module._hl_withdrawable_balance("0x00000000000000000000000000000000000000A1"))
+
+    assert exc.value.status_code == 502
+    assert exc.value.detail == "Hyperliquid balance refresh failed"
 
 
 def test_hyperliquid_egress_confirms_balances_then_resumes_gateway(monkeypatch):
@@ -743,7 +769,7 @@ def test_hyperliquid_egress_confirms_balances_then_resumes_gateway(monkeypatch):
     )
     assert pending.status == "source_pending"
 
-    service._hl_balance = Decimal("1")
+    service._hl_withdrawable = Decimal("1")
     service.gateway_client.balance_result = {"balances": {"USDC": "6"}}
     service.gateway_client.target_result = {
         "idempotencyKey": body.idempotency_key,
@@ -761,6 +787,7 @@ def test_hyperliquid_egress_confirms_balances_then_resumes_gateway(monkeypatch):
     egress = _REBALANCE_RECORDS[body.idempotency_key].response_payload[module.HL_EGRESS_FIELD]
     assert confirmed.status == "confirmed"
     assert egress["actual_fee_usdc"] == "1"
+    assert service.fresh_balance_calls == []
     assert len(submitted) == 1
     assert len(service.gateway_client.target_calls) == 2
     assert service.gateway_client.execute_calls == [body.idempotency_key]

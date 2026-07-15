@@ -14,6 +14,7 @@ from eth_account.messages import encode_typed_data
 from eth_utils import is_address, to_checksum_address, to_hex
 
 HYPERLIQUID_EXCHANGE_URL = "https://api.hyperliquid.xyz/exchange"
+HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HYPERLIQUID_WITHDRAWAL_FEE_USDC = Decimal(1)
 _MAX_UINT64 = (1 << 64) - 1
 
@@ -53,6 +54,37 @@ def source_debit_for_destination(target: Decimal) -> Decimal:
     """Return the source debit needed for a destination amount and fixed fee."""
     normalized = _usdc_amount(target)
     return normalized + HYPERLIQUID_WITHDRAWAL_FEE_USDC
+
+
+async def fetch_withdrawable_balance(
+    source_address: str,
+    session: aiohttp.ClientSession,
+) -> Decimal:
+    """Read fresh USDC withdrawable from Hyperliquid clearinghouse state."""
+    source = _evm_address(source_address, "source")
+    try:
+        async with session.post(
+            HYPERLIQUID_INFO_URL,
+            json={"type": "clearinghouseState", "user": source},
+        ) as response:
+            body = await response.json()
+            if response.status >= 400:
+                raise HyperliquidTreasuryError(
+                    f"Hyperliquid balance read failed with HTTP {response.status}"
+                )
+    except HyperliquidTreasuryError:
+        raise
+    except (aiohttp.ClientError, aiohttp.ContentTypeError, TimeoutError, ValueError) as exc:
+        raise HyperliquidTreasuryError("Hyperliquid balance read failed") from exc
+    if not isinstance(body, dict):
+        raise HyperliquidTreasuryError("Hyperliquid balance response is invalid")
+    try:
+        balance = Decimal(str(body["withdrawable"]))
+    except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+        raise HyperliquidTreasuryError("Hyperliquid withdrawable balance is invalid") from exc
+    if not balance.is_finite() or balance < 0:
+        raise HyperliquidTreasuryError("Hyperliquid withdrawable balance is invalid")
+    return balance
 
 
 def build_withdrawal_envelope(

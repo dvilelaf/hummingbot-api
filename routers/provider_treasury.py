@@ -27,6 +27,7 @@ from services.hyperliquid_treasury import (
     ProviderRejected,
     SubmissionAmbiguous,
     build_withdrawal_envelope,
+    fetch_withdrawable_balance,
     source_debit_for_destination,
     submit_withdrawal,
 )
@@ -382,6 +383,16 @@ async def _hl_usdc_balance(accounts_service: AccountsService, account_name: str)
     return val
 
 
+async def _hl_withdrawable_balance(source_address: str) -> Decimal:
+    """Return provider-authoritative withdrawable USDC for treasury egress."""
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        try:
+            return await fetch_withdrawable_balance(source_address, session)
+        except Exception:
+            raise HTTPException(status_code=502, detail="Hyperliquid balance refresh failed")
+
+
 async def _gateway_usdc_balance(
     accounts_service: AccountsService,
     *,
@@ -451,15 +462,7 @@ async def _build_hyperliquid_egress(
     fixed_cost_bps = (source_debit - target) * Decimal(10000) / target
     if fixed_cost_bps > max_cost_bps:
         raise HTTPException(status_code=409, detail="max_cost_exceeded")
-    source_baseline = await _hl_usdc_balance(
-        accounts_service,
-        str(stored_request["account_name"]),
-    )
-    logger.warning(
-        "Hyperliquid treasury capacity check: available_usdc=%s required_usdc=%s",
-        source_baseline,
-        source_debit,
-    )
+    source_baseline = await _hl_withdrawable_balance(source_address)
     if source_baseline < source_debit:
         raise HTTPException(status_code=409, detail="insufficient_source_or_gas")
     destination_baseline = await _gateway_usdc_balance(
@@ -574,10 +577,7 @@ async def _refresh_hyperliquid_egress(
     if egress.get("status") == "failed":
         return _stored_rebalance_response(record.response_payload, rebalance_id=rebalance_id)
 
-    source_fresh = await _hl_usdc_balance(
-        accounts_service,
-        str(record.request_payload.get("account_name", "")),
-    )
+    source_fresh = await _hl_withdrawable_balance(str(egress["source_address"]))
     destination_fresh = await _gateway_usdc_balance(
         accounts_service,
         address=str(egress["destination_address"]),
