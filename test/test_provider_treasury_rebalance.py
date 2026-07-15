@@ -1500,7 +1500,7 @@ def test_status_transports_submission_insufficient_funds(monkeypatch):
     assert _REBALANCE_RECORDS["target-funding-1"].status == "submission_insufficient_funds"
 
 
-def test_response_ignores_protocol_selection_fields_and_redacts_error():
+def test_response_preserves_source_context_and_redacts_error():
     module = _provider_treasury_module()
 
     response = module._rebalance_response(
@@ -1514,6 +1514,7 @@ def test_response_ignores_protocol_selection_fields_and_redacts_error():
             },
             "provider": "squid_router",
             "providerError": "failed bearer abc123 token secret-value",
+            "sourceChain": "ethereum",
             "sourceNetwork": "arbitrum",
             "status": "failed",
             "transactionHash": "0xtx",
@@ -1523,7 +1524,11 @@ def test_response_ignores_protocol_selection_fields_and_redacts_error():
     assert response.model_dump(exclude_none=True) == {
         "error": "failed bearer [redacted] token [redacted]",
         "id": "target-funding-1",
-        "metadata": {"phase": "failed"},
+        "metadata": {
+            "phase": "failed",
+            "source_chain": "ethereum",
+            "source_network": "arbitrum",
+        },
         "status": "failed",
         "transaction_hash": "0xtx",
     }
@@ -1883,6 +1888,8 @@ def test_persisted_rebalance_response_round_trips_snake_case_stages():
         {
             "idempotencyKey": "target-funding-1",
             "status": "confirmed",
+            "sourceChain": "ethereum",
+            "sourceNetwork": "arbitrum",
             "stages": [
                 {
                     "index": 0,
@@ -1908,6 +1915,10 @@ def test_persisted_rebalance_response_round_trips_snake_case_stages():
     )
 
     assert restored.stages[0].destination_amount == Decimal("100.00")
+    assert restored.metadata == {
+        "source_chain": "ethereum",
+        "source_network": "arbitrum",
+    }
     assert service.gateway_client.status_calls == []
 
 

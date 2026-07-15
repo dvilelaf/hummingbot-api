@@ -362,6 +362,173 @@ class TestGatewayRefreshSelection:
             call("ethereum", expected_arbitrum, network="arbitrum", tokens=None),
         ]
 
+    @pytest.mark.asyncio
+    async def test_marlin_unfiltered_gateway_refresh_uses_persisted_treasury_source_context(self, monkeypatch):
+        """Durable treasury source metadata restores a mnemonic wallet after Gateway restart."""
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+
+        import services.accounts_service as accounts_service_module
+        from services.marlin_runtime import MARLIN_RUNTIME_PROFILE, MARLIN_RUNTIME_PROFILE_ENV
+        from services.accounts_service import AccountsService
+
+        monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, MARLIN_RUNTIME_PROFILE)
+        monkeypatch.setenv(
+            "MARLIN_MNEMONIC",
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        expected_base = AccountsService._marlin_gateway_default_wallet_address(
+            chain="ethereum", network="base"
+        )
+        expected_arbitrum = AccountsService._marlin_gateway_default_wallet_address(
+            chain="ethereum", network="arbitrum"
+        )
+        assert expected_base and expected_arbitrum and expected_base != expected_arbitrum
+
+        class FakeGatewayClient:
+            async def ping(self):
+                return True
+
+            async def get_chains(self):
+                return {"chains": [{"chain": "ethereum", "networks": ["base", "arbitrum"]}]}
+
+            async def get_config(self, namespace):
+                assert namespace == "ethereum-base"
+                return {
+                    "defaultWallet": expected_base,
+                    "defaultNetworks": ["base"],
+                    "defaultNetwork": "base",
+                }
+
+            async def get_wallets(self):
+                return [{"chain": "ethereum", "walletAddresses": [expected_base]}]
+
+        class FakeDatabaseManager:
+            @asynccontextmanager
+            async def get_session_context(self):
+                yield object()
+
+        class FakeTreasuryRepository:
+            def __init__(self, session):
+                self.session = session
+
+            async def list_rebalances(self):
+                return [
+                    SimpleNamespace(
+                        response_payload={
+                            "metadata": {
+                                "source_chain": "ethereum",
+                                "source_network": "arbitrum",
+                            },
+                        },
+                    ),
+                ]
+
+        monkeypatch.setattr(
+            accounts_service_module,
+            "ProviderTreasuryRebalanceRepository",
+            FakeTreasuryRepository,
+        )
+        service = AccountsService.__new__(AccountsService)
+        service.accounts_state = {}
+        service.db_manager = FakeDatabaseManager()
+        service.gateway_client = FakeGatewayClient()
+        service.get_gateway_balances = AsyncMock(return_value=[])
+
+        assert await service._update_gateway_balances() is True
+        assert service.get_gateway_balances.await_args_list == [
+            call("ethereum", expected_base, network="base", tokens=None),
+            call("ethereum", expected_arbitrum, network="arbitrum", tokens=None),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_marlin_unfiltered_gateway_refresh_ignores_invalid_treasury_source_contexts(self, monkeypatch):
+        """Malformed, foreign, and unsupported durable contexts do not widen refresh scope."""
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+
+        import services.accounts_service as accounts_service_module
+        from services.marlin_runtime import MARLIN_RUNTIME_PROFILE, MARLIN_RUNTIME_PROFILE_ENV
+        from services.accounts_service import AccountsService
+
+        monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, MARLIN_RUNTIME_PROFILE)
+        monkeypatch.setenv(
+            "MARLIN_MNEMONIC",
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        expected_base = AccountsService._marlin_gateway_default_wallet_address(
+            chain="ethereum", network="base"
+        )
+        assert expected_base
+
+        class FakeGatewayClient:
+            async def ping(self):
+                return True
+
+            async def get_chains(self):
+                return {"chains": [{"chain": "ethereum", "networks": ["base", "arbitrum"]}]}
+
+            async def get_config(self, namespace):
+                assert namespace == "ethereum-base"
+                return {
+                    "defaultWallet": expected_base,
+                    "defaultNetworks": ["base"],
+                    "defaultNetwork": "base",
+                }
+
+            async def get_wallets(self):
+                return [{"chain": "ethereum", "walletAddresses": [expected_base]}]
+
+        class FakeDatabaseManager:
+            @asynccontextmanager
+            async def get_session_context(self):
+                yield object()
+
+        class FakeTreasuryRepository:
+            def __init__(self, session):
+                self.session = session
+
+            async def list_rebalances(self):
+                return [
+                    SimpleNamespace(response_payload={"metadata": {"source_chain": "ethereum"}}),
+                    SimpleNamespace(
+                        response_payload={
+                            "metadata": {"source_chain": "ethereum", "source_network": " "},
+                        },
+                    ),
+                    SimpleNamespace(
+                        response_payload={
+                            "metadata": {"source_chain": 123, "source_network": "arbitrum"},
+                        },
+                    ),
+                    SimpleNamespace(
+                        response_payload={
+                            "metadata": {"source_chain": "ethereum", "source_network": "mainnet"},
+                        },
+                    ),
+                    SimpleNamespace(
+                        response_payload={
+                            "metadata": {"source_chain": "foreign", "source_network": "base"},
+                        },
+                    ),
+                ]
+
+        monkeypatch.setattr(
+            accounts_service_module,
+            "ProviderTreasuryRebalanceRepository",
+            FakeTreasuryRepository,
+        )
+        service = AccountsService.__new__(AccountsService)
+        service.accounts_state = {}
+        service.db_manager = FakeDatabaseManager()
+        service.gateway_client = FakeGatewayClient()
+        service.get_gateway_balances = AsyncMock(return_value=[])
+
+        assert await service._update_gateway_balances() is True
+        assert service.get_gateway_balances.await_args_list == [
+            call("ethereum", expected_base, network="base", tokens=None),
+        ]
+
 
 class TestGatewayBalances:
     """Tests for Gateway balance response formatting."""

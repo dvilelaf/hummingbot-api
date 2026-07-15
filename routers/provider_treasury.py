@@ -767,6 +767,11 @@ def _rebalance_response(
     response_id = str(result.get("id") or result.get("rebalanceId") or result.get("idempotencyKey") or rebalance_id or "")
     if not response_id:
         raise HTTPException(status_code=502, detail="Gateway treasury rebalance response missing id")
+    metadata = _safe_metadata(result.get("metadata"))
+    for gateway_field, metadata_field in (("sourceChain", "source_chain"), ("sourceNetwork", "source_network")):
+        source_context = result.get(gateway_field)
+        if isinstance(source_context, str) and source_context.strip():
+            metadata[metadata_field] = source_context.strip()
     return ProviderTreasuryRebalanceResponse(
         id=response_id,
         status=str(result.get("status") or "unknown"),
@@ -778,7 +783,7 @@ def _rebalance_response(
             or result.get("signature")
         ),
         error=_optional_error(result.get("provider_error") or result.get("providerError")),
-        metadata=_safe_metadata(result.get("metadata")),
+        metadata=metadata,
         source_amount=_parse_gateway_amount(result.get("sourceAmount"), "sourceAmount"),
         source_asset=_parse_gateway_asset(result.get("sourceAsset"), "sourceAsset"),
         destination_amount=_parse_gateway_amount(result.get("destinationAmount"), "destinationAmount"),

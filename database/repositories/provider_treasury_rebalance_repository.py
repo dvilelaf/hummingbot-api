@@ -20,6 +20,12 @@ class ProviderTreasuryRebalanceRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_rebalances(self) -> list[ProviderTreasuryRebalance]:
+        result = await self.session.execute(
+            select(ProviderTreasuryRebalance).execution_options(populate_existing=True)
+        )
+        return result.scalars().all()
+
     async def create_built(
         self,
         rebalance_id: str,

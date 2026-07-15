@@ -13,7 +13,14 @@ from hummingbot.core.data_type.in_flight_order import OrderState
 from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, TradeType
 
 from config import settings
-from database import AccountRepository, AsyncDatabaseManager, FundingRepository, OrderRepository, TradeRepository
+from database import (
+    AccountRepository,
+    AsyncDatabaseManager,
+    FundingRepository,
+    OrderRepository,
+    ProviderTreasuryRebalanceRepository,
+    TradeRepository,
+)
 from services.cowswap_runtime import (
     COWSWAP_CONNECTOR_NAME,
     CowSwapRuntimeDependencies,
@@ -2498,6 +2505,26 @@ class AccountsService:
 
             known_chains = {c["chain"] for c in chains_result["chains"]}
             refresh_success = True
+            marlin_runtime = is_marlin_runtime()
+            gateway_contexts = {
+                (chain.strip().lower(), network.strip().lower()): (chain.strip(), network.strip())
+                for chain_info in chains_result["chains"]
+                if isinstance(chain_info, dict)
+                and isinstance(chain_info.get("chain"), str)
+                and isinstance(chain_info.get("networks"), list)
+                for chain in [chain_info["chain"]]
+                for network in chain_info["networks"]
+                if isinstance(network, str) and chain.strip() and network.strip()
+            }
+            persisted_treasury_contexts: Set[tuple[str, str]] = set()
+            if marlin_runtime:
+                try:
+                    persisted_treasury_contexts = await self._marlin_persisted_treasury_contexts(
+                        gateway_contexts
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not read persisted treasury source contexts: {e}")
+                    refresh_success = False
 
             # Ensure master_account exists in accounts_state
             if "master_account" not in self.accounts_state:
@@ -2507,7 +2534,6 @@ class AccountsService:
             balance_tasks = []
             task_metadata = []  # Store (chain, network, address) for each task
 
-            marlin_runtime = is_marlin_runtime()
             materialized_wallet_addresses: Dict[str, Set[str]] = {}
             if marlin_runtime:
                 try:
@@ -2578,6 +2604,10 @@ class AccountsService:
                             _addresses_equal(address, derived_wallet)
                             for address in wallet_addresses
                         ) and network not in default_networks:
+                            default_networks = [*default_networks, network]
+                    for network in networks:
+                        context_key = (chain.strip().lower(), network.strip().lower())
+                        if context_key in persisted_treasury_contexts and network not in default_networks:
                             default_networks = [*default_networks, network]
                 else:
                     default_wallet = config.get("defaultWallet")
@@ -2686,6 +2716,44 @@ class AccountsService:
         except Exception as e:
             logger.error(f"Error updating Gateway balances: {e}")
             return False
+
+    async def _marlin_persisted_treasury_contexts(
+        self,
+        gateway_contexts: Dict[tuple[str, str], tuple[str, str]],
+    ) -> Set[tuple[str, str]]:
+        db_manager = getattr(self, "db_manager", None)
+        if db_manager is None:
+            return set()
+
+        async with db_manager.get_session_context() as session:
+            records = await ProviderTreasuryRebalanceRepository(session).list_rebalances()
+
+        contexts: Set[tuple[str, str]] = set()
+        for record in records or []:
+            response_payload = getattr(record, "response_payload", None)
+            if not isinstance(response_payload, dict):
+                continue
+            metadata = response_payload.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            source_chain = metadata.get("source_chain")
+            source_network = metadata.get("source_network")
+            if not isinstance(source_chain, str) or not isinstance(source_network, str):
+                continue
+            source_chain = source_chain.strip()
+            source_network = source_network.strip()
+            if not source_chain or not source_network:
+                continue
+            context_key = (source_chain.lower(), source_network.lower())
+            exposed_context = gateway_contexts.get(context_key)
+            if exposed_context is None:
+                continue
+            if self._marlin_gateway_default_wallet_address(
+                chain=exposed_context[0],
+                network=exposed_context[1],
+            ):
+                contexts.add(context_key)
+        return contexts
 
     async def _update_filtered_gateway_balances(
         self,
