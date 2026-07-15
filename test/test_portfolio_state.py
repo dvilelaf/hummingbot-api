@@ -303,8 +303,8 @@ class TestGatewayRefreshSelection:
         assert len(service.gateway_client.balance_calls) == 2
 
     @pytest.mark.asyncio
-    async def test_marlin_unfiltered_gateway_refresh_derives_each_network_wallet(self, monkeypatch):
-        """Unfiltered Marlin refresh derives distinct wallets and includes active default network."""
+    async def test_marlin_unfiltered_gateway_refresh_discovers_materialized_network_wallets(self, monkeypatch):
+        """Unfiltered Marlin refresh includes only materialized mnemonic-derived wallets."""
         from services.marlin_runtime import MARLIN_RUNTIME_PROFILE, MARLIN_RUNTIME_PROFILE_ENV
         from services.accounts_service import AccountsService
 
@@ -327,15 +327,29 @@ class TestGatewayRefreshSelection:
                 return True
 
             async def get_chains(self):
-                return {"chains": [{"chain": "ethereum", "networks": ["base", "arbitrum"]}]}
+                return {
+                    "chains": [{"chain": "ethereum", "networks": ["base", "arbitrum", "mainnet"]}],
+                }
 
             async def get_config(self, namespace):
                 assert namespace == "ethereum-base"
                 return {
-                    "defaultWallet": expected_arbitrum,
+                    "defaultWallet": expected_base,
                     "defaultNetworks": ["base"],
-                    "defaultNetwork": "arbitrum",
+                    "defaultNetwork": "base",
                 }
+
+            async def get_wallets(self):
+                return [
+                    {
+                        "chain": "ethereum",
+                        "walletAddresses": [
+                            expected_base,
+                            expected_arbitrum,
+                            "0x0000000000000000000000000000000000000001",
+                        ],
+                    },
+                ]
 
         service = AccountsService.__new__(AccountsService)
         service.accounts_state = {}

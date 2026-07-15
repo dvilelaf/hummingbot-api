@@ -40,6 +40,7 @@ from services.marlin_runtime import (
     GATEWAY_WALLET_POLICIES,
     _canonical_gateway_wallet_context,
     _derive_marlin_public_address,
+    _addresses_equal,
     is_marlin_runtime,
     is_mnemonic_credential_connector,
 )
@@ -2507,6 +2508,25 @@ class AccountsService:
             task_metadata = []  # Store (chain, network, address) for each task
 
             marlin_runtime = is_marlin_runtime()
+            materialized_wallet_addresses: Dict[str, Set[str]] = {}
+            if marlin_runtime:
+                try:
+                    gateway_wallets = await self.gateway_client.get_wallets()
+                except Exception as e:
+                    logger.warning(f"Could not discover materialized Gateway wallets: {e}")
+                    gateway_wallets = []
+                    refresh_success = False
+
+                for wallet_group in gateway_wallets or []:
+                    if not isinstance(wallet_group, dict):
+                        continue
+                    wallet_chain = wallet_group.get("chain")
+                    wallet_addresses = wallet_group.get("walletAddresses", [])
+                    if not wallet_chain or not isinstance(wallet_addresses, list):
+                        continue
+                    materialized_wallet_addresses.setdefault(wallet_chain, set()).update(
+                        address for address in wallet_addresses if isinstance(address, str)
+                    )
 
             # For each chain, get the merged chain/network configuration.
             for chain_info in chains_result["chains"]:
@@ -2546,6 +2566,19 @@ class AccountsService:
                             continue
                     elif default_network and default_network not in default_networks:
                         default_networks = [*default_networks, default_network]
+
+                    # Include only mnemonic-derived wallets that Gateway has already materialized.
+                    wallet_addresses = materialized_wallet_addresses.get(chain, set())
+                    for network in networks:
+                        derived_wallet = self._marlin_gateway_default_wallet_address(
+                            chain=chain,
+                            network=network,
+                        )
+                        if derived_wallet and any(
+                            _addresses_equal(address, derived_wallet)
+                            for address in wallet_addresses
+                        ) and network not in default_networks:
+                            default_networks = [*default_networks, network]
                 else:
                     default_wallet = config.get("defaultWallet")
                     if not default_wallet:
