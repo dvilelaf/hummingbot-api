@@ -718,7 +718,7 @@ def test_insufficient_gateway_source_builds_durable_hyperliquid_egress(monkeypat
     egress = record.response_payload[module.HL_EGRESS_FIELD]
     assert result.status == "built"
     assert egress["status"] == "built"
-    assert egress["action"]["amount"] == "6"
+    assert egress["action"]["amount"] == "7"
     assert egress["source_debit_usdc"] == "7"
     assert egress["destination_address"] == address
     assert service.hl_withdrawable_calls == [address]
@@ -807,6 +807,9 @@ def test_hyperliquid_egress_confirms_balances_then_resumes_gateway(monkeypatch):
     asyncio.run(
         module.create_provider_treasury_rebalance(body, _authorized_request(), service)
     )
+    # Recover an envelope built before withdraw3 fee semantics were corrected:
+    # action.amount is the actual debit and the destination receives amount-fee.
+    _REBALANCE_RECORDS[body.idempotency_key].response_payload[module.HL_EGRESS_FIELD]["action"]["amount"] = "6"
 
     pending = asyncio.run(
         module.execute_provider_treasury_rebalance(
@@ -817,9 +820,11 @@ def test_hyperliquid_egress_confirms_balances_then_resumes_gateway(monkeypatch):
         )
     )
     assert pending.status == "source_pending"
+    assert pending.source_amount == Decimal("6")
+    assert pending.destination_amount == Decimal("5")
 
-    service._hl_withdrawable = Decimal("1")
-    service.gateway_client.balance_result = {"balances": {"USDC": "6"}}
+    service._hl_withdrawable = Decimal("2")
+    service.gateway_client.balance_result = {"balances": {"USDC": "5"}}
     service.gateway_client.target_result = {
         "idempotencyKey": body.idempotency_key,
         "status": "built",
@@ -836,6 +841,10 @@ def test_hyperliquid_egress_confirms_balances_then_resumes_gateway(monkeypatch):
     egress = _REBALANCE_RECORDS[body.idempotency_key].response_payload[module.HL_EGRESS_FIELD]
     assert confirmed.status == "confirmed"
     assert egress["actual_fee_usdc"] == "1"
+    assert egress["actual_source_debit_usdc"] == "6"
+    assert egress["actual_destination_usdc"] == "5"
+    assert egress["source_debit_usdc"] == "6"
+    assert egress["destination_target_usdc"] == "5"
     assert service.fresh_balance_calls == []
     assert service.gateway_client.wallet_calls[-1]["network"] == "arbitrum-mainnet"
     assert service.gateway_client.events[-2:] == [
@@ -884,6 +893,37 @@ def test_ambiguous_hyperliquid_retry_resubmits_identical_envelope(monkeypatch):
     assert second.status == "source_pending"
     assert len(submitted) == 2
     assert submitted[0] == submitted[1]
+
+
+def test_malformed_hyperliquid_amount_fails_before_submit(monkeypatch):
+    module = _provider_treasury_module()
+    service = FakeAccountsService()
+    _enable_hyperliquid_egress(module, service, monkeypatch)
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    submitted = []
+
+    async def submit(envelope, _session):
+        submitted.append(envelope.payload())
+
+    monkeypatch.setattr(module, "submit_withdrawal", submit)
+    body = _neutral_request(module, max_cost_bps=2000)
+    asyncio.run(module.create_provider_treasury_rebalance(body, _authorized_request(), service))
+    _REBALANCE_RECORDS[body.idempotency_key].response_payload[module.HL_EGRESS_FIELD]["action"][
+        "amount"
+    ] = "1.0000001"
+
+    with pytest.raises(module.HTTPException) as exc:
+        asyncio.run(
+            module.execute_provider_treasury_rebalance(
+                body.idempotency_key,
+                module.ProviderTreasuryRebalanceExecuteRequest(idempotency_key=body.idempotency_key),
+                _authorized_request(),
+                service,
+            )
+        )
+
+    assert exc.value.status_code == 502
+    assert submitted == []
 
 
 def test_same_idempotency_key_with_different_target_fails_before_gateway(monkeypatch):

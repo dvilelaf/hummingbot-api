@@ -23,6 +23,7 @@ from models.provider_treasury import (
 )
 from services.accounts_service import AccountsService
 from services.hyperliquid_treasury import (
+    HYPERLIQUID_WITHDRAWAL_FEE_USDC,
     HyperliquidWithdrawalEnvelope,
     ProviderRejected,
     SubmissionAmbiguous,
@@ -495,7 +496,7 @@ async def _build_hyperliquid_egress(
         source_address=source_address,
         private_key=private_key,
         destination_address=destination["address"],
-        amount=target,
+        amount=source_debit,
         nonce_ms=time.time_ns() // 1_000_000,
     )
     egress = {
@@ -576,11 +577,30 @@ def _stored_hyperliquid_envelope(egress: dict[str, Any]) -> HyperliquidWithdrawa
     nonce = egress.get("nonce")
     if not isinstance(action, dict) or not isinstance(signature, dict) or type(nonce) is not int:
         raise HTTPException(status_code=502, detail="Stored Hyperliquid egress envelope malformed")
+    _hyperliquid_settlement_amounts(egress)
     return HyperliquidWithdrawalEnvelope(
         action=MappingProxyType(dict(action)),
         nonce=nonce,
         signature=MappingProxyType(dict(signature)),
     )
+
+
+def _hyperliquid_settlement_amounts(egress: dict[str, Any]) -> tuple[Decimal, Decimal]:
+    action = egress.get("action")
+    try:
+        source_debit = Decimal(str(action["amount"]))
+        destination_target = source_debit - HYPERLIQUID_WITHDRAWAL_FEE_USDC
+    except (ArithmeticError, KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=502, detail="Stored Hyperliquid egress amount malformed")
+    if (
+        not source_debit.is_finite()
+        or not destination_target.is_finite()
+        or source_debit <= 0
+        or destination_target <= 0
+        or source_debit.as_tuple().exponent < -6
+    ):
+        raise HTTPException(status_code=502, detail="Stored Hyperliquid egress amount malformed")
+    return source_debit, destination_target
 
 
 async def _refresh_hyperliquid_egress(
@@ -610,8 +630,7 @@ async def _refresh_hyperliquid_egress(
     )
     source_baseline = Decimal(str(egress["source_baseline_usdc"]))
     destination_baseline = Decimal(str(egress["destination_baseline_usdc"]))
-    source_debit = Decimal(str(egress["source_debit_usdc"]))
-    destination_target = Decimal(str(egress["destination_target_usdc"]))
+    source_debit, destination_target = _hyperliquid_settlement_amounts(egress)
     source_delta = source_baseline - source_fresh
     destination_delta = destination_fresh - destination_baseline
     if source_delta < source_debit or destination_delta < destination_target:
@@ -627,6 +646,8 @@ async def _refresh_hyperliquid_egress(
             "actual_destination_usdc": str(destination_delta),
             "actual_fee_usdc": str(actual_fee),
             "actual_source_debit_usdc": str(source_delta),
+            "destination_target_usdc": str(destination_target),
+            "source_debit_usdc": str(source_debit),
             "status": "source_confirmed",
         }
     )
@@ -671,13 +692,14 @@ def _hyperliquid_egress_response(
     status: str,
     error: str | None = None,
 ) -> ProviderTreasuryRebalanceResponse:
+    source_amount, destination_amount = _hyperliquid_settlement_amounts(egress)
     return ProviderTreasuryRebalanceResponse(
         id=rebalance_id,
         status=status,
         error=error,
-        source_amount=Decimal(str(egress["source_debit_usdc"])),
+        source_amount=source_amount,
         source_asset="USDC",
-        destination_amount=Decimal(str(egress["destination_target_usdc"])),
+        destination_amount=destination_amount,
         destination_asset="USDC",
     )
 
