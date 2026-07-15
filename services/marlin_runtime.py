@@ -112,6 +112,7 @@ GATEWAY_WALLET_ALIASES = {
     ("ethereum", "ethereum-base-mainnet"): ("base", "mainnet"),
     ("ethereum", "base-sepolia"): ("base", "sepolia"),
     ("ethereum", "ethereum-base-sepolia"): ("base", "sepolia"),
+    ("ethereum", "arbitrum"): ("arbitrum", "mainnet"),
     ("ethereum", "arbitrum-mainnet"): ("arbitrum", "mainnet"),
     ("ethereum", "arbitrum-sepolia"): ("arbitrum", "sepolia"),
     ("ethereum", "arbitrum-one"): ("arbitrum", "mainnet"),

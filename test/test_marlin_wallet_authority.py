@@ -601,6 +601,19 @@ def test_marlin_scoped_default_wallet_route_rejects_non_derived_address(
     assert "MARLIN_MNEMONIC-derived" in response.json()["detail"]
 
 
+def test_ethereum_arbitrum_alias_uses_arbitrum_mainnet_wallet_policy() -> None:
+    canonical = marlin_runtime._canonical_gateway_wallet_context(
+        chain="ethereum",
+        network="arbitrum",
+    )
+    derivation_path, wallet_ref, coin = marlin_runtime.GATEWAY_WALLET_POLICIES[canonical]
+
+    assert canonical == ("arbitrum", "mainnet")
+    assert derivation_path == "m/44'/60'/20'/0/0"
+    assert wallet_ref == "arbitrum:mainnet:evm_gateway"
+    assert coin is marlin_runtime.Bip44Coins.ETHEREUM
+
+
 @pytest.mark.parametrize(
     ("network", "account_index"),
     [
