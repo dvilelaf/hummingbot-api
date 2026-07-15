@@ -625,6 +625,72 @@ class TestGatewayBalances:
             "ethereum", "ethereum-base", ["ETH"]
         )
 
+    @pytest.mark.asyncio
+    async def test_cached_eth_price_values_balance_without_gateway_quote(self, accounts_service):
+        """A cached ETH-USDC rate prices an unsupported Gateway network locally."""
+        from hummingbot.core.rate_oracle.rate_oracle import RateOracle
+        from services.accounts_service import AccountsService
+
+        accounts_service._fetch_gateway_prices_immediate = (
+            AccountsService._fetch_gateway_prices_immediate.__get__(accounts_service)
+        )
+        accounts_service.gateway_client.quote_swap = AsyncMock()
+        accounts_service.gateway_client.get_balances.return_value = {
+            "balances": {"ETH": "0.000500329"}
+        }
+        rate_oracle = MagicMock()
+        rate_oracle.get_pair_rate.side_effect = lambda pair: (
+            Decimal("1919") if pair == "ETH-USDC" else None
+        )
+
+        with patch.object(RateOracle, "get_instance", return_value=rate_oracle):
+            result = await accounts_service.get_gateway_balances(
+                "ethereum", "0xwallet", network="arbitrum"
+            )
+
+        assert result == [
+            {
+                "token": "ETH",
+                "units": 0.000500329,
+                "price": 1919.0,
+                "value": 0.960131351,
+                "available_units": 0.000500329,
+            }
+        ]
+        accounts_service.gateway_client.quote_swap.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unpriced_positive_balance_is_incomplete_not_zero(self, accounts_service):
+        """An unknown positive token price must not become a zero valuation."""
+        from hummingbot.core.rate_oracle.rate_oracle import RateOracle
+        from services.accounts_service import AccountsService
+
+        accounts_service._fetch_gateway_prices_immediate = (
+            AccountsService._fetch_gateway_prices_immediate.__get__(accounts_service)
+        )
+        accounts_service.gateway_client.quote_swap = AsyncMock()
+        accounts_service.gateway_client.get_balances.return_value = {
+            "balances": {"ETH": "0.000500329"}
+        }
+        rate_oracle = MagicMock()
+        rate_oracle.get_pair_rate.return_value = None
+
+        with patch.object(RateOracle, "get_instance", return_value=rate_oracle):
+            result = await accounts_service.get_gateway_balances(
+                "ethereum", "0xwallet", network="arbitrum"
+            )
+
+        assert result == [
+            {
+                "token": "ETH",
+                "units": 0.000500329,
+                "price": None,
+                "value": None,
+                "available_units": 0.000500329,
+            }
+        ]
+        accounts_service.gateway_client.quote_swap.assert_not_called()
+
 
 class TestConnectorStartup:
     """Tests for connector startup ordering."""

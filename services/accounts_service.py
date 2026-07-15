@@ -2974,14 +2974,16 @@ class AccountsService:
                 if "USD" in token:
                     price = Decimal("1")
                 else:
-                    # all_prices is now keyed by token name directly
-                    price = Decimal(str(all_prices.get(token, 0)))
+                    # Keep unknown positive balances visible as unpriced so callers can
+                    # mark the portfolio checkpoint incomplete instead of undercounting NAV.
+                    fetched_price = all_prices.get(token)
+                    price = Decimal(str(fetched_price)) if fetched_price is not None else None
 
                 formatted_balances.append({
                     "token": token,
                     "units": float(balance["units"]),
-                    "price": float(price),
-                    "value": float(price * balance["units"]),
+                    "price": float(price) if price is not None else None,
+                    "value": float(price * balance["units"]) if price is not None else None,
                     "available_units": float(balance["units"])
                 })
 
@@ -3011,6 +3013,44 @@ class AccountsService:
 
         rate_oracle = RateOracle.get_instance()
         prices = {}
+        quote_asset = "USDC"
+
+        def cached_price(token: str) -> Optional[Decimal]:
+            token_upper = token.upper()
+            cache_tokens = [token_upper]
+            if token_upper == "ETH":
+                cache_tokens.append("WETH")
+            elif token_upper == "WETH":
+                cache_tokens.append("ETH")
+
+            for cached_token in cache_tokens:
+                try:
+                    rate = rate_oracle.get_pair_rate(f"{cached_token}-{quote_asset}")
+                    if rate is not None:
+                        rate = Decimal(str(rate))
+                        if rate > 0:
+                            return rate
+                except Exception as e:
+                    logger.debug("RateOracle cache lookup failed for %s: %s", cached_token, e)
+            return None
+
+        unresolved_tokens = []
+        for token in tokens:
+            token_upper = token.upper()
+            if token_upper == quote_asset:
+                prices[token] = Decimal("1")
+                rate_oracle.set_price(f"{token}-{quote_asset}", Decimal("1"))
+                continue
+
+            price = cached_price(token)
+            if price is not None:
+                prices[token] = price
+                logger.debug("Using cached price for %s: %s USDC", token, price)
+            else:
+                unresolved_tokens.append(token)
+
+        if not unresolved_tokens:
+            return prices
 
         # Construct full network name (e.g., "solana-mainnet-beta")
         full_network = f"{chain}-{network}"
@@ -3022,7 +3062,7 @@ class AccountsService:
         # Create tasks for all tokens in parallel
         tasks = []
         task_tokens = []
-        quote_asset = "USDC"
+        tokens = unresolved_tokens
 
         # On ethereum networks, use WETH price for ETH to avoid duplicate calls
         eth_needs_weth_price = False
@@ -3042,13 +3082,6 @@ class AccountsService:
 
         for token in tokens:
             token_upper = token.upper()
-
-            # Skip same-token quotes (e.g., USDC/USDC) - price is always 1
-            if token_upper == quote_asset.upper():
-                prices[token] = Decimal("1")
-                rate_oracle.set_price(f"{token}-{quote_asset}", Decimal("1"))
-                logger.debug(f"Skipping same-token quote for {token}, price=1")
-                continue
 
             try:
                 task = self.gateway_client.quote_swap(
