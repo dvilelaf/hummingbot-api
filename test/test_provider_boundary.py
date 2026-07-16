@@ -689,6 +689,41 @@ def test_provider_snapshot_exposes_aware_utc_observation_time_after_successful_r
     assert result.portfolio_observed_at_utc.tzinfo == timezone.utc
 
 
+def test_provider_snapshot_reports_unavailable_refresh_with_cached_portfolio():
+    provider_boundary = _provider_boundary_module()
+    provider_boundary._provider_available = _async_return(True)  # noqa: SLF001
+    provider_boundary._provider_capabilities = _async_return((["MARKET"], ["order"]))  # noqa: SLF001
+    provider_boundary._provider_trading_rule = _async_return(None)  # noqa: SLF001
+    service = FakeAccountsService()
+    service.update_success = False
+    service.accounts_state["master_account"]["binance"] = [
+        {"token": "USDT", "units": "5"},
+    ]
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="binance",
+                refresh_portfolio=True,
+                trading_pair="BTC-USDT",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "issues"
+    assert result.portfolio_observed_at_utc is None
+    assert "portfolio refresh unavailable" in result.operator_issues
+    assert result.portfolio == {
+        "master_account": {
+            "binance": [{"token": "USDT", "units": "5"}],
+        },
+    }
+
+
 @pytest.mark.parametrize("failure", ["raised", "connector_error"])
 def test_provider_snapshot_omits_observation_time_when_refresh_is_not_proven(failure):
     provider_boundary = _provider_boundary_module()

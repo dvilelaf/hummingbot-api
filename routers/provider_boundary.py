@@ -115,6 +115,8 @@ async def provider_snapshot(
             )
             if refresh_succeeded is True:
                 portfolio_observed_at_utc = datetime.now(timezone.utc)
+            else:
+                issues.append("portfolio refresh unavailable")
         except Exception as exc:
             issues.append(f"portfolio refresh unavailable: {_redact_secret_text(exc)}")
         xrpl_refresh_error = _connector_balance_refresh_error(accounts_service, connector_name)
