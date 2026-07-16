@@ -1530,9 +1530,16 @@ def _cowswap_reference_prices(
         for asset in (base_asset, quote_asset)
         if asset in stable_assets
     }
+    rate_base_asset = "ETH" if base_asset == "WETH" else base_asset
+    rate_quote_asset = "ETH" if quote_asset == "WETH" else quote_asset
     try:
         rate = Decimal(
-            str(request.app.state.market_data_service.get_rate(base_asset, quote_asset)),
+            str(
+                request.app.state.market_data_service.get_rate(
+                    rate_base_asset,
+                    rate_quote_asset,
+                )
+            ),
         )
     except Exception:
         return prices

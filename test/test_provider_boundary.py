@@ -299,8 +299,8 @@ class FakeMarketDataService:
         self.rate_calls = []
         self.trading_rule_calls = []
         self.rates = {
-            "USDC-WETH": Decimal("0.0004"),
-            "WETH-USDC": Decimal("2500"),
+            "USDC-ETH": Decimal("0.0004"),
+            "ETH-USDC": Decimal("2500"),
         }
 
     def get_rate(self, base, quote):
@@ -875,7 +875,7 @@ def test_cowswap_provider_snapshot_exposes_order_actions_when_runtime_ready():
     assert "provider actions missing: cowswap" not in result.operator_issues
     assert service._cowswap_runtime._connector.quote_sell_calls == []
     assert service._cowswap_runtime._connector.quote_buy_calls == []
-    assert market_data_service.rate_calls == [("WETH", "USDC")]
+    assert market_data_service.rate_calls == [("ETH", "USDC")]
     rows = result.portfolio["master_account"]["cowswap"]
     assert {
         "available_units": 0.0,
@@ -911,7 +911,7 @@ def test_cowswap_provider_snapshot_exposes_reverse_pair_gateway_balances():
     rows = result.portfolio["master_account"]["cowswap"]
     assert service._cowswap_runtime._connector.quote_sell_calls == []
     assert service._cowswap_runtime._connector.quote_buy_calls == []
-    assert market_data_service.rate_calls == [("USDC", "WETH")]
+    assert market_data_service.rate_calls == [("USDC", "ETH")]
     assert {"available_units": 5.0, "price": 1.0, "token": "USDC", "units": 5.0, "value": 5.0} in rows
     assert {
         "available_units": 0.0,
@@ -920,6 +920,35 @@ def test_cowswap_provider_snapshot_exposes_reverse_pair_gateway_balances():
         "units": 0.0,
         "value": 0.0,
     } in rows
+
+
+@pytest.mark.parametrize(
+    ("base_asset", "quote_asset", "rate_pair", "expected_call", "expected_prices"),
+    [
+        ("WETH", "USDC", ("ETH-USDC", Decimal("1885")), ("ETH", "USDC"), {"WETH": Decimal("1885"), "USDC": Decimal("1")}),
+        ("AERO", "USDC", ("AERO-USDC", Decimal("2.5")), ("AERO", "USDC"), {"AERO": Decimal("2.5"), "USDC": Decimal("1")}),
+        ("USDC", "USDT", ("USDC-USDT", Decimal("1")), ("USDC", "USDT"), {"USDC": Decimal("1"), "USDT": Decimal("1")}),
+    ],
+)
+def test_cowswap_reference_prices_aliases_only_weth(
+    base_asset,
+    quote_asset,
+    rate_pair,
+    expected_call,
+    expected_prices,
+):
+    provider_boundary = _provider_boundary_module()
+    request, market_data_service = _request_with_market_data()
+    market_data_service.rates = {rate_pair[0]: rate_pair[1]}
+
+    prices = provider_boundary._cowswap_reference_prices(
+        request,
+        base_asset=base_asset,
+        quote_asset=quote_asset,
+    )
+
+    assert market_data_service.rate_calls == [expected_call]
+    assert prices == expected_prices
 
 
 def test_cowswap_provider_snapshot_missing_reference_price_fails_closed():
@@ -944,7 +973,7 @@ def test_cowswap_provider_snapshot_missing_reference_price_fails_closed():
     assert result.status == "available"
     assert service._cowswap_runtime._connector.quote_sell_calls == []
     assert service._cowswap_runtime._connector.quote_buy_calls == []
-    assert market_data_service.rate_calls == [("USDC", "WETH")]
+    assert market_data_service.rate_calls == [("USDC", "ETH")]
     assert result.portfolio == {
         "master_account": {
             "cowswap": [
