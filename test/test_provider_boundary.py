@@ -3,7 +3,7 @@ import importlib.util
 import sys
 import types
 from datetime import timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -168,6 +168,22 @@ def _authorized_request():
     )
 
 
+def _cowswap_limit_buy_body(provider_boundary, *, correlation_id, mode="mainnet", price="1000", quantity="0.001"):
+    return provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id=correlation_id,
+        market_id="WETH-USDC",
+        mode=mode,
+        order_type="LIMIT",
+        preflight_only=False,
+        price=price,
+        quantity=quantity,
+        side="BUY",
+    )
+
+
 def _async_return(value):
     async def _inner(*_args, **_kwargs):
         return value
@@ -180,7 +196,8 @@ async def _unexpected_cowswap_runtime_prices(*, runtime, trading_pairs):  # noqa
 
 
 class FakeCowSwapEvmReader:
-    def __init__(self):
+    def __init__(self, events=None):
+        self.events = events if events is not None else []
         self.balances = {
             "WETH": "0",
             "USDC": "5000000",
@@ -191,14 +208,28 @@ class FakeCowSwapEvmReader:
         }
         self.balance_calls = []
         self.allowance_calls = []
+        self.approval_calls = []
+        self.approval_result = {"tx_hash": "0xapproval", "fee": "0.000021"}
+        self.approval_updates_allowance = True
 
     def balance_of(self, token, owner):
+        self.events.append("balance_of")
         self.balance_calls.append((token.symbol, owner))
         return self.balances.get(token.symbol, "0")
 
     def allowance(self, token, owner, spender):
+        self.events.append("allowance")
         self.allowance_calls.append((token.symbol, owner, spender))
         return self.allowances.get(token.symbol, "0")
+
+    def approve_cowswap_allowance(self, token, owner, spender, amount_atomic):
+        self.events.append("approve_cowswap_allowance")
+        self.approval_calls.append((token.symbol, owner, spender, str(amount_atomic)))
+        if isinstance(self.approval_result, Exception):
+            raise self.approval_result
+        if self.approval_updates_allowance:
+            self.allowances[token.symbol] = str(amount_atomic)
+        return self.approval_result
 
 
 class FakeCowSwapConnector:
@@ -321,9 +352,12 @@ class FakeMarketDataService:
 class FakeAccountsService:
     def __init__(self):
         self.gateway_client = FakeGatewayClient()
+        self.configured_accounts = ["master_account"]
+        self._connector_service = object()
         self.update_calls = []
         self.balance_refresh_errors = {}
-        self.cowswap_evm_reader = FakeCowSwapEvmReader()
+        self.events = []
+        self.cowswap_evm_reader = FakeCowSwapEvmReader(self.events)
         self._cowswap_runtime = FakeCowSwapRuntime()
         self._cowswap_runtime_dependencies = SimpleNamespace(
             evm_reader=self.cowswap_evm_reader,
@@ -347,6 +381,9 @@ class FakeAccountsService:
         self.account_positions = []
         self.position_calls = []
         self.position_refresh_error = None
+
+    def list_accounts(self):
+        return list(self.configured_accounts)
 
     async def get_account_positions(self, account_name, connector_name):
         self.position_calls.append((account_name, connector_name))
@@ -378,6 +415,7 @@ class FakeAccountsService:
         return self.balance_refresh_errors.get(connector_name)
 
     async def place_trade(self, **_kwargs):
+        self.events.append("place_trade")
         self.place_trade_calls.append(_kwargs)
         if self.place_trade_error is not None:
             raise self.place_trade_error
@@ -1184,6 +1222,42 @@ def test_cowswap_limit_preflight_uses_base_or_quote_spend_without_market_quote(
     assert service.cowswap_evm_reader.allowance_calls == [(spend_token, "0xowner", "0xvaultrelayer")]
 
 
+def test_cowswap_limit_buy_spend_requirement_rounds_down_in_spend_token_units():
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-limit-buy-round-down",
+        market_id="WETH-USDC",
+        mode="mainnet",
+        order_type="LIMIT",
+        preflight_only=True,
+        price="12345.678901234567",
+        quantity="1.23456789",
+        side="BUY",
+    )
+    sell_token, buy_token = service._cowswap_runtime._tokens_for_pair(body.market_id)
+
+    with localcontext() as context:
+        context.prec = 6
+        spend_token, spend_amount_atomic = asyncio.run(
+            provider_boundary._cowswap_spend_requirement_atomic(  # noqa: SLF001
+                body,
+                runtime=service._cowswap_runtime,
+                sell_token=sell_token,
+                buy_token=buy_token,
+                order_type="LIMIT",
+            ),
+        )
+
+    assert spend_token.symbol == "USDC"
+    assert spend_amount_atomic == "15241578751"
+
+
 @pytest.mark.parametrize("price", [None, "0", "-1"])
 def test_cowswap_limit_preflight_requires_positive_price(monkeypatch, price):
     global COWSWAP_ORDER_TYPES
@@ -1438,6 +1512,8 @@ def test_cowswap_limit_submit_forwards_order_type_and_price(monkeypatch):
     monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
     monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
     service = FakeAccountsService()
+    service.cowswap_evm_reader.balances["USDC"] = "50000000"
+    service.cowswap_evm_reader.allowances["USDC"] = "50000000"
 
     body = provider_boundary.ProviderIntentRequest(
         account_name="master_account",
@@ -1464,9 +1540,490 @@ def test_cowswap_limit_submit_forwards_order_type_and_price(monkeypatch):
     assert result.status == "submitted"
     assert service.place_trade_calls[0]["order_type"] == "LIMIT"
     assert service.place_trade_calls[0]["price"] == Decimal("2500")
+    assert service.cowswap_evm_reader.approval_calls == []
+    assert service.cowswap_evm_reader.allowance_calls == [("USDC", "0xowner", "0xvaultrelayer")]
 
 
-def test_cowswap_order_provider_preflight_rejects_insufficient_allowance(monkeypatch):
+@pytest.mark.parametrize(
+    ("mode", "headers", "expected_status"),
+    [
+        ("testnet", {"x-marlin-provider-intent-token": PROVIDER_INTENT_TOKEN}, "submitted"),
+        ("mainnet", {}, "rejected"),
+    ],
+)
+def test_cowswap_actual_limit_approval_requires_authorized_mainnet(monkeypatch, mode, headers, expected_status):
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id=f"cow-limit-{mode}-no-approval",
+        market_id="WETH-USDC",
+        mode=mode,
+        order_type="LIMIT",
+        preflight_only=False,
+        price="1000",
+        quantity="0.001",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            SimpleNamespace(headers=headers),
+            service,
+        ),
+    )
+
+    assert result.status == expected_status
+    assert service.cowswap_evm_reader.approval_calls == []
+    assert service.cowswap_evm_reader.balance_calls == []
+
+
+def test_cowswap_actual_market_with_insufficient_allowance_keeps_submission_path(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"MARKET": "MARKET"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.balances["USDC"] = "0"
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-market-insufficient-allowance",
+        market_id="WETH-USDC",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=False,
+        quantity="0.001",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "submitted"
+    assert len(service.place_trade_calls) == 1
+    assert service.cowswap_evm_reader.balance_calls == []
+    assert service.cowswap_evm_reader.allowance_calls == []
+    assert service.cowswap_evm_reader.approval_calls == []
+    assert service._cowswap_runtime._connector.quote_buy_calls == []
+    assert service._cowswap_runtime._connector.quote_sell_calls == []
+
+
+@pytest.mark.parametrize(
+    ("blocker_kind", "expected_status", "expected_error"),
+    [
+        ("account", "rejected", "Account 'master_account' not found"),
+        ("connector", "failed", "Connector service not initialized"),
+        ("runtime", "failed", "CowSwap runtime unavailable"),
+    ],
+)
+def test_cowswap_limit_submit_rejects_deterministic_blocker_before_approval(
+    monkeypatch,
+    blocker_kind,
+    expected_status,
+    expected_error,
+):
+    global COWSWAP_BLOCKER, COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+    if blocker_kind == "account":
+        service.configured_accounts = []
+        status_code = 404
+    elif blocker_kind == "connector":
+        service._connector_service = None
+        status_code = 500
+    else:
+        COWSWAP_BLOCKER = expected_error
+        status_code = 503
+    service.place_trade_error = provider_boundary.HTTPException(status_code, expected_error)
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            _cowswap_limit_buy_body(provider_boundary, correlation_id=f"cow-limit-{blocker_kind}-blocked"),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == expected_status
+    assert result.provider_error == expected_error
+    assert service.cowswap_evm_reader.balance_calls == []
+    assert service.cowswap_evm_reader.allowance_calls == []
+    assert service.cowswap_evm_reader.approval_calls == []
+    assert service.place_trade_calls == []
+
+
+def test_cowswap_limit_submit_fails_account_enumeration_before_approval(monkeypatch):
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+
+    def fail_account_enumeration():
+        raise RuntimeError("account enumeration failed token=secret-value")
+
+    service.list_accounts = fail_account_enumeration
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            _cowswap_limit_buy_body(provider_boundary, correlation_id="cow-limit-account-enumeration-failed"),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "failed"
+    assert "account enumeration failed" in result.provider_error
+    assert "secret-value" not in result.provider_error
+    assert "<redacted>" in result.provider_error
+    assert service.cowswap_evm_reader.balance_calls == []
+    assert service.cowswap_evm_reader.allowance_calls == []
+    assert service.cowswap_evm_reader.approval_calls == []
+    assert service.place_trade_calls == []
+
+
+def test_cowswap_limit_submit_approves_insufficient_allowance_once_before_order(monkeypatch):
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-limit-submit-approval",
+        market_id="WETH-USDC",
+        mode="mainnet",
+        order_type="LIMIT",
+        preflight_only=False,
+        price="1000",
+        quantity="0.001",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "submitted"
+    assert result.external_order_id == "order-1"
+    assert result.external_transaction_id == "0xapproval"
+    assert result.fee_asset == "ETH"
+    assert result.fee_amount == Decimal("0.000021")
+    assert result.submitted_notional == Decimal("1")
+    assert result.provider_status == "submitted"
+    assert service.cowswap_evm_reader.approval_calls == [
+        ("USDC", "0xowner", "0xvaultrelayer", "1000000")
+    ]
+    assert service.cowswap_evm_reader.allowance_calls == [
+        ("USDC", "0xowner", "0xvaultrelayer"),
+        ("USDC", "0xowner", "0xvaultrelayer"),
+    ]
+    assert service.events == [
+        "balance_of",
+        "allowance",
+        "approve_cowswap_allowance",
+        "allowance",
+        "place_trade",
+    ]
+    assert len(service.place_trade_calls) == 1
+
+
+def test_cowswap_limit_reduce_approval_uses_clipped_submitted_amount(monkeypatch):
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"SELL": "SELL"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(
+        provider_boundary,
+        "PositionAction",
+        SimpleNamespace(OPEN="OPEN", CLOSE="CLOSE"),
+    )
+    service = FakeAccountsService()
+    service.account_positions = [
+        {"trading_pair": "WETH-USDC", "side": "LONG", "amount": "0.0004"},
+    ]
+    service.cowswap_evm_reader.balances["WETH"] = "1000000000000000"
+    service.cowswap_evm_reader.allowances["WETH"] = "0"
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-limit-reduce-clipped",
+        market_id="WETH-USDC",
+        mode="mainnet",
+        order_type="LIMIT",
+        preflight_only=False,
+        price="1000",
+        quantity="0.001",
+        side="SELL",
+        position_effect="reduce",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "submitted"
+    assert result.submitted_quantity == Decimal("0.0004")
+    assert service.place_trade_calls[0]["amount"] == Decimal("0.0004")
+    assert service.place_trade_calls[0]["position_action"] == "CLOSE"
+    assert service.cowswap_evm_reader.approval_calls == [
+        ("WETH", "0xowner", "0xvaultrelayer", "400000000000000"),
+    ]
+
+
+def test_cowswap_limit_submit_treats_zero_hash_zero_fee_as_approval_noop(monkeypatch):
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+    service.cowswap_evm_reader.approval_result = {"tx_hash": "0x" + "0" * 64, "fee": "0"}
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            _cowswap_limit_buy_body(provider_boundary, correlation_id="cow-limit-approval-noop"),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "submitted"
+    assert result.external_transaction_id is None
+    assert result.fee_asset is None
+    assert result.fee_amount is None
+    assert len(service.place_trade_calls) == 1
+
+
+@pytest.mark.parametrize("failure_kind", ["http", "generic"])
+def test_cowswap_limit_submit_failure_preserves_approval_transaction(failure_kind, monkeypatch):
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+    service.place_trade_error = (
+        provider_boundary.HTTPException(400, "order rejected")
+        if failure_kind == "http"
+        else RuntimeError("order failed")
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            _cowswap_limit_buy_body(provider_boundary, correlation_id=f"cow-limit-{failure_kind}-failure"),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == ("rejected" if failure_kind == "http" else "failed")
+    assert result.external_order_id is None
+    assert result.external_transaction_id == "0xapproval"
+    assert result.fee_asset == "ETH"
+    assert result.fee_amount == Decimal("0.000021")
+    assert len(service.place_trade_calls) == 1
+
+
+@pytest.mark.parametrize("approval_result", [{"tx_hash": "0xapproval"}, RuntimeError("approval failed")])
+def test_cowswap_limit_submit_rejects_malformed_or_failed_approval_without_order(monkeypatch, approval_result):
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+    service.cowswap_evm_reader.approval_result = approval_result
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-limit-submit-malformed-approval",
+        market_id="WETH-USDC",
+        mode="mainnet",
+        order_type="LIMIT",
+        preflight_only=False,
+        price="1000",
+        quantity="0.001",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "failed"
+    assert service.cowswap_evm_reader.approval_calls == [
+        ("USDC", "0xowner", "0xvaultrelayer", "1000000")
+    ]
+    assert service.place_trade_calls == []
+
+
+def test_cowswap_limit_submit_preserves_confirmed_hash_when_approval_fee_is_invalid(monkeypatch):
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+    confirmed_hash = "0x" + "a" * 64
+    approval_error = RuntimeError("Gateway CoW approval returned an invalid fee")
+    approval_error.confirmed_tx_hash = confirmed_hash
+    service.cowswap_evm_reader.approval_result = approval_error
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            _cowswap_limit_buy_body(provider_boundary, correlation_id="cow-limit-invalid-approval-fee"),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "failed"
+    assert result.external_transaction_id == confirmed_hash
+    assert result.fee_asset is None
+    assert result.fee_amount is None
+    assert len(service.cowswap_evm_reader.approval_calls) == 1
+    assert service.place_trade_calls == []
+
+
+def test_cowswap_limit_submit_rejects_insufficient_balance_before_approval(monkeypatch):
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.balances["USDC"] = "0"
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            _cowswap_limit_buy_body(provider_boundary, correlation_id="cow-limit-insufficient-balance"),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "failed"
+    assert service.cowswap_evm_reader.approval_calls == []
+    assert service.place_trade_calls == []
+
+
+def test_cowswap_limit_submit_fails_when_approval_does_not_raise_allowance(monkeypatch):
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    monkeypatch.setattr(provider_boundary, "TradeType", {"BUY": "BUY"})
+    monkeypatch.setattr(provider_boundary, "OrderType", {"LIMIT": "LIMIT"})
+    monkeypatch.setattr(provider_boundary, "PositionAction", SimpleNamespace(OPEN="OPEN"))
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+    service.cowswap_evm_reader.approval_updates_allowance = False
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-limit-submit-still-insufficient",
+        market_id="WETH-USDC",
+        mode="mainnet",
+        order_type="LIMIT",
+        preflight_only=False,
+        price="1000",
+        quantity="0.001",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "failed"
+    assert "allowance" in result.provider_error
+    assert result.external_transaction_id == "0xapproval"
+    assert result.fee_asset == "ETH"
+    assert result.fee_amount == Decimal("0.000021")
+    assert len(service.cowswap_evm_reader.approval_calls) == 1
+    assert len(service.cowswap_evm_reader.allowance_calls) == 2
+    assert service.place_trade_calls == []
+
+
+def test_cowswap_order_provider_preflight_rejects_insufficient_market_allowance(monkeypatch):
     monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
     provider_boundary = _provider_boundary_module()
     service = FakeAccountsService()
@@ -1477,6 +2034,85 @@ def test_cowswap_order_provider_preflight_rejects_insufficient_allowance(monkeyp
         action="order",
         connector_name="cowswap",
         correlation_id="cow-sell-no-allowance",
+        market_id="USDC-WETH",
+        mode="mainnet",
+        order_type="MARKET",
+        preflight_only=True,
+        quantity="0.00005",
+        side="SELL",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert result.provider_error == "insufficient USDC allowance for CoW VaultRelayer"
+    assert service.cowswap_evm_reader.approval_calls == []
+
+
+@pytest.mark.parametrize("mode, expected_status", [("mainnet", "accepted"), ("testnet", "rejected")])
+def test_cowswap_order_provider_preflight_accepts_insufficient_limit_allowance_for_approval(
+    monkeypatch,
+    mode,
+    expected_status,
+):
+    global COWSWAP_ORDER_TYPES
+    COWSWAP_ORDER_TYPES = ["MARKET", "LIMIT"]
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-limit-no-allowance",
+        market_id="WETH-USDC",
+        mode=mode,
+        order_type="LIMIT",
+        preflight_only=True,
+        price="1000",
+        quantity="0.001",
+        side="BUY",
+    )
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            body,
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == expected_status
+    if mode == "mainnet":
+        assert result.provider_status == "preflight_accepted:LIMIT:approval_required"
+    else:
+        assert result.provider_error == "insufficient USDC allowance for CoW VaultRelayer"
+    assert service.cowswap_evm_reader.approval_calls == []
+    assert service.cowswap_evm_reader.balance_calls == [("USDC", "0xowner")]
+    assert service.cowswap_evm_reader.allowance_calls == [("USDC", "0xowner", "0xvaultrelayer")]
+    assert service.place_trade_calls == []
+
+
+def test_cowswap_order_provider_preflight_rejects_insufficient_allowance_without_approval_capability(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.cowswap_evm_reader.allowances["USDC"] = "0"
+    service.cowswap_evm_reader.approve_cowswap_allowance = None
+
+    body = provider_boundary.ProviderIntentRequest(
+        account_name="master_account",
+        action="order",
+        connector_name="cowswap",
+        correlation_id="cow-sell-no-approval-capability",
         market_id="USDC-WETH",
         mode="mainnet",
         order_type="MARKET",

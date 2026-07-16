@@ -6,6 +6,7 @@ import importlib
 import hashlib
 import json
 import os
+import re
 import ssl
 import urllib.error
 import urllib.request
@@ -37,6 +38,14 @@ BASE_USDC = {
 
 class CowSwapRuntimeUnavailableError(RuntimeError):
     """Raised when CowSwap runtime wiring is missing or unsafe."""
+
+
+class CowSwapApprovalReceiptError(CowSwapRuntimeUnavailableError):
+    """Raised when Gateway confirms an approval transaction but its receipt is incomplete."""
+
+    def __init__(self, message: str, *, confirmed_tx_hash: str | None) -> None:
+        super().__init__(message)
+        self.confirmed_tx_hash = confirmed_tx_hash
 
 
 class CowSwapRuntimeStatus(NamedTuple):
@@ -197,6 +206,84 @@ class GatewayEvmReader:
         if not isinstance(approvals, Mapping):
             raise CowSwapRuntimeUnavailableError("Gateway allowances response is missing approvals")
         return _human_amount_to_atomic(str(approvals.get(token.symbol, "0")), int(token.decimals))
+
+    def approve_cowswap_allowance(self, token: Any, owner: str, spender: str, amount_atomic: str) -> dict[str, Any]:
+        """Approve the exact CoW VaultRelayer spend amount through Gateway."""
+        token_address = str(getattr(token, "address", "")).strip()
+        owner = str(owner).strip()
+        spender = str(spender).strip()
+        amount_atomic = str(amount_atomic).strip()
+        if not token_address or not owner or not spender or not amount_atomic.isascii() or not amount_atomic.isdecimal():
+            raise CowSwapRuntimeUnavailableError("Gateway CoW approval requires non-empty addresses and atomic amount")
+        if int(amount_atomic) <= 0:
+            raise CowSwapRuntimeUnavailableError("Gateway CoW approval amount must be positive")
+
+        response = _gateway_post(
+            self.gateway_url,
+            "wallet/marlin-cow/approve",
+            {
+                "chain": "ethereum",
+                "network": self.network,
+                "address": owner,
+                "walletRef": "base:mainnet:evm_gateway",
+                "tokenAddress": token_address,
+                "spender": spender,
+                "amountAtomic": amount_atomic,
+                "liveActionAuthorization": {
+                    "source": "marlin",
+                    "scope": "provider_intent",
+                    "action": "cowswap_approve",
+                    "connector_id": COWSWAP_CONNECTOR_NAME,
+                    "network": self.network,
+                    "wallet_address": owner,
+                    "token_address": token_address,
+                    "spender_address": spender,
+                    "amount_atomic": amount_atomic,
+                },
+            },
+            headers={"x-marlin-gateway-provider-intent-token": _marlin_gateway_provider_intent_token()},
+            timeout=90,
+        )
+        status = response.get("status")
+        signature = response.get("signature")
+        data = response.get("data")
+        if type(status) is not int or status != 1 or not isinstance(signature, str):
+            raise CowSwapRuntimeUnavailableError("Gateway CoW approval returned malformed success response")
+        if re.fullmatch(r"0x[0-9a-fA-F]{64}", signature) is None:
+            raise CowSwapRuntimeUnavailableError("Gateway CoW approval returned an invalid signature")
+        confirmed_tx_hash = None if signature.casefold() == "0x" + "0" * 64 else signature
+        if not isinstance(data, Mapping):
+            raise CowSwapApprovalReceiptError(
+                "Gateway CoW approval returned malformed success response",
+                confirmed_tx_hash=confirmed_tx_hash,
+            )
+        if (
+            not isinstance(data.get("tokenAddress"), str)
+            or data["tokenAddress"].lower() != token_address.lower()
+            or not isinstance(data.get("spender"), str)
+            or data["spender"].lower() != spender.lower()
+            or not isinstance(data.get("amountAtomic"), str)
+            or data["amountAtomic"] != amount_atomic
+        ):
+            raise CowSwapApprovalReceiptError(
+                "Gateway CoW approval response does not match requested binding",
+                confirmed_tx_hash=confirmed_tx_hash,
+            )
+        try:
+            fee = Decimal(str(data["fee"]))
+        except (ArithmeticError, TypeError, ValueError, KeyError) as exc:
+            raise CowSwapApprovalReceiptError(
+                "Gateway CoW approval returned an invalid fee",
+                confirmed_tx_hash=confirmed_tx_hash,
+            ) from exc
+        if not fee.is_finite() or fee < 0:
+            raise CowSwapApprovalReceiptError(
+                "Gateway CoW approval returned an invalid fee",
+                confirmed_tx_hash=confirmed_tx_hash,
+            )
+        if signature.casefold() == "0x" + "0" * 64 and fee != 0:
+            raise CowSwapRuntimeUnavailableError("Gateway CoW approval zero hash must have zero fee")
+        return {"tx_hash": signature, "fee": fee}
 
 
 def build_cowswap_runtime(
@@ -710,6 +797,7 @@ def _gateway_post(
     payload: Mapping[str, Any],
     *,
     headers: Mapping[str, str] | None = None,
+    timeout: float = 15,
 ) -> dict[str, Any]:
     request_headers = {"content-type": "application/json"}
     if headers is not None:
@@ -722,7 +810,7 @@ def _gateway_post(
     )
     try:
         context = _gateway_ssl_context() if gateway_url.rstrip("/").startswith("https://") else None
-        with urllib.request.urlopen(request, timeout=15, context=context) as response:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
             data = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")

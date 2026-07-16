@@ -1,7 +1,10 @@
 import asyncio
 import importlib.util
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "services" / "cowswap_runtime.py"
 ROOT = MODULE_PATH.parents[1]
@@ -24,7 +27,9 @@ place_cowswap_order = cowswap_runtime.place_cowswap_order
 build_cowswap_runtime = cowswap_runtime.build_cowswap_runtime
 CowSwapRuntimeDependencies = cowswap_runtime.CowSwapRuntimeDependencies
 CowSwapRuntimeUnavailableError = cowswap_runtime.CowSwapRuntimeUnavailableError
+CowSwapApprovalReceiptError = cowswap_runtime.CowSwapApprovalReceiptError
 GatewayCowSigner = cowswap_runtime.GatewayCowSigner
+GatewayEvmReader = cowswap_runtime.GatewayEvmReader
 
 
 def missing_importer(name):
@@ -264,6 +269,233 @@ def test_gateway_cow_signer_uses_marlin_scoped_gateway_route(monkeypatch):
             {"x-marlin-gateway-provider-intent-token": "gateway-token"},
         )
     ]
+
+
+def test_gateway_evm_reader_approves_exact_cowswap_allowance(monkeypatch):
+    calls = []
+    token = SimpleNamespace(
+        address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        symbol="USDC",
+        decimals=6,
+    )
+    owner = "0x00000000000000000000000000000000000000aa"
+    spender = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"
+
+    def fake_gateway_post(gateway_url, path, payload, *, headers=None, timeout=15):
+        calls.append((gateway_url, path, payload, headers, timeout))
+        return {
+            "signature": "0x" + "a" * 64,
+            "status": 1,
+            "data": {
+                "tokenAddress": token.address.lower(),
+                "spender": spender.lower(),
+                "amountAtomic": "1000000",
+                "nonce": 7,
+                "fee": "0.000021",
+            },
+        }
+
+    monkeypatch.setenv("MARLIN_GATEWAY_PROVIDER_INTENT_TOKEN", "gateway-token")
+    monkeypatch.setattr(cowswap_runtime, "_gateway_post", fake_gateway_post)
+
+    result = GatewayEvmReader(gateway_url="http://localhost:15888/", network="base").approve_cowswap_allowance(
+        token,
+        owner,
+        spender,
+        "1000000",
+    )
+
+    assert result == {"tx_hash": "0x" + "a" * 64, "fee": Decimal("0.000021")}
+    assert calls == [
+        (
+            "http://localhost:15888",
+            "wallet/marlin-cow/approve",
+            {
+                "chain": "ethereum",
+                "network": "base",
+                "address": owner,
+                "walletRef": "base:mainnet:evm_gateway",
+                "tokenAddress": token.address,
+                "spender": spender,
+                "amountAtomic": "1000000",
+                "liveActionAuthorization": {
+                    "source": "marlin",
+                    "scope": "provider_intent",
+                    "action": "cowswap_approve",
+                    "connector_id": "cowswap",
+                    "network": "base",
+                    "wallet_address": owner,
+                    "token_address": token.address,
+                    "spender_address": spender,
+                    "amount_atomic": "1000000",
+                },
+            },
+            {"x-marlin-gateway-provider-intent-token": "gateway-token"},
+            90,
+        )
+    ]
+
+
+def test_gateway_evm_reader_rejects_malformed_cowswap_approval_success(monkeypatch):
+    token = SimpleNamespace(
+        address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        symbol="USDC",
+        decimals=6,
+    )
+    valid_data = {
+        "tokenAddress": token.address,
+        "spender": "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+        "amountAtomic": "1000000",
+        "fee": "0.000021",
+    }
+    responses = [
+        {"signature": "0xapproval", "status": 0, "data": valid_data},
+        {"status": 1, "data": valid_data},
+        {"signature": "0xapproval", "status": 1, "data": valid_data},
+        {
+            "signature": "0xapproval",
+            "status": 1,
+            "data": {**valid_data, "spender": "0x0000000000000000000000000000000000000001"},
+        },
+        {"signature": "0xapproval", "status": 1, "data": {**valid_data, "fee": "NaN"}},
+    ]
+
+    monkeypatch.setenv("MARLIN_GATEWAY_PROVIDER_INTENT_TOKEN", "gateway-token")
+    for response in responses:
+        monkeypatch.setattr(cowswap_runtime, "_gateway_post", lambda *args, response=response, **kwargs: response)
+        with pytest.raises(CowSwapRuntimeUnavailableError):
+            GatewayEvmReader(gateway_url="http://localhost:15888", network="base").approve_cowswap_allowance(
+                token,
+                "0x00000000000000000000000000000000000000aa",
+                valid_data["spender"],
+                "1000000",
+            )
+
+
+@pytest.mark.parametrize("failure_kind", ["malformed_data", "binding", "missing_fee", "malformed_fee"])
+def test_gateway_evm_reader_preserves_confirmed_hash_after_valid_signature(monkeypatch, failure_kind):
+    token = SimpleNamespace(
+        address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        symbol="USDC",
+        decimals=6,
+    )
+    confirmed_hash = "0x" + "a" * 64
+    spender = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"
+    data = {
+        "tokenAddress": token.address,
+        "spender": spender,
+        "amountAtomic": "1000000",
+        "fee": "0.000021",
+    }
+    if failure_kind == "malformed_data":
+        data = None
+    elif failure_kind == "binding":
+        data["spender"] = "0x0000000000000000000000000000000000000001"
+    elif failure_kind == "missing_fee":
+        data.pop("fee")
+    else:
+        data["fee"] = "NaN"
+    response = {
+        "signature": confirmed_hash,
+        "status": 1,
+        "data": data,
+    }
+    monkeypatch.setattr(cowswap_runtime, "_gateway_post", lambda *args, **kwargs: response)
+
+    with pytest.raises(CowSwapApprovalReceiptError) as error:
+        GatewayEvmReader(gateway_url="http://localhost:15888", network="base").approve_cowswap_allowance(
+            token,
+            "0x00000000000000000000000000000000000000aa",
+            spender,
+            "1000000",
+        )
+
+    assert error.value.confirmed_tx_hash == confirmed_hash
+
+
+def test_gateway_evm_reader_zero_hash_malformed_binding_has_no_confirmed_transaction(monkeypatch):
+    token = SimpleNamespace(
+        address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        symbol="USDC",
+        decimals=6,
+    )
+    spender = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"
+    response = {
+        "signature": "0x" + "0" * 64,
+        "status": 1,
+        "data": {
+            "tokenAddress": token.address,
+            "spender": "0x0000000000000000000000000000000000000001",
+            "amountAtomic": "1000000",
+            "fee": "0",
+        },
+    }
+    monkeypatch.setattr(cowswap_runtime, "_gateway_post", lambda *args, **kwargs: response)
+
+    with pytest.raises(CowSwapApprovalReceiptError) as error:
+        GatewayEvmReader(gateway_url="http://localhost:15888", network="base").approve_cowswap_allowance(
+            token,
+            "0x00000000000000000000000000000000000000aa",
+            spender,
+            "1000000",
+        )
+
+    assert error.value.confirmed_tx_hash is None
+
+
+def test_gateway_evm_reader_rejects_zero_hash_with_nonzero_fee(monkeypatch):
+    token = SimpleNamespace(
+        address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        symbol="USDC",
+        decimals=6,
+    )
+    response = {
+        "signature": "0x" + "0" * 64,
+        "status": 1,
+        "data": {
+            "tokenAddress": token.address,
+            "spender": "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+            "amountAtomic": "1000000",
+            "fee": "0.000001",
+        },
+    }
+    monkeypatch.setattr(cowswap_runtime, "_gateway_post", lambda *args, **kwargs: response)
+
+    with pytest.raises(CowSwapRuntimeUnavailableError):
+        GatewayEvmReader(gateway_url="http://localhost:15888", network="base").approve_cowswap_allowance(
+            token,
+            "0x00000000000000000000000000000000000000aa",
+            response["data"]["spender"],
+            "1000000",
+        )
+
+
+def test_gateway_evm_reader_allows_zero_hash_zero_fee_noop(monkeypatch):
+    token = SimpleNamespace(
+        address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        symbol="USDC",
+        decimals=6,
+    )
+    response = {
+        "signature": "0x" + "0" * 64,
+        "status": 1,
+        "data": {
+            "tokenAddress": token.address,
+            "spender": "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",
+            "amountAtomic": "1000000",
+            "fee": "0",
+        },
+    }
+    monkeypatch.setattr(cowswap_runtime, "_gateway_post", lambda *args, **kwargs: response)
+
+    result = GatewayEvmReader(gateway_url="http://localhost:15888", network="base").approve_cowswap_allowance(
+        token,
+        "0x00000000000000000000000000000000000000aa",
+        response["data"]["spender"],
+        "1000000",
+    )
+
+    assert result == {"tx_hash": "0x" + "0" * 64, "fee": Decimal("0")}
 
 
 def test_cowswap_order_blocker_clears_only_with_explicit_runtime_dependencies():

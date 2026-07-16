@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -420,6 +421,57 @@ async def _submit_order_intent(
             correlation_id=body.correlation_id,
             provider_error=_redact_secret_text(exc.detail),
         )
+    should_approve_cowswap = (
+        body.connector_name == COWSWAP_CONNECTOR_NAME
+        and provider_intent_authorized
+        and order_type == "LIMIT"
+    )
+    if should_approve_cowswap:
+        try:
+            configured_accounts = await asyncio.to_thread(accounts_service.list_accounts)
+        except Exception as exc:
+            redacted = _redact_secret_text(exc)
+            return ProviderIntentResponse(
+                status="failed",
+                correlation_id=body.correlation_id,
+                provider_error=redacted,
+                retry_after_seconds=_intent_retry_after_seconds(body, redacted),
+            )
+        eligibility_error: HTTPException | None = None
+        if body.account_name not in configured_accounts:
+            eligibility_error = HTTPException(status_code=404, detail=f"Account '{body.account_name}' not found")
+        elif not getattr(accounts_service, "_connector_service", None):
+            eligibility_error = HTTPException(status_code=500, detail="Connector service not initialized")
+        elif blocker := _cowswap_provider_runtime_blocker(accounts_service):
+            eligibility_error = HTTPException(status_code=503, detail=blocker)
+        if eligibility_error is not None:
+            redacted = _redact_secret_text(eligibility_error.detail)
+            return ProviderIntentResponse(
+                status="rejected" if eligibility_error.status_code < 500 else "failed",
+                correlation_id=body.correlation_id,
+                provider_error=redacted,
+                retry_after_seconds=_intent_retry_after_seconds(body, redacted),
+            )
+    response_fields: dict[str, Any] = {}
+    if should_approve_cowswap:
+        try:
+            await _cowswap_submit_allowance(
+                body,
+                accounts_service,
+                amount=amount,
+                order_type=order_type,
+                response_fields=response_fields,
+            )
+        except Exception as exc:
+            redacted = _redact_secret_text(exc)
+            logger.error("CowSwap allowance approval failed: %s", redacted)
+            return ProviderIntentResponse(
+                status="failed",
+                correlation_id=body.correlation_id,
+                provider_error=redacted,
+                retry_after_seconds=_intent_retry_after_seconds(body, redacted),
+                **response_fields,
+            )
     connector_market = (
         connector_trading_pair(body.connector_name, body.market_id)
         if body.mode == "mainnet"
@@ -445,6 +497,7 @@ async def _submit_order_intent(
             correlation_id=body.correlation_id,
             provider_error=redacted,
             retry_after_seconds=_intent_retry_after_seconds(body, redacted),
+            **response_fields,
         )
     except Exception as exc:
         redacted = _redact_secret_text(exc)
@@ -454,6 +507,7 @@ async def _submit_order_intent(
             correlation_id=body.correlation_id,
             provider_error=redacted,
             retry_after_seconds=_intent_retry_after_seconds(body, redacted),
+            **response_fields,
         )
     return ProviderIntentResponse(
         status="submitted",
@@ -462,6 +516,7 @@ async def _submit_order_intent(
         submitted_quantity=amount,
         submitted_notional=amount * body.price if body.price is not None else None,
         provider_status="submitted",
+        **response_fields,
     )
 
 
@@ -566,7 +621,7 @@ async def _preflight_cowswap_order_intent(
         owner = runtime_dependencies.owner_address
         if evm_reader is None or not owner:
             raise ValueError("CowSwap EVM reader or owner address missing")
-        balance_atomic = int(evm_reader.balance_of(spend_token, owner))
+        balance_atomic = int(await asyncio.to_thread(evm_reader.balance_of, spend_token, owner))
         required_atomic = int(spend_amount_atomic)
         if balance_atomic < required_atomic:
             return ProviderIntentResponse(
@@ -575,17 +630,30 @@ async def _preflight_cowswap_order_intent(
                 provider_error=f"insufficient {spend_token.symbol} balance",
             )
         allowance_atomic = int(
-            evm_reader.allowance(
+            await asyncio.to_thread(
+                evm_reader.allowance,
                 spend_token,
                 owner,
                 _cowswap_vault_relayer(runtime),
             )
         )
         if allowance_atomic < required_atomic:
+            if (
+                body.mode != "mainnet"
+                or order_type != "LIMIT"
+                or not callable(getattr(evm_reader, "approve_cowswap_allowance", None))
+            ):
+                return ProviderIntentResponse(
+                    status="rejected",
+                    correlation_id=body.correlation_id,
+                    provider_error=f"insufficient {spend_token.symbol} allowance for CoW VaultRelayer",
+                )
             return ProviderIntentResponse(
-                status="rejected",
+                status="accepted",
                 correlation_id=body.correlation_id,
-                provider_error=f"insufficient {spend_token.symbol} allowance for CoW VaultRelayer",
+                provider_status=f"preflight_accepted:{order_type}:approval_required",
+                submitted_quantity=body.quantity,
+                submitted_notional=body.quantity * body.price if body.price is not None else None,
             )
     except Exception as exc:
         redacted = _redact_secret_text(exc)
@@ -641,20 +709,45 @@ async def _cowswap_spend_requirement_atomic(
     sell_token: Any,
     buy_token: Any,
     order_type: str,
+    amount: Decimal | None = None,
 ) -> tuple[Any, str]:
+    requested_amount = body.quantity if amount is None else amount
     if order_type == "LIMIT":
         if body.side == "SELL":
             return sell_token, _cowswap_amount_to_atomic(
-                str(body.quantity),
+                str(requested_amount),
                 int(sell_token.decimals),
             )
         if body.side == "BUY":
             if body.price is None:
                 raise ValueError("CowSwap LIMIT orders require a positive price")
-            return buy_token, _cowswap_amount_to_atomic(
-                str(body.quantity * body.price),
-                int(buy_token.decimals),
+            price = Decimal(str(body.price))
+            if not price.is_finite() or price <= 0:
+                raise ValueError("CowSwap LIMIT orders require a positive price")
+            buy_amount_atomic = int(
+                _cowswap_amount_to_atomic(str(requested_amount), int(sell_token.decimals))
             )
+            if buy_amount_atomic > 2**256 - 1:
+                raise ValueError("LIMIT atomic amount exceeds uint256")
+            _, price_digits, price_exponent = price.as_tuple()
+            price_coefficient = int("".join(map(str, price_digits)))
+            scale_exponent = price_exponent + int(buy_token.decimals) - int(sell_token.decimals)
+            coefficient_digits = len(str(buy_amount_atomic)) + len(price_digits)
+            if scale_exponent >= 0 and coefficient_digits + scale_exponent > 79:
+                raise ValueError("LIMIT atomic amount exceeds uint256")
+            if scale_exponent < 0 and -scale_exponent > coefficient_digits:
+                required_atomic = 0
+            else:
+                numerator = buy_amount_atomic * price_coefficient
+                if scale_exponent >= 0:
+                    numerator *= 10**scale_exponent
+                    denominator = 1
+                else:
+                    denominator = 10**(-scale_exponent)
+                required_atomic = numerator // denominator
+            if not 0 < required_atomic <= 2**256 - 1:
+                raise ValueError("LIMIT atomic amount must be positive and uint256-compatible")
+            return buy_token, str(required_atomic)
         raise ValueError("CowSwap side must be BUY or SELL")
     if body.side == "SELL":
         _cowswap_amount_to_atomic(str(body.quantity), int(sell_token.decimals))
@@ -666,7 +759,7 @@ async def _cowswap_spend_requirement_atomic(
             quote, _minimum_buy_amount = await quote_sell(
                 sell_token,
                 buy_token,
-                str(body.quantity),
+                str(requested_amount),
             )
         except Exception as exc:
             raise ValueError(f"preflight CowSwap SELL quote unavailable: {exc}") from exc
@@ -681,13 +774,86 @@ async def _cowswap_spend_requirement_atomic(
             _quote, maximum_sell_amount = await quote_buy(
                 sell_token,
                 buy_token,
-                str(body.quantity),
+                str(requested_amount),
             )
         except Exception as exc:
             raise ValueError(f"preflight CowSwap BUY quote unavailable: {exc}") from exc
         _validate_cowswap_preflight_quote(_quote)
         return sell_token, str(maximum_sell_amount)
     raise ValueError("CowSwap side must be BUY or SELL")
+
+
+async def _cowswap_submit_allowance(
+    body: ProviderIntentRequest,
+    accounts_service: AccountsService,
+    *,
+    amount: Decimal,
+    order_type: str,
+    response_fields: dict[str, Any],
+) -> tuple[str | None, Decimal | None]:
+    runtime = getattr(accounts_service, "_cowswap_runtime", None)
+    runtime_dependencies = getattr(accounts_service, "_cowswap_runtime_dependencies", None)
+    if runtime is None or runtime_dependencies is None:
+        raise ValueError("CowSwap runtime bridge is not initialized")
+    sell_token, buy_token = _cowswap_tokens_for_pair(runtime, body.market_id)
+    spend_token, required_atomic = await _cowswap_spend_requirement_atomic(
+        body,
+        runtime=runtime,
+        sell_token=sell_token,
+        buy_token=buy_token,
+        order_type=order_type,
+        amount=amount,
+    )
+    evm_reader = runtime_dependencies.evm_reader
+    owner = runtime_dependencies.owner_address
+    if evm_reader is None or not owner:
+        raise ValueError("CowSwap EVM reader or owner address missing")
+    required = int(required_atomic)
+    if int(await asyncio.to_thread(evm_reader.balance_of, spend_token, owner)) < required:
+        raise ValueError(f"insufficient {spend_token.symbol} balance")
+    spender = _cowswap_vault_relayer(runtime)
+    if int(await asyncio.to_thread(evm_reader.allowance, spend_token, owner, spender)) >= required:
+        return None, None
+    approve = getattr(evm_reader, "approve_cowswap_allowance", None)
+    if not callable(approve):
+        raise ValueError(f"insufficient {spend_token.symbol} allowance for CoW VaultRelayer")
+    try:
+        approval = await asyncio.to_thread(approve, spend_token, owner, spender, required_atomic)
+    except Exception as exc:
+        confirmed_tx_hash = getattr(exc, "confirmed_tx_hash", None)
+        if (
+            isinstance(confirmed_tx_hash, str)
+            and re.fullmatch(r"0x[0-9a-fA-F]{64}", confirmed_tx_hash)
+            and confirmed_tx_hash.casefold() != "0x" + "0" * 64
+        ):
+            response_fields["external_transaction_id"] = confirmed_tx_hash
+        raise
+    if not isinstance(approval, dict):
+        raise ValueError("CowSwap allowance approval response is malformed")
+    tx_hash = approval.get("tx_hash")
+    if not isinstance(tx_hash, str) or not tx_hash.strip():
+        raise ValueError("CowSwap allowance approval response is missing transaction hash")
+    try:
+        fee = Decimal(str(approval["fee"]))
+    except (ArithmeticError, TypeError, ValueError, KeyError) as exc:
+        raise ValueError("CowSwap allowance approval response is missing fee") from exc
+    if not fee.is_finite() or fee < 0:
+        raise ValueError("CowSwap allowance approval response has invalid fee")
+    normalized_tx_hash = tx_hash.strip()
+    zero_hash = normalized_tx_hash.casefold() == "0x" + "0" * 64
+    if zero_hash and fee != 0:
+        raise ValueError("CowSwap allowance approval zero hash must have zero fee")
+    if not zero_hash:
+        response_fields.update(
+            external_transaction_id=normalized_tx_hash,
+            fee_asset="ETH",
+            fee_amount=fee,
+        )
+    if int(await asyncio.to_thread(evm_reader.allowance, spend_token, owner, spender)) < required:
+        raise ValueError(f"insufficient {spend_token.symbol} allowance for CoW VaultRelayer after approval")
+    if zero_hash:
+        return None, None
+    return normalized_tx_hash, fee
 
 
 def _cowswap_retry_after_seconds(error: object) -> int | None:
@@ -722,13 +888,17 @@ def _intent_retry_after_seconds(body: ProviderIntentRequest, error: object) -> i
 
 def _cowswap_amount_to_atomic(amount: str, decimals: int) -> str:
     parsed = Decimal(str(amount))
-    if parsed <= 0:
+    if not parsed.is_finite() or parsed <= 0:
         raise ValueError("amount must be positive")
-    scale = Decimal(10) ** decimals
-    atomic = parsed * scale
-    if atomic != atomic.to_integral_value():
+    _, digits, exponent = parsed.as_tuple()
+    coefficient = int("".join(map(str, digits))) if digits else 0
+    scale_exponent = exponent + decimals
+    if scale_exponent >= 0:
+        return str(coefficient * 10**scale_exponent)
+    atomic, remainder = divmod(coefficient, 10**(-scale_exponent))
+    if remainder:
         raise ValueError(f"amount has more precision than token decimals: {amount}")
-    return str(int(atomic))
+    return str(atomic)
 
 
 def _atomic_amount_to_human(amount: str, decimals: int) -> Decimal:
