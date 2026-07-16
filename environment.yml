@@ -33,4 +33,4 @@ dependencies:
       - psycopg2-binary
       - greenlet
       - pydantic-settings
-      - hummingbot-cowswap-connector @ git+https://github.com/dvilelaf/hummingbot-dex-connectors.git@6d7f3a849fc528b411402419ce4a21bd9bd87d15#subdirectory=cowswap
+      - hummingbot-cowswap-connector @ git+https://github.com/dvilelaf/hummingbot-dex-connectors.git@5d7683c5e0b6e2f756e6711c265918e220cd5109#subdirectory=cowswap
