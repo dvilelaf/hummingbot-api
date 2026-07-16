@@ -83,13 +83,17 @@ async def provider_snapshot(
     issues: list[str] = []
     action_set = {action.lower() for action in provider_actions}
     portfolio_observed_at_utc: datetime | None = None
+    cowswap_balance_refresh_succeeded = False
 
     if not available:
         issues.append(f"provider not available: {connector_name}")
     if cow_runtime_blocker:
         issues.append(_cowswap_provider_runtime_issue(cow_runtime_blocker))
 
-    if body.refresh_portfolio:
+    if body.refresh_portfolio and not (
+        connector_name == COWSWAP_CONNECTOR_NAME
+        and cow_runtime_blocker is None
+    ):
         refresh_connector_names = [connector_name]
         tokens_by_chain_network = None
         if "swap" in action_set:
@@ -176,7 +180,7 @@ async def provider_snapshot(
             and cow_runtime_blocker is None
             and trading_rule is not None
         ):
-            portfolio = await _portfolio_with_cowswap_reference_prices(
+            portfolio, cowswap_balance_refresh_succeeded = await _portfolio_with_cowswap_reference_prices(
                 accounts_service,
                 portfolio=portfolio,
                 http_request=request,
@@ -184,6 +188,16 @@ async def provider_snapshot(
             )
     except Exception as exc:
         issues.append(f"portfolio unavailable: {_redact_secret_text(exc)}")
+    if (
+        body.refresh_portfolio
+        and connector_name == COWSWAP_CONNECTOR_NAME
+        and cow_runtime_blocker is None
+        and trading_rule is not None
+    ):
+        if cowswap_balance_refresh_succeeded:
+            portfolio_observed_at_utc = datetime.now(timezone.utc)
+        else:
+            issues.append("portfolio refresh unavailable")
     if connector_name == "xrpl" and _xrpl_portfolio_unfunded(portfolio, body.account_name):
         _append_issue_once(
             issues,
@@ -1470,9 +1484,9 @@ async def _portfolio_with_cowswap_reference_prices(
     portfolio: dict[str, Any] | None,
     http_request: Request,
     snapshot_request: ProviderSnapshotRequest,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, bool]:
     runtime = getattr(accounts_service, "_cowswap_runtime", None)
-    connector_rows = _cowswap_balance_rows(
+    connector_rows, balance_read_succeeded = _cowswap_balance_rows(
         accounts_service,
         runtime=runtime,
         trading_pair=snapshot_request.trading_pair,
@@ -1481,7 +1495,6 @@ async def _portfolio_with_cowswap_reference_prices(
     base_asset, quote_asset = _split_pair(snapshot_request.trading_pair)
     account_portfolio: dict[str, Any] = dict(portfolio or {})
     account_rows = dict(account_portfolio.get(snapshot_request.account_name) or {})
-    from_evm_reader = bool(connector_rows)
     if not connector_rows:
         connector_rows = _strip_scoped_metadata(
             list(account_rows.get(COWSWAP_CONNECTOR_NAME) or []),
@@ -1492,7 +1505,7 @@ async def _portfolio_with_cowswap_reference_prices(
         quote_asset=quote_asset,
     ).items():
         connector_rows = _upsert_price_row(connector_rows, token=token, price=price)
-    if from_evm_reader:
+    if balance_read_succeeded:
         connector_rows = _cowswap_scoped_portfolio_rows(
             accounts_service,
             rows=connector_rows,
@@ -1502,7 +1515,7 @@ async def _portfolio_with_cowswap_reference_prices(
         )
     account_rows[COWSWAP_CONNECTOR_NAME] = connector_rows
     account_portfolio[snapshot_request.account_name] = account_rows
-    return account_portfolio
+    return account_portfolio, balance_read_succeeded
 
 
 def _cowswap_reference_prices(
@@ -1537,16 +1550,16 @@ def _cowswap_balance_rows(
     *,
     runtime: Any,
     trading_pair: str,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     runtime_dependencies = getattr(accounts_service, "_cowswap_runtime_dependencies", None)
     evm_reader = getattr(runtime_dependencies, "evm_reader", None)
     owner = getattr(runtime_dependencies, "owner_address", "")
     if runtime is None or evm_reader is None or not owner:
-        return []
+        return [], False
     try:
         tokens = _cowswap_tokens_for_pair(runtime, trading_pair)
     except Exception:
-        return []
+        return [], False
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for token in tokens:
@@ -1560,7 +1573,7 @@ def _cowswap_balance_rows(
                 int(getattr(token, "decimals")),
             )
         except Exception:
-            continue
+            return [], False
         rows.append(
             {
                 "available_units": float(units),
@@ -1569,7 +1582,7 @@ def _cowswap_balance_rows(
                 "value": 0.0,
             }
         )
-    return rows
+    return rows, bool(rows)
 
 
 def _split_pair(trading_pair: str) -> tuple[str, str]:

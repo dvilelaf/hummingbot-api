@@ -846,6 +846,7 @@ def test_cowswap_provider_snapshot_reports_runtime_blocker_without_derived_noise
 def test_cowswap_provider_snapshot_exposes_order_actions_when_runtime_ready():
     provider_boundary = _provider_boundary_module()
     service = FakeAccountsService()
+    service.update_success = False
     service.accounts_state["master_account"]["cowswap"] = []
     request, market_data_service = _request_with_market_data()
 
@@ -863,6 +864,14 @@ def test_cowswap_provider_snapshot_exposes_order_actions_when_runtime_ready():
 
     assert result.order_types == ["MARKET"]
     assert result.provider_actions == ["order", "cancel"]
+    assert result.status == "available"
+    assert result.portfolio_observed_at_utc is not None
+    assert "portfolio refresh unavailable" not in result.operator_issues
+    assert service.update_calls == []
+    assert service.cowswap_evm_reader.balance_calls == [
+        ("WETH", "0xowner"),
+        ("USDC", "0xowner"),
+    ]
     assert "provider actions missing: cowswap" not in result.operator_issues
     assert service._cowswap_runtime._connector.quote_sell_calls == []
     assert service._cowswap_runtime._connector.quote_buy_calls == []
@@ -898,14 +907,7 @@ def test_cowswap_provider_snapshot_exposes_reverse_pair_gateway_balances():
 
     assert result.status == "available"
     assert result.trading_rule is not None
-    assert service.update_calls == [
-        {
-            "account_names": ["master_account"],
-            "connector_names": ["cowswap"],
-            "skip_gateway": True,
-            "tokens_by_chain_network": None,
-        }
-    ]
+    assert service.update_calls == []
     rows = result.portfolio["master_account"]["cowswap"]
     assert service._cowswap_runtime._connector.quote_sell_calls == []
     assert service._cowswap_runtime._connector.quote_buy_calls == []
@@ -2442,8 +2444,60 @@ def test_cowswap_fallback_account_rows_are_not_scoped_when_evm_reader_fails():
         ),
     )
 
-    assert result.status == "available"
+    assert result.status == "issues"
+    assert result.portfolio_observed_at_utc is None
+    assert "portfolio refresh unavailable" in result.operator_issues
     rows = result.portfolio["master_account"]["cowswap"]
+    for row in rows:
+        assert "balance_source" not in row, f"unexpected balance_source in {row}"
+        assert "network" not in row, f"unexpected network in {row}"
+        assert "wallet_ref" not in row, f"unexpected wallet_ref in {row}"
+
+
+def test_cowswap_provider_snapshot_keeps_cached_rows_stale_when_second_balance_read_fails():
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+    service.accounts_state["master_account"]["cowswap"] = [
+        {"available_units": 100.0, "token": "WETH", "units": 100.0, "value": 200000.0},
+        {"available_units": 50000.0, "token": "USDC", "units": 50000.0, "value": 50000.0},
+    ]
+
+    def balance_of(token, owner):
+        service.cowswap_evm_reader.balance_calls.append((token.symbol, owner))
+        if token.symbol == "USDC":
+            raise RuntimeError("second token balance unavailable")
+        return service.cowswap_evm_reader.balances[token.symbol]
+
+    service.cowswap_evm_reader.balance_of = balance_of
+    request, _market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="cowswap",
+                network="base",
+                route_id="cowswap-weth-usdc-base",
+                trading_pair="WETH-USDC",
+                wallet_ref="base:mainnet:evm_gateway",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "issues"
+    assert result.portfolio_observed_at_utc is None
+    assert "portfolio refresh unavailable" in result.operator_issues
+    assert service.cowswap_evm_reader.balance_calls == [
+        ("WETH", "0xowner"),
+        ("USDC", "0xowner"),
+    ]
+    rows = result.portfolio["master_account"]["cowswap"]
+    assert [(row["token"], row["units"]) for row in rows] == [
+        ("WETH", 100.0),
+        ("USDC", 50000.0),
+    ]
     for row in rows:
         assert "balance_source" not in row, f"unexpected balance_source in {row}"
         assert "network" not in row, f"unexpected network in {row}"
@@ -2505,7 +2559,9 @@ def test_cowswap_fallback_account_rows_preserve_stale_metadata_stripped():
         ),
     )
 
-    assert result.status == "available"
+    assert result.status == "issues"
+    assert result.portfolio_observed_at_utc is None
+    assert "portfolio refresh unavailable" in result.operator_issues
     rows = result.portfolio["master_account"]["cowswap"]
     for row in rows:
         assert "balance_source" not in row, f"unexpected balance_source in {row}"
