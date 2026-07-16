@@ -358,7 +358,7 @@ class TestGatewayRefreshSelection:
                 assert namespace == "ethereum-base"
                 return {
                     "defaultWallet": expected_base,
-                    "defaultNetworks": ["base"],
+                    "defaultNetworks": ["base", "mainnet"],
                     "defaultNetwork": "base",
                 }
 
@@ -419,7 +419,7 @@ class TestGatewayRefreshSelection:
                 assert namespace == "ethereum-base"
                 return {
                     "defaultWallet": expected_base,
-                    "defaultNetworks": ["base"],
+                    "defaultNetworks": ["base", "mainnet"],
                     "defaultNetwork": "base",
                 }
 

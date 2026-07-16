@@ -2574,26 +2574,10 @@ class AccountsService:
                     refresh_success = False
                     continue
 
-                default_networks = config.get("defaultNetworks", [])
-
                 if marlin_runtime:
-                    # Gateway's chain config may keep the active network in defaultNetwork
-                    # while defaultNetworks contains only the configured refresh defaults.
-                    default_network = config.get("defaultNetwork")
-                    if not default_networks:
-                        if default_network:
-                            default_networks = [default_network]
-                        else:
-                            logger.error(
-                                "Chain '%s' has no configured Marlin default network, skipping",
-                                chain,
-                            )
-                            refresh_success = False
-                            continue
-                    elif default_network and default_network not in default_networks:
-                        default_networks = [*default_networks, default_network]
-
-                    # Include only mnemonic-derived wallets that Gateway has already materialized.
+                    # Marlin scope comes from materialized mnemonic wallets and durable treasury
+                    # contexts, never from Gateway's static default network configuration.
+                    default_networks = []
                     wallet_addresses = materialized_wallet_addresses.get(chain, set())
                     for network in networks:
                         derived_wallet = self._marlin_gateway_default_wallet_address(
@@ -2610,6 +2594,7 @@ class AccountsService:
                         if context_key in persisted_treasury_contexts and network not in default_networks:
                             default_networks = [*default_networks, network]
                 else:
+                    default_networks = config.get("defaultNetworks", [])
                     default_wallet = config.get("defaultWallet")
                     if not default_wallet:
                         logger.debug(f"Chain '{chain}' missing defaultWallet, skipping")
