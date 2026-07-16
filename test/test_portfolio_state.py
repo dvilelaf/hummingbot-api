@@ -22,13 +22,34 @@ class TestPortfolioStateRefresh:
         from routers.portfolio import get_portfolio_state
 
         mock_service = MagicMock()
-        mock_service.update_account_state = AsyncMock()
-        mock_service.get_accounts_state.return_value = {}
+        mock_service.update_account_state = AsyncMock(return_value=True)
+        cached_state = {"master_account": {"binance": []}}
+        mock_service.get_accounts_state.return_value = cached_state
 
         request = PortfolioStateFilterRequest(refresh=True)
-        await get_portfolio_state(request, mock_service)
+        result = await get_portfolio_state(request, mock_service)
 
         mock_service.update_account_state.assert_called_once()
+        assert result == cached_state
+
+    @pytest.mark.asyncio
+    async def test_refresh_true_raises_503_without_returning_cached_state_when_refresh_fails(self):
+        """refresh=True must fail closed when account refresh returns False."""
+        from fastapi import HTTPException
+        from models.trading import PortfolioStateFilterRequest
+        from routers.portfolio import get_portfolio_state
+
+        mock_service = MagicMock()
+        mock_service.update_account_state = AsyncMock(return_value=False)
+        mock_service.get_accounts_state.return_value = {"cached": {"USDT": []}}
+
+        request = PortfolioStateFilterRequest(refresh=True)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_portfolio_state(request, mock_service)
+
+        assert exc_info.value.status_code == 503
+        mock_service.get_accounts_state.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_refresh_false_does_not_call_update_account_state(self):
@@ -38,12 +59,14 @@ class TestPortfolioStateRefresh:
 
         mock_service = MagicMock()
         mock_service.update_account_state = AsyncMock()
-        mock_service.get_accounts_state.return_value = {}
+        cached_state = {"master_account": {"binance": []}}
+        mock_service.get_accounts_state.return_value = cached_state
 
         request = PortfolioStateFilterRequest(refresh=False)
-        await get_portfolio_state(request, mock_service)
+        result = await get_portfolio_state(request, mock_service)
 
         mock_service.update_account_state.assert_not_called()
+        assert result == cached_state
 
 
 class TestBalanceRefresh:
@@ -303,6 +326,48 @@ class TestGatewayRefreshSelection:
         assert len(service.gateway_client.balance_calls) == 2
 
     @pytest.mark.asyncio
+    async def test_gateway_balance_refresh_does_not_provision_derived_wallet(self, monkeypatch):
+        """Periodic Gateway balance refresh must remain read-only for wallet state."""
+        from services.marlin_runtime import MARLIN_RUNTIME_PROFILE, MARLIN_RUNTIME_PROFILE_ENV
+        from services.accounts_service import AccountsService
+
+        monkeypatch.setenv(MARLIN_RUNTIME_PROFILE_ENV, MARLIN_RUNTIME_PROFILE)
+        monkeypatch.setenv(
+            "MARLIN_MNEMONIC",
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+
+        class FakeGatewayClient:
+            def __init__(self):
+                self.default_wallet_calls = []
+
+            async def ping(self):
+                return True
+
+            async def get_chains(self):
+                return {"chains": [{"chain": "ethereum", "networks": ["base"]}]}
+
+            async def get_config(self, namespace):
+                assert namespace == "ethereum-base"
+                return {"defaultNetworks": ["base"], "defaultNetwork": "base"}
+
+            async def get_wallets(self):
+                return []
+
+            async def set_marlin_default_wallet(self, **kwargs):
+                self.default_wallet_calls.append(kwargs)
+
+            async def get_balances(self, chain, network, address, tokens=None):
+                return {"balances": {}}
+
+        service = AccountsService.__new__(AccountsService)
+        service.accounts_state = {}
+        service.gateway_client = FakeGatewayClient()
+
+        assert await service._update_gateway_balances() is True
+        assert service.gateway_client.default_wallet_calls == []
+
+    @pytest.mark.asyncio
     async def test_marlin_unfiltered_gateway_refresh_discovers_materialized_network_wallets(self, monkeypatch):
         """Unfiltered Marlin refresh includes only materialized mnemonic-derived wallets."""
         from services.marlin_runtime import MARLIN_RUNTIME_PROFILE, MARLIN_RUNTIME_PROFILE_ENV
@@ -358,8 +423,8 @@ class TestGatewayRefreshSelection:
 
         assert await service._update_gateway_balances() is True
         assert service.get_gateway_balances.await_args_list == [
-            call("ethereum", expected_base, network="base", tokens=None),
-            call("ethereum", expected_arbitrum, network="arbitrum", tokens=None),
+            call("ethereum", expected_base, network="base", tokens=None, provision_wallet=False),
+            call("ethereum", expected_arbitrum, network="arbitrum", tokens=None, provision_wallet=False),
         ]
 
     @pytest.mark.asyncio
@@ -437,8 +502,8 @@ class TestGatewayRefreshSelection:
 
         assert await service._update_gateway_balances() is True
         assert service.get_gateway_balances.await_args_list == [
-            call("ethereum", expected_base, network="base", tokens=None),
-            call("ethereum", expected_arbitrum, network="arbitrum", tokens=None),
+            call("ethereum", expected_base, network="base", tokens=None, provision_wallet=False),
+            call("ethereum", expected_arbitrum, network="arbitrum", tokens=None, provision_wallet=False),
         ]
 
     @pytest.mark.asyncio
@@ -526,7 +591,7 @@ class TestGatewayRefreshSelection:
 
         assert await service._update_gateway_balances() is True
         assert service.get_gateway_balances.await_args_list == [
-            call("ethereum", expected_base, network="base", tokens=None),
+            call("ethereum", expected_base, network="base", tokens=None, provision_wallet=False),
         ]
 
 

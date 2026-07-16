@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 
 from deps import get_accounts_service
 from models import PaginatedResponse
@@ -31,11 +31,13 @@ async def get_portfolio_state(
     """
     # Only refresh balances if explicitly requested
     if filter_request.refresh:
-        await accounts_service.update_account_state(
+        refresh_succeeded = await accounts_service.update_account_state(
             skip_gateway=filter_request.skip_gateway,
             account_names=filter_request.account_names,
             connector_names=filter_request.connector_names
         )
+        if refresh_succeeded is not True:
+            raise HTTPException(status_code=503, detail="Portfolio state refresh failed")
 
     all_states = accounts_service.get_accounts_state()
 

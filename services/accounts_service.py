@@ -2667,6 +2667,7 @@ class AccountsService:
                             wallet_address,
                             network=network,
                             tokens=tokens,
+                            provision_wallet=False,
                         )
                     )
                     task_metadata.append((chain, network, wallet_address))
@@ -2796,6 +2797,7 @@ class AccountsService:
                     default_wallet,
                     network=network,
                     tokens=tokens,
+                    provision_wallet=False,
                 )
             )
             task_metadata.append((chain, network, default_wallet))
@@ -2889,7 +2891,14 @@ class AccountsService:
             logger.error(f"Error getting Gateway wallets: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get wallets: {str(e)}")
 
-    async def get_gateway_balances(self, chain: str, address: str, network: Optional[str] = None, tokens: Optional[List[str]] = None) -> List[Dict]:
+    async def get_gateway_balances(
+        self,
+        chain: str,
+        address: str,
+        network: Optional[str] = None,
+        tokens: Optional[List[str]] = None,
+        provision_wallet: bool = True,
+    ) -> List[Dict]:
         """
         Get Gateway wallet balances with pricing from rate sources.
 
@@ -2898,6 +2907,7 @@ class AccountsService:
             address: Wallet address
             network: Optional network name (if not provided, uses default network for chain)
             tokens: Optional list of token symbols to query
+            provision_wallet: Whether to provision the Marlin default wallet before reading.
 
         Returns:
             List of token balance dictionaries with prices from rate sources
@@ -2912,11 +2922,12 @@ class AccountsService:
             if not network:
                 raise HTTPException(status_code=400, detail=f"Could not determine network for chain '{chain}'")
 
-            await self._ensure_marlin_gateway_wallet(
-                chain=chain,
-                network=network,
-                address=address,
-            )
+            if provision_wallet:
+                await self._ensure_marlin_gateway_wallet(
+                    chain=chain,
+                    network=network,
+                    address=address,
+                )
 
             # Get balances from Gateway
             balances_response = await self.gateway_client.get_balances(chain, network, address, tokens=tokens)
