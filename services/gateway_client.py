@@ -2,7 +2,9 @@ import asyncio
 import logging
 import os
 import ssl
+from datetime import timezone
 from decimal import Decimal
+from email.utils import format_datetime, parsedate_to_datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -144,6 +146,7 @@ class GatewayClient:
         params: Dict = None,
         json: Dict = None,
         headers: Dict[str, str] | None = None,
+        include_response_date: bool = False,
     ) -> Optional[Dict]:
         """Make HTTP request to Gateway"""
         session = await self._get_session()
@@ -156,21 +159,21 @@ class GatewayClient:
                         error_body = await self._get_error_body(response)
                         logger.warning(f"Gateway request failed: {method} {url} - {response.status} - {error_body}")
                         return {"error": error_body, "status": response.status}
-                    return await response.json()
+                    return await self._parse_success_response(response, include_response_date)
             elif method == "POST":
                 async with session.post(url, params=params, json=json, headers=headers) as response:
                     if not response.ok:
                         error_body = await self._get_error_body(response)
                         logger.warning(f"Gateway request failed: {method} {url} - {response.status} - {error_body}")
                         return {"error": error_body, "status": response.status}
-                    return await response.json()
+                    return await self._parse_success_response(response, include_response_date)
             elif method == "DELETE":
                 async with session.delete(url, params=params, json=json, headers=headers) as response:
                     if not response.ok:
                         error_body = await self._get_error_body(response)
                         logger.warning(f"Gateway request failed: {method} {url} - {response.status} - {error_body}")
                         return {"error": error_body, "status": response.status}
-                    return await response.json()
+                    return await self._parse_success_response(response, include_response_date)
         except aiohttp.ClientError as e:
             logger.debug(f"Gateway request error: {method} {url} - {e}")
             return None
@@ -180,6 +183,26 @@ class GatewayClient:
         except Exception as e:
             logger.debug(f"Gateway request failed: {method} {url} - {e}")
             raise
+
+    async def _parse_success_response(self, response: aiohttp.ClientResponse, include_response_date: bool) -> Dict:
+        data = await response.json()
+        if (
+            include_response_date
+            and isinstance(data, dict)
+            and data.get("observedAt") is None
+            and data.get("observed_at") is None
+        ):
+            date_header = response.headers.get("Date")
+            if date_header:
+                try:
+                    parsed = parsedate_to_datetime(date_header)
+                    if parsed.tzinfo is not None:
+                        observed_at = parsed.astimezone(timezone.utc)
+                        if format_datetime(observed_at, usegmt=True) == date_header:
+                            data["observedAt"] = observed_at.isoformat()
+                except (OverflowError, TypeError, ValueError):
+                    pass
+        return data
 
     async def _get_error_body(self, response: aiohttp.ClientResponse) -> str:
         """Extract error message from response body"""
@@ -481,7 +504,12 @@ class GatewayClient:
             payload["poolAddress"] = pool_address
 
         route_type = self._swap_route_type(connector, pool_address)
-        return await self._request("GET", f"connectors/{connector}/{route_type}/quote-swap", params=payload)
+        return await self._request(
+            "GET",
+            f"connectors/{connector}/{route_type}/quote-swap",
+            params=payload,
+            include_response_date=True,
+        )
 
     async def execute_swap(
         self,

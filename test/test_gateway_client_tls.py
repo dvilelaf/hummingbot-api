@@ -1,7 +1,7 @@
 import asyncio
 import importlib.util
 from pathlib import Path
-from unittest.mock import ANY, Mock
+from unittest.mock import ANY, AsyncMock, Mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "services" / "gateway_client.py"
@@ -113,3 +113,52 @@ def test_gateway_client_request_timeout_can_be_disabled(monkeypatch):
     timeout = GatewayClient._request_timeout()
 
     assert timeout.total is None
+
+
+def test_parse_success_response_falls_back_to_canonical_date_header():
+    body = {"price": "1"}
+    response = Mock(
+        headers={"Date": "Fri, 17 Jul 2026 08:30:00 GMT"},
+        json=AsyncMock(return_value=body),
+    )
+
+    result = asyncio.run(GatewayClient("http://gateway.local")._parse_success_response(response, True))
+
+    assert result == {"price": "1", "observedAt": "2026-07-17T08:30:00+00:00"}
+
+
+def test_parse_success_response_falls_back_when_observed_fields_are_null():
+    body = {"observedAt": None, "observed_at": None, "price": "1"}
+    response = Mock(
+        headers={"Date": "Fri, 17 Jul 2026 08:30:00 GMT"},
+        json=AsyncMock(return_value=body),
+    )
+
+    result = asyncio.run(GatewayClient("http://gateway.local")._parse_success_response(response, True))
+
+    assert result == {"observedAt": "2026-07-17T08:30:00+00:00", "observed_at": None, "price": "1"}
+
+
+def test_parse_success_response_preserves_non_null_observed_value_and_body():
+    body = {"observedAt": "provider-value", "nested": {"amount": "1"}}
+    response = Mock(
+        headers={"Date": "Fri, 17 Jul 2026 08:30:00 GMT"},
+        json=AsyncMock(return_value=body),
+    )
+
+    result = asyncio.run(GatewayClient("http://gateway.local")._parse_success_response(response, True))
+
+    assert result == body
+
+
+def test_parse_success_response_ignores_non_canonical_date_header():
+    body = {"price": "1"}
+    expected = body.copy()
+    response = Mock(
+        headers={"Date": "Friday, 17 Jul 2026 08:30:00 GMT"},
+        json=AsyncMock(return_value=body),
+    )
+
+    result = asyncio.run(GatewayClient("http://gateway.local")._parse_success_response(response, True))
+
+    assert result == expected

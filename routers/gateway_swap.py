@@ -3,7 +3,7 @@ Gateway Swap Router - Handles DEX swap operations via Hummingbot Gateway.
 Supports Router connectors (Jupiter, 0x) for token swaps.
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from decimal import Decimal
 
@@ -24,6 +24,8 @@ from services.live_trading_gate import assert_live_gateway_mutation_allowed
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Gateway Swaps"], prefix="/gateway")
+SWAP_QUOTE_TIMESTAMP_TTL = timedelta(seconds=60)
+SWAP_QUOTE_TIMESTAMP_SKEW = timedelta(seconds=5)
 
 
 def _gateway_error_detail(result: dict) -> str | None:
@@ -66,7 +68,19 @@ def _parse_quote_observed_at(value) -> datetime | None:
     return observed_at.astimezone(timezone.utc)
 
 
-def _parse_chain_gas_estimate(result: dict) -> tuple[Decimal, str, datetime]:
+def _validate_quote_timestamp(observed_at: datetime | None, now: datetime, field: str) -> datetime:
+    if observed_at is None:
+        raise HTTPException(status_code=502, detail=f"Gateway returned missing {field} timestamp")
+    if observed_at.utcoffset() is None:
+        raise HTTPException(status_code=502, detail=f"Gateway returned naive {field} timestamp")
+    if observed_at > now + SWAP_QUOTE_TIMESTAMP_SKEW:
+        raise HTTPException(status_code=502, detail=f"Gateway returned future {field} timestamp")
+    if now - observed_at > SWAP_QUOTE_TIMESTAMP_TTL:
+        raise HTTPException(status_code=502, detail=f"Gateway returned stale {field} timestamp")
+    return observed_at.astimezone(timezone.utc)
+
+
+def _parse_chain_gas_estimate(result: dict) -> tuple[Decimal, str, datetime | None]:
     if not isinstance(result, dict):
         raise HTTPException(status_code=502, detail="Gateway gas estimation is unavailable")
     detail = _gateway_error_detail(result)
@@ -82,8 +96,10 @@ def _parse_chain_gas_estimate(result: dict) -> tuple[Decimal, str, datetime]:
         raise HTTPException(status_code=502, detail="Gateway returned an invalid gas estimate asset")
 
     timestamp = _parse_quote_decimal(result.get("timestamp"), "gas estimate timestamp")
-    if timestamp is None or timestamp < 0:
+    if timestamp is not None and timestamp < 0:
         raise HTTPException(status_code=502, detail="Gateway returned an invalid gas estimate timestamp")
+    if timestamp is None:
+        return fee, fee_asset.strip(), None
     try:
         observed_at = datetime.fromtimestamp(float(timestamp) / 1000, tz=timezone.utc)
     except (OverflowError, OSError, ValueError):
@@ -170,8 +186,8 @@ async def get_swap_quote(
             slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0,
             pool_address=request.pool_address,
         )
-        receipt_at = datetime.now(timezone.utc)
         _raise_if_invalid_quote(result)
+        observed_at = _parse_quote_observed_at(_gateway_quote_field(result, "observedAt", "observed_at"))
 
         try:
             gas_result = await accounts_service.gateway_client.estimate_gas(chain=chain, network=network)
@@ -179,6 +195,9 @@ async def get_swap_quote(
             logger.warning(f"Gateway gas estimation unavailable: {e}")
             raise HTTPException(status_code=502, detail="Gateway gas estimation is unavailable")
         gas_estimate_value, gas_estimate_asset, gas_estimate_observed_at = _parse_chain_gas_estimate(gas_result)
+        now = datetime.now(timezone.utc)
+        observed_at = _validate_quote_timestamp(observed_at, now, "quote")
+        gas_estimate_observed_at = _validate_quote_timestamp(gas_estimate_observed_at, now, "gas estimate")
 
         # Extract amounts from Gateway response (snake_case for consistency)
         amount_in_raw = result.get("amountIn") or result.get("amount_in")
@@ -200,8 +219,6 @@ async def get_swap_quote(
             _gateway_quote_field(result, "maxAmountIn", "max_amount_in"),
             "maxAmountIn",
         )
-        observed_at = _parse_quote_observed_at(_gateway_quote_field(result, "observedAt", "observed_at")) or receipt_at
-
         return SwapQuoteResponse(
             base=base,
             quote=quote,

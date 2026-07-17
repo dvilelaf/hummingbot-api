@@ -81,15 +81,21 @@ class _FakeAccountsService:
         self.gateway_client = _FakeGatewayClient(result, estimate_result)
 
 
-_GAS_OBSERVED_AT = datetime(2026, 7, 17, 8, 30, tzinfo=timezone.utc)
-_DEFAULT_GAS_ESTIMATE = {
-    "fee": "0.007",
-    "feeAsset": "SOL",
-    "timestamp": int(_GAS_OBSERVED_AT.timestamp() * 1000),
-}
+_DEFAULT_GAS_ESTIMATE = object()
+
+
+def _fresh_observed_at():
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _default_gas_estimate(observed_at=None):
+    observed_at = _fresh_observed_at() if observed_at is None else observed_at
+    return {"fee": "0.007", "feeAsset": "SOL", "timestamp": int(observed_at.timestamp() * 1000)}
 
 
 def _get_quote(result, estimate_result=_DEFAULT_GAS_ESTIMATE, client_out=None):
+    if estimate_result is _DEFAULT_GAS_ESTIMATE:
+        estimate_result = _default_gas_estimate()
     request = gateway_swap.SwapQuoteRequest(
         connector="jupiter",
         network="solana-mainnet-beta",
@@ -103,17 +109,25 @@ def _get_quote(result, estimate_result=_DEFAULT_GAS_ESTIMATE, client_out=None):
     return asyncio.run(gateway_swap.get_swap_quote(request, service))
 
 
-def _valid_quote_result():
-    return {"price": "123.4", "amountIn": "1", "amountOut": "12.34", "gasEstimate": "999"}
+def _valid_quote_result(observed_at=None):
+    observed_at = _fresh_observed_at() if observed_at is None else observed_at
+    return {
+        "price": "123.4",
+        "amountIn": "1",
+        "amountOut": "12.34",
+        "gasEstimate": "999",
+        "observedAt": observed_at.isoformat(),
+    }
 
 
 def test_gateway_swap_quote_uses_authoritative_chain_gas_estimate():
     clients = []
+    before = _fresh_observed_at()
     response = _get_quote(_valid_quote_result(), client_out=clients)
 
     assert response.gas_estimate == Decimal("0.007")
     assert response.gas_estimate_asset == "SOL"
-    assert response.gas_estimate_observed_at == _GAS_OBSERVED_AT
+    assert before <= response.gas_estimate_observed_at <= _fresh_observed_at()
     assert clients[0].estimate_calls == [("solana", "mainnet-beta")]
 
 
@@ -121,29 +135,34 @@ def test_gateway_swap_quote_uses_authoritative_chain_gas_estimate():
     ("fields", "expected"),
     [
         (
-            {"quoteId": "quote-123", "priceImpactPct": 0, "minAmountOut": "12.22", "maxAmountIn": "1.01", "observedAt": "2026-07-17T10:30:00+02:00"},
-            ("quote-123", Decimal("0"), Decimal("12.22"), Decimal("1.01"), datetime(2026, 7, 17, 8, 30, tzinfo=timezone.utc)),
+            {"quoteId": "quote-123", "priceImpactPct": 0, "minAmountOut": "12.22", "maxAmountIn": "1.01"},
+            ("quote-123", Decimal("0"), Decimal("12.22"), Decimal("1.01")),
         ),
         (
-            {"quote_id": "quote-456", "price_impact_pct": "0.25", "min_amount_out": "12.30", "max_amount_in": "1.02", "observed_at": "2026-07-17T08:30:00Z"},
-            ("quote-456", Decimal("0.25"), Decimal("12.30"), Decimal("1.02"), datetime(2026, 7, 17, 8, 30, tzinfo=timezone.utc)),
+            {"quote_id": "quote-456", "price_impact_pct": "0.25", "min_amount_out": "12.30", "max_amount_in": "1.02"},
+            ("quote-456", Decimal("0.25"), Decimal("12.30"), Decimal("1.02")),
         ),
     ],
 )
 def test_gateway_swap_quote_maps_provider_fields(fields, expected):
-    response = _get_quote({**_valid_quote_result(), **fields})
-    assert (response.quote_id, response.price_impact_pct, response.min_amount_out, response.max_amount_in, response.observed_at) == expected
+    observed_at = _fresh_observed_at()
+    observed_field = "observedAt" if "quoteId" in fields else "observed_at"
+    observed_value = observed_at.isoformat()
+    if observed_field == "observed_at":
+        observed_value = observed_value.replace("+00:00", "Z")
+    response = _get_quote({**_valid_quote_result(observed_at), **fields, observed_field: observed_value})
+    assert (response.quote_id, response.price_impact_pct, response.min_amount_out, response.max_amount_in) == expected
+    assert response.observed_at == observed_at
 
 
-def test_gateway_swap_quote_uses_receipt_time_for_missing_observed_at():
-    before = datetime.now(timezone.utc)
-    response = _get_quote(_valid_quote_result())
-    after = datetime.now(timezone.utc)
+def test_gateway_swap_quote_rejects_missing_observed_at():
+    result = _valid_quote_result()
+    result.pop("observedAt")
 
-    assert response.quote_id is None
-    assert (response.price_impact_pct, response.min_amount_out, response.max_amount_in) == (None, None, None)
-    assert before <= response.observed_at <= after
-    assert response.observed_at.tzinfo == timezone.utc
+    with pytest.raises(HTTPException) as exc_info:
+        _get_quote(result)
+
+    assert exc_info.value.status_code == 502
 
 
 def _assert_quote_502(result, estimate_result=_DEFAULT_GAS_ESTIMATE):
@@ -169,7 +188,7 @@ def test_gateway_swap_quote_rejects_unavailable_gas_estimate(estimate_result):
     [("fee", "not-a-decimal"), ("fee", "NaN"), ("fee", "-1"), ("fee", "0"), ("feeAsset", ""), ("feeAsset", "   "), ("timestamp", "NaN"), ("timestamp", -1)],
 )
 def test_gateway_swap_quote_rejects_malformed_gas_estimate(field, value):
-    estimate_result = {**_DEFAULT_GAS_ESTIMATE, field: value}
+    estimate_result = {**_default_gas_estimate(), field: value}
     _assert_quote_502(_valid_quote_result(), estimate_result)
 
 
