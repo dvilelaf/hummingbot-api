@@ -4,6 +4,7 @@ Supports swaps via routers (Jupiter, 0x) and CLMM liquidity positions (Meteora, 
 
 Note: AMM support has been removed. Use Router for simple swaps, CLMM for liquidity provision.
 """
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -38,6 +39,11 @@ class SwapQuoteResponse(BaseModel):
     expected_amount: Optional[Decimal] = Field(default=None, description="Deprecated: use amount_out instead")
     slippage_pct: Decimal = Field(description="Applied slippage percentage")
     gas_estimate: Optional[Decimal] = Field(default=None, description="Estimated gas cost")
+    quote_id: Optional[str] = Field(default=None, description="Provider quote identifier")
+    price_impact_pct: Optional[Decimal] = Field(default=None, description="Provider-observed price impact percentage")
+    min_amount_out: Optional[Decimal] = Field(default=None, description="Provider-observed minimum output amount")
+    max_amount_in: Optional[Decimal] = Field(default=None, description="Provider-observed maximum input amount")
+    observed_at: Optional[datetime] = Field(default=None, description="Provider quote observation time in UTC")
 
 
 class SwapExecuteRequest(BaseModel):

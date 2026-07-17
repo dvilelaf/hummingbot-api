@@ -3,6 +3,7 @@ Gateway Swap Router - Handles DEX swap operations via Hummingbot Gateway.
 Supports Router connectors (Jupiter, 0x) for token swaps.
 """
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 from decimal import Decimal
 
@@ -35,6 +36,34 @@ def _valid_quote_amount(value) -> Decimal | None:
         return None
     amount = Decimal(str(value))
     return amount if amount > 0 else None
+
+
+def _gateway_quote_field(result: dict, camel_case: str, snake_case: str):
+    return result.get(camel_case, result.get(snake_case))
+
+
+def _parse_quote_decimal(value, field: str) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (TypeError, ValueError, ArithmeticError):
+        raise HTTPException(status_code=502, detail=f"Gateway returned malformed {field}")
+    if not parsed.is_finite():
+        raise HTTPException(status_code=502, detail=f"Gateway returned non-finite {field}")
+    return parsed
+
+
+def _parse_quote_observed_at(value) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        observed_at = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=502, detail="Gateway returned malformed observedAt")
+    if observed_at.utcoffset() is None:
+        raise HTTPException(status_code=502, detail="Gateway returned naive observedAt timestamp")
+    return observed_at.astimezone(timezone.utc)
 
 
 def _raise_if_invalid_quote(result: dict) -> None:
@@ -116,6 +145,7 @@ async def get_swap_quote(
             slippage_pct=float(request.slippage_pct) if request.slippage_pct else 1.0,
             pool_address=request.pool_address,
         )
+        receipt_at = datetime.now(timezone.utc)
         _raise_if_invalid_quote(result)
 
         # Extract amounts from Gateway response (snake_case for consistency)
@@ -126,8 +156,24 @@ async def get_swap_quote(
         amount_out = _valid_quote_amount(amount_out_raw)
 
         # Extract gas estimate (try both camelCase and snake_case)
-        gas_estimate = result.get("gasEstimate") or result.get("gas_estimate")
-        gas_estimate_value = Decimal(str(gas_estimate)) if gas_estimate else None
+        gas_estimate_value = _parse_quote_decimal(
+            _gateway_quote_field(result, "gasEstimate", "gas_estimate"), "gasEstimate"
+        )
+
+        quote_id = _gateway_quote_field(result, "quoteId", "quote_id")
+        price_impact_pct = _parse_quote_decimal(
+            _gateway_quote_field(result, "priceImpactPct", "price_impact_pct"),
+            "priceImpactPct",
+        )
+        min_amount_out = _parse_quote_decimal(
+            _gateway_quote_field(result, "minAmountOut", "min_amount_out"),
+            "minAmountOut",
+        )
+        max_amount_in = _parse_quote_decimal(
+            _gateway_quote_field(result, "maxAmountIn", "max_amount_in"),
+            "maxAmountIn",
+        )
+        observed_at = _parse_quote_observed_at(_gateway_quote_field(result, "observedAt", "observed_at")) or receipt_at
 
         return SwapQuoteResponse(
             base=base,
@@ -138,7 +184,12 @@ async def get_swap_quote(
             amount_out=amount_out,
             expected_amount=amount_out,  # Deprecated, kept for backward compatibility
             slippage_pct=request.slippage_pct or Decimal("1.0"),
-            gas_estimate=gas_estimate_value
+            gas_estimate=gas_estimate_value,
+            quote_id=quote_id,
+            price_impact_pct=price_impact_pct,
+            min_amount_out=min_amount_out,
+            max_amount_in=max_amount_in,
+            observed_at=observed_at,
         )
 
     except HTTPException:
