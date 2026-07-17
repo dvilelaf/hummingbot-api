@@ -66,6 +66,31 @@ def _parse_quote_observed_at(value) -> datetime | None:
     return observed_at.astimezone(timezone.utc)
 
 
+def _parse_chain_gas_estimate(result: dict) -> tuple[Decimal, str, datetime]:
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=502, detail="Gateway gas estimation is unavailable")
+    detail = _gateway_error_detail(result)
+    if detail:
+        raise HTTPException(status_code=502, detail=detail)
+
+    fee = _parse_quote_decimal(result.get("fee"), "gas fee")
+    if fee is None or fee <= 0:
+        raise HTTPException(status_code=502, detail="Gateway returned an invalid gas estimate fee")
+
+    fee_asset = result.get("feeAsset")
+    if not isinstance(fee_asset, str) or not fee_asset.strip():
+        raise HTTPException(status_code=502, detail="Gateway returned an invalid gas estimate asset")
+
+    timestamp = _parse_quote_decimal(result.get("timestamp"), "gas estimate timestamp")
+    if timestamp is None or timestamp < 0:
+        raise HTTPException(status_code=502, detail="Gateway returned an invalid gas estimate timestamp")
+    try:
+        observed_at = datetime.fromtimestamp(float(timestamp) / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        raise HTTPException(status_code=502, detail="Gateway returned an invalid gas estimate timestamp")
+    return fee, fee_asset.strip(), observed_at
+
+
 def _raise_if_invalid_quote(result: dict) -> None:
     detail = _gateway_error_detail(result)
     if detail:
@@ -148,17 +173,19 @@ async def get_swap_quote(
         receipt_at = datetime.now(timezone.utc)
         _raise_if_invalid_quote(result)
 
+        try:
+            gas_result = await accounts_service.gateway_client.estimate_gas(chain=chain, network=network)
+        except Exception as e:
+            logger.warning(f"Gateway gas estimation unavailable: {e}")
+            raise HTTPException(status_code=502, detail="Gateway gas estimation is unavailable")
+        gas_estimate_value, gas_estimate_asset, gas_estimate_observed_at = _parse_chain_gas_estimate(gas_result)
+
         # Extract amounts from Gateway response (snake_case for consistency)
         amount_in_raw = result.get("amountIn") or result.get("amount_in")
         amount_out_raw = result.get("amountOut") or result.get("amount_out")
 
         amount_in = _valid_quote_amount(amount_in_raw)
         amount_out = _valid_quote_amount(amount_out_raw)
-
-        # Extract gas estimate (try both camelCase and snake_case)
-        gas_estimate_value = _parse_quote_decimal(
-            _gateway_quote_field(result, "gasEstimate", "gas_estimate"), "gasEstimate"
-        )
 
         quote_id = _gateway_quote_field(result, "quoteId", "quote_id")
         price_impact_pct = _parse_quote_decimal(
@@ -185,6 +212,8 @@ async def get_swap_quote(
             expected_amount=amount_out,  # Deprecated, kept for backward compatibility
             slippage_pct=request.slippage_pct or Decimal("1.0"),
             gas_estimate=gas_estimate_value,
+            gas_estimate_asset=gas_estimate_asset,
+            gas_estimate_observed_at=gas_estimate_observed_at,
             quote_id=quote_id,
             price_impact_pct=price_impact_pct,
             min_amount_out=min_amount_out,

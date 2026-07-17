@@ -39,6 +39,8 @@ class SwapQuoteResponse(BaseModel):
     expected_amount: Optional[Decimal] = Field(default=None, description="Deprecated: use amount_out instead")
     slippage_pct: Decimal = Field(description="Applied slippage percentage")
     gas_estimate: Optional[Decimal] = Field(default=None, description="Estimated gas cost")
+    gas_estimate_asset: Optional[str] = Field(default=None, description="Gas estimate fee asset")
+    gas_estimate_observed_at: Optional[datetime] = Field(default=None, description="Gas estimate observation time in UTC")
     quote_id: Optional[str] = Field(default=None, description="Provider quote identifier")
     price_impact_pct: Optional[Decimal] = Field(default=None, description="Provider-observed price impact percentage")
     min_amount_out: Optional[Decimal] = Field(default=None, description="Provider-observed minimum output amount")

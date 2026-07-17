@@ -452,6 +452,10 @@ class GatewayClient:
             return "clmm"
         return "router"
 
+    async def estimate_gas(self, chain: str, network: str) -> Dict:
+        """Get the existing chain-level worst-case gas estimate from Gateway."""
+        return await self._request("GET", f"chains/{chain}/estimate-gas", params={"network": network})
+
     async def quote_swap(
         self,
         connector: str,

@@ -57,8 +57,10 @@ def test_gateway_swap_buy_quote_uses_inverted_sell_terms():
 
 
 class _FakeGatewayClient:
-    def __init__(self, result):
+    def __init__(self, result, estimate_result):
         self.result = result
+        self.estimate_result = estimate_result
+        self.estimate_calls = []
 
     async def ping(self):
         return True
@@ -69,13 +71,25 @@ class _FakeGatewayClient:
     async def quote_swap(self, **kwargs):
         return self.result
 
+    async def estimate_gas(self, chain, network):
+        self.estimate_calls.append((chain, network))
+        return self.estimate_result
+
 
 class _FakeAccountsService:
-    def __init__(self, result):
-        self.gateway_client = _FakeGatewayClient(result)
+    def __init__(self, result, estimate_result):
+        self.gateway_client = _FakeGatewayClient(result, estimate_result)
 
 
-def _get_quote(result):
+_GAS_OBSERVED_AT = datetime(2026, 7, 17, 8, 30, tzinfo=timezone.utc)
+_DEFAULT_GAS_ESTIMATE = {
+    "fee": "0.007",
+    "feeAsset": "SOL",
+    "timestamp": int(_GAS_OBSERVED_AT.timestamp() * 1000),
+}
+
+
+def _get_quote(result, estimate_result=_DEFAULT_GAS_ESTIMATE, client_out=None):
     request = gateway_swap.SwapQuoteRequest(
         connector="jupiter",
         network="solana-mainnet-beta",
@@ -83,11 +97,24 @@ def _get_quote(result):
         side="SELL",
         amount=Decimal("1"),
     )
-    return asyncio.run(gateway_swap.get_swap_quote(request, _FakeAccountsService(result)))
+    service = _FakeAccountsService(result, estimate_result)
+    if client_out is not None:
+        client_out.append(service.gateway_client)
+    return asyncio.run(gateway_swap.get_swap_quote(request, service))
 
 
 def _valid_quote_result():
-    return {"price": "123.4", "amountIn": "1", "amountOut": "12.34", "gasEstimate": "42"}
+    return {"price": "123.4", "amountIn": "1", "amountOut": "12.34", "gasEstimate": "999"}
+
+
+def test_gateway_swap_quote_uses_authoritative_chain_gas_estimate():
+    clients = []
+    response = _get_quote(_valid_quote_result(), client_out=clients)
+
+    assert response.gas_estimate == Decimal("0.007")
+    assert response.gas_estimate_asset == "SOL"
+    assert response.gas_estimate_observed_at == _GAS_OBSERVED_AT
+    assert clients[0].estimate_calls == [("solana", "mainnet-beta")]
 
 
 @pytest.mark.parametrize(
@@ -119,17 +146,31 @@ def test_gateway_swap_quote_uses_receipt_time_for_missing_observed_at():
     assert response.observed_at.tzinfo == timezone.utc
 
 
-def _assert_quote_502(result):
+def _assert_quote_502(result, estimate_result=_DEFAULT_GAS_ESTIMATE):
     with pytest.raises(HTTPException) as exc_info:
-        _get_quote(result)
+        _get_quote(result, estimate_result)
     assert exc_info.value.status_code == 502
 
 
-@pytest.mark.parametrize("field", ["gasEstimate", "priceImpactPct", "minAmountOut", "maxAmountIn"])
+@pytest.mark.parametrize("field", ["priceImpactPct", "minAmountOut", "maxAmountIn"])
 def test_gateway_swap_quote_rejects_malformed_provider_numeric_field(field):
     result = _valid_quote_result()
     result[field] = "not-a-decimal"
     _assert_quote_502(result)
+
+
+@pytest.mark.parametrize("estimate_result", [None, {"status": 503, "error": "RPC unavailable"}])
+def test_gateway_swap_quote_rejects_unavailable_gas_estimate(estimate_result):
+    _assert_quote_502(_valid_quote_result(), estimate_result)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("fee", "not-a-decimal"), ("fee", "NaN"), ("fee", "-1"), ("fee", "0"), ("feeAsset", ""), ("feeAsset", "   "), ("timestamp", "NaN"), ("timestamp", -1)],
+)
+def test_gateway_swap_quote_rejects_malformed_gas_estimate(field, value):
+    estimate_result = {**_DEFAULT_GAS_ESTIMATE, field: value}
+    _assert_quote_502(_valid_quote_result(), estimate_result)
 
 
 @pytest.mark.parametrize(
