@@ -1,4 +1,4 @@
-FROM dvilela/hummingbot-api-marlin@sha256:229a9f8f4febaff6cacb9299590515a880f630f90a9101c90578424f09f9109f
+FROM dvilela/hummingbot-api-marlin-base@sha256:abb76f79d3265e51be7d3d726730d3959e4b8629eabecc9b5c0b8ef384f957c0
 
 WORKDIR /hummingbot-api
 
