@@ -376,8 +376,8 @@ class GatewayClient:
         Update API keys in Gateway configuration.
 
         Args:
-            api_keys: Dict mapping provider name to API key value
-                     (e.g., {"helius": "abc123", "infura": "xyz789"})
+            api_keys: Dict mapping service name to API key value
+                     (e.g., {"service": "xyz789"})
 
         Returns:
             List of results for each API key update

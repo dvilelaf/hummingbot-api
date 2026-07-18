@@ -98,5 +98,5 @@ class GatewayBalanceRequest(BaseModel):
 class UpdateApiKeysRequest(BaseModel):
     """Request to update Gateway API keys"""
     api_keys: dict = Field(
-        description="Dict mapping provider name to API key value (e.g., {'helius': 'abc123', 'infura': 'xyz789'})"
+        description="Dict mapping service name to API key value (e.g., {'service': 'xyz789'})"
     )

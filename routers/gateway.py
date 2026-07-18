@@ -270,11 +270,9 @@ async def get_api_keys(accounts_service: AccountsService = Depends(get_accounts_
     """
     Get all configured API keys from Gateway.
 
-    Returns a dict mapping provider name to API key value.
+    Returns a dict mapping service name to API key value.
     Example response:
     {
-        "helius": "46951ec2-16af-4fc0-a5df-970b0eb925b7",
-        "infura": "920646320ec3463fa1b5235be9fa48d3",
         "coingecko": "CG-Rw786jTpNmV1MvRrqpDAHR6r",
         "etherscan": ""
     }
@@ -301,13 +299,12 @@ async def update_api_keys(
     Update API keys in Gateway configuration.
 
     Args:
-        request: Contains api_keys dict mapping provider name to API key value
+        request: Contains api_keys dict mapping service name to API key value
 
     Example request:
     {
         "api_keys": {
-            "helius": "new-api-key-value",
-            "infura": "another-api-key"
+            "service": "another-api-key"
         }
     }
 
