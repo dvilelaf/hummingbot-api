@@ -2,25 +2,24 @@ from typing import Any
 
 
 HYPERLIQUID_PERPETUAL_CONNECTOR = "hyperliquid_perpetual"
-HYPERLIQUID_PERPETUAL_CONNECTOR_PAIR = "HYPE-USD"
-HYPERLIQUID_PERPETUAL_LOGICAL_PAIR = "HYPE-USDC"
+
+
+def _replace_quote(trading_pair: str, source_quote: str, target_quote: str) -> str:
+    base, separator, quote = trading_pair.rpartition("-")
+    if base and separator and quote == source_quote:
+        return f"{base}-{target_quote}"
+    return trading_pair
 
 
 def connector_trading_pair(connector_name: str, trading_pair: str) -> str:
-    if (
-        connector_name == HYPERLIQUID_PERPETUAL_CONNECTOR
-        and trading_pair == HYPERLIQUID_PERPETUAL_LOGICAL_PAIR
-    ):
-        return HYPERLIQUID_PERPETUAL_CONNECTOR_PAIR
+    if connector_name == HYPERLIQUID_PERPETUAL_CONNECTOR:
+        return _replace_quote(trading_pair, "USDC", "USD")
     return trading_pair
 
 
 def logical_trading_pair(connector_name: str, trading_pair: str) -> str:
-    if (
-        connector_name == HYPERLIQUID_PERPETUAL_CONNECTOR
-        and trading_pair == HYPERLIQUID_PERPETUAL_CONNECTOR_PAIR
-    ):
-        return HYPERLIQUID_PERPETUAL_LOGICAL_PAIR
+    if connector_name == HYPERLIQUID_PERPETUAL_CONNECTOR:
+        return _replace_quote(trading_pair, "USD", "USDC")
     return trading_pair
 
 

@@ -17,13 +17,36 @@ from services.hyperliquid_market import (
     ("connector_name", "trading_pair", "expected"),
     [
         ("hyperliquid_perpetual", "HYPE-USDC", "HYPE-USD"),
-        ("hyperliquid_perpetual", "BTC-USDC", "BTC-USDC"),
-        ("hyperliquid", "HYPE-USDC", "HYPE-USDC"),
+        ("hyperliquid_perpetual", "BTC-USDC", "BTC-USD"),
+        ("hyperliquid_perpetual", "ETH-USDC", "ETH-USD"),
+        ("hyperliquid_perpetual", "BTC-USD", "BTC-USD"),
+        ("hyperliquid_perpetual", "BTC-USDT", "BTC-USDT"),
+        ("hyperliquid", "SOL-USDC", "SOL-USDC"),
         ("hyperliquid_perpetual_testnet", "HYPE-USDC", "HYPE-USDC"),
     ],
 )
-def test_connector_trading_pair_is_narrowly_scoped(connector_name, trading_pair, expected):
+def test_connector_trading_pair_normalizes_hyperliquid_collateral(
+    connector_name, trading_pair, expected
+):
     assert connector_trading_pair(connector_name, trading_pair) == expected
+
+
+@pytest.mark.parametrize(
+    ("connector_name", "trading_pair", "expected"),
+    [
+        ("hyperliquid_perpetual", "HYPE-USD", "HYPE-USDC"),
+        ("hyperliquid_perpetual", "BTC-USD", "BTC-USDC"),
+        ("hyperliquid_perpetual", "ETH-USD", "ETH-USDC"),
+        ("hyperliquid_perpetual", "BTC-USDC", "BTC-USDC"),
+        ("hyperliquid_perpetual", "BTC-USDT", "BTC-USDT"),
+        ("hyperliquid", "SOL-USD", "SOL-USD"),
+        ("hyperliquid_perpetual_testnet", "HYPE-USD", "HYPE-USD"),
+    ],
+)
+def test_logical_trading_pair_normalizes_hyperliquid_collateral(
+    connector_name, trading_pair, expected
+):
+    assert logical_trading_pair(connector_name, trading_pair) == expected
 
 
 def test_market_data_initializes_hyperliquid_connector_market():
