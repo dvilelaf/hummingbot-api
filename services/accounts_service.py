@@ -2912,13 +2912,14 @@ class AccountsService:
             # Format balances list
             balances = balances_response.get("balances", {})
             balances_list = []
+            requested_tokens = {token.casefold() for token in tokens} if tokens is not None else None
 
             for token, balance in balances.items():
                 if balance is None or balance == "":
                     continue
                 numeric_balance = float(balance)
                 if numeric_balance > 0 or (
-                    tokens is not None and token in tokens and numeric_balance == 0
+                    requested_tokens is not None and token.casefold() in requested_tokens and numeric_balance == 0
                 ):
                     balances_list.append({
                         "token": token,

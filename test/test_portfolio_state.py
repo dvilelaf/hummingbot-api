@@ -622,6 +622,28 @@ class TestGatewayBalances:
         )
 
     @pytest.mark.asyncio
+    async def test_requested_zero_balance_matches_token_case_insensitively(self, accounts_service):
+        """Requested zero balances match Gateway token spelling case-insensitively."""
+        accounts_service.gateway_client.get_balances.return_value = {
+            "balances": {"cbBTC": "0"}
+        }
+        accounts_service._fetch_gateway_prices_immediate.return_value = {
+            "cbBTC": Decimal("60000")
+        }
+
+        result = await accounts_service.get_gateway_balances(
+            "ethereum", "0xwallet", network="ethereum-base", tokens=["CBBTC"]
+        )
+
+        assert result == [{
+            "token": "cbBTC",
+            "units": 0.0,
+            "price": 60000.0,
+            "value": 0.0,
+            "available_units": 0.0,
+        }]
+
+    @pytest.mark.asyncio
     async def test_unfiltered_gateway_balances_still_omit_zero_rows(self, accounts_service):
         """Unfiltered Gateway reads preserve the existing non-zero-only result."""
         accounts_service.gateway_client.get_balances.return_value = {
