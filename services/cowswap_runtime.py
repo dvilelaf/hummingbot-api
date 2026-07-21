@@ -593,19 +593,24 @@ async def refreshed_cowswap_order_records(
     *,
     runtime: Any | None,
     runtime_dependencies: CowSwapRuntimeDependencies | None,
+    trading_pair: str | None,
 ) -> list[dict[str, Any]]:
     """Refresh non-terminal CoW orders before exposing provider state."""
     records = cowswap_order_records(
         runtime=runtime,
         runtime_dependencies=runtime_dependencies,
     )
-    if runtime is None:
+    if runtime is None or trading_pair is None:
         return records
     refreshed: list[dict[str, Any]] = []
     for record in records:
         client_order_id = str(record.get("client_order_id", ""))
         state = str(record.get("state", "")).lower()
-        if client_order_id and state not in {"filled", "cancelled", "canceled", "expired", "failed"}:
+        if (
+            client_order_id
+            and record.get("trading_pair") == trading_pair
+            and state not in {"filled", "cancelled", "canceled", "expired", "failed"}
+        ):
             record = await poll_cowswap_order(
                 runtime=runtime,
                 client_order_id=client_order_id,

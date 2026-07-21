@@ -2258,6 +2258,7 @@ class AccountsService:
             orders = await refreshed_cowswap_order_records(
                 runtime=self._cowswap_runtime,
                 runtime_dependencies=self._cowswap_runtime_dependencies,
+                trading_pair=trading_pair,
             )
             if trading_pair:
                 orders = [order for order in orders if order.get("trading_pair") == trading_pair]

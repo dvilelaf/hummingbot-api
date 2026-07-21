@@ -781,11 +781,13 @@ def test_refreshed_cowswap_order_records_polls_only_non_terminal_orders():
                     "client_order_id": "cow-open",
                     "order_uid": "0xopen",
                     "state": "OPEN",
+                    "trading_pair": "WETH-USDC",
                 },
                 "cow-done": {
                     "client_order_id": "cow-done",
                     "order_uid": "0xdone",
                     "state": "CANCELLED",
+                    "trading_pair": "WETH-USDC",
                 },
             }
 
@@ -803,6 +805,7 @@ def test_refreshed_cowswap_order_records_polls_only_non_terminal_orders():
         refreshed_cowswap_order_records(
             runtime=runtime,
             runtime_dependencies=None,
+            trading_pair="WETH-USDC",
         ),
     )
 
