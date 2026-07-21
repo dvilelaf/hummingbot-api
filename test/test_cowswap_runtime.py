@@ -24,6 +24,7 @@ cowswap_token_map_from_json = cowswap_runtime.cowswap_token_map_from_json
 get_cowswap_runtime_status = cowswap_runtime.get_cowswap_runtime_status
 poll_cowswap_order = cowswap_runtime.poll_cowswap_order
 place_cowswap_order = cowswap_runtime.place_cowswap_order
+refreshed_cowswap_order_records = cowswap_runtime.refreshed_cowswap_order_records
 build_cowswap_runtime = cowswap_runtime.build_cowswap_runtime
 CowSwapRuntimeDependencies = cowswap_runtime.CowSwapRuntimeDependencies
 CowSwapRuntimeUnavailableError = cowswap_runtime.CowSwapRuntimeUnavailableError
@@ -769,6 +770,47 @@ def test_cowswap_order_records_reads_json_store(tmp_path):
             "trading_pair": "WETH-USDC",
         },
     ]
+
+
+def test_refreshed_cowswap_order_records_polls_only_non_terminal_orders():
+    class RefreshRuntime(FakeCowSwapRuntime):
+        @property
+        def in_flight_orders(self):
+            return {
+                "cow-open": {
+                    "client_order_id": "cow-open",
+                    "order_uid": "0xopen",
+                    "state": "OPEN",
+                },
+                "cow-done": {
+                    "client_order_id": "cow-done",
+                    "order_uid": "0xdone",
+                    "state": "CANCELLED",
+                },
+            }
+
+        async def poll(self, client_order_id):
+            self.calls.append(("poll", client_order_id))
+            return {
+                "client_order_id": client_order_id,
+                "order_uid": "0xopen",
+                "state": "EXPIRED",
+            }
+
+    runtime = RefreshRuntime()
+
+    records = asyncio.run(
+        refreshed_cowswap_order_records(
+            runtime=runtime,
+            runtime_dependencies=None,
+        ),
+    )
+
+    assert {record["client_order_id"]: record["state"] for record in records} == {
+        "cow-open": "EXPIRED",
+        "cow-done": "CANCELLED",
+    }
+    assert runtime.calls == [("poll", "cow-open")]
 
 
 def test_cowswap_token_map_from_json_accepts_base_quote_object():

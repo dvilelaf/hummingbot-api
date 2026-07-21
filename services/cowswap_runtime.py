@@ -589,6 +589,31 @@ def cowswap_order_records(
     return list(deduped.values())
 
 
+async def refreshed_cowswap_order_records(
+    *,
+    runtime: Any | None,
+    runtime_dependencies: CowSwapRuntimeDependencies | None,
+) -> list[dict[str, Any]]:
+    """Refresh non-terminal CoW orders before exposing provider state."""
+    records = cowswap_order_records(
+        runtime=runtime,
+        runtime_dependencies=runtime_dependencies,
+    )
+    if runtime is None:
+        return records
+    refreshed: list[dict[str, Any]] = []
+    for record in records:
+        client_order_id = str(record.get("client_order_id", ""))
+        state = str(record.get("state", "")).lower()
+        if client_order_id and state not in {"filled", "cancelled", "canceled", "expired", "failed"}:
+            record = await poll_cowswap_order(
+                runtime=runtime,
+                client_order_id=client_order_id,
+            )
+        refreshed.append(record)
+    return refreshed
+
+
 def _quote_field(quote: object, field_name: str) -> str:
     quote_payload = _object_field(quote, "quote", None)
     if quote_payload is None:

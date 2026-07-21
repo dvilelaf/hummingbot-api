@@ -31,6 +31,7 @@ from services.cowswap_runtime import (
     cowswap_supported_order_types,
     place_cowswap_order,
     poll_cowswap_order,
+    refreshed_cowswap_order_records,
 )
 from services.gateway_client import GatewayClient
 from services.gateway_transaction_poller import GatewayTransactionPoller
@@ -2254,7 +2255,7 @@ class AccountsService:
                         limit: int = 100, offset: int = 0) -> List[Dict]:
         """Get order history using OrderRepository."""
         if connector_name == COWSWAP_CONNECTOR_NAME:
-            orders = cowswap_order_records(
+            orders = await refreshed_cowswap_order_records(
                 runtime=self._cowswap_runtime,
                 runtime_dependencies=self._cowswap_runtime_dependencies,
             )
