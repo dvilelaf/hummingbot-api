@@ -14,6 +14,7 @@ from hummingbot.core.data_type.common import OrderType, PositionAction, TradeTyp
 
 from deps import get_accounts_service, get_database_manager
 from models.provider_boundary import (
+    ProviderCancelIntentRequest,
     ProviderIntentRequest,
     ProviderIntentResponse,
     ProviderPosition,
@@ -305,12 +306,14 @@ def _optional_position_decimal(value: Any, field_name: str) -> Decimal | None:
 
 @router.post("/intents", response_model=ProviderIntentResponse)
 async def submit_provider_intent(
-    body: ProviderIntentRequest,
+    body: ProviderIntentRequest | ProviderCancelIntentRequest,
     request: Request,
     accounts_service: AccountsService = Depends(get_accounts_service),
     db_manager=Depends(get_database_manager),  # noqa: ANN001 - kept for parity with swap router dependencies.
 ) -> ProviderIntentResponse:
     del db_manager
+    if body.action == "order_cancel":
+        return await _submit_cancel_intent(body, request, accounts_service)
     if body.action == "order":
         if _order_intent_executes_as_gateway_swap(body):
             return await _submit_swap_intent(
@@ -323,6 +326,42 @@ async def submit_provider_intent(
         body,
         request,
         accounts_service,
+    )
+
+
+async def _submit_cancel_intent(
+    body: ProviderCancelIntentRequest,
+    request: Request,
+    accounts_service: AccountsService,
+) -> ProviderIntentResponse:
+    try:
+        provider_intent_authorized = _mainnet_provider_intent_authorized(body, request)
+        cancelled_order_id = await accounts_service.cancel_order(
+            account_name=body.account_name,
+            connector_name=body.connector_name,
+            client_order_id=body.client_order_id,
+            safe_testnet=body.mode == "testnet",
+            marlin_provider_intent_authorized=provider_intent_authorized,
+        )
+    except HTTPException as exc:
+        return ProviderIntentResponse(
+            status="rejected" if exc.status_code < 500 else "failed",
+            correlation_id=body.correlation_id,
+            external_order_id=body.client_order_id,
+            provider_error=_redact_secret_text(exc.detail),
+        )
+    except Exception as exc:
+        return ProviderIntentResponse(
+            status="failed",
+            correlation_id=body.correlation_id,
+            external_order_id=body.client_order_id,
+            provider_error=_redact_secret_text(exc),
+        )
+    return ProviderIntentResponse(
+        status="accepted",
+        correlation_id=body.correlation_id,
+        external_order_id=str(cancelled_order_id),
+        provider_status="cancel_requested",
     )
 
 
@@ -1074,7 +1113,7 @@ def _available_units_for_asset(rows: list[Any], asset: str) -> Decimal:
 
 
 def _mainnet_provider_intent_authorized(
-    body: ProviderIntentRequest,
+    body: ProviderIntentRequest | ProviderCancelIntentRequest,
     request: Request,
 ) -> bool:
     if body.mode != "mainnet":

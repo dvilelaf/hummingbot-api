@@ -52,12 +52,16 @@ def assert_live_order_cancel_allowed(
     account_name: str,
     connector_name: str,
     live_action_authorization: dict[str, Any] | None = None,
+    marlin_provider_intent_authorized: bool = False,
     source: str,
 ) -> None:
     """Fail closed before direct live connector order cancellation."""
+    del live_action_authorization
     if _is_safe_connector(connector_name):
         return
     if _is_marlin_runtime_profile():
+        if marlin_provider_intent_authorized:
+            return
         raise HTTPException(
             status_code=503,
             detail=(

@@ -2056,6 +2056,7 @@ class AccountsService:
         client_order_id: str,
         safe_testnet: bool = False,
         live_action_authorization: Optional[Dict[str, Any]] = None,
+        marlin_provider_intent_authorized: bool = False,
     ) -> str:
         """
         Cancel an active order.
@@ -2078,6 +2079,7 @@ class AccountsService:
                         account_name=account_name,
                         connector_name=connector_name,
                         live_action_authorization=live_action_authorization,
+                        marlin_provider_intent_authorized=marlin_provider_intent_authorized,
                         source="accounts_service.cancel_order",
                     )
                 return await cancel_cowswap_order(
@@ -2111,6 +2113,7 @@ class AccountsService:
                     account_name=account_name,
                     connector_name=connector_name,
                     live_action_authorization=live_action_authorization,
+                    marlin_provider_intent_authorized=marlin_provider_intent_authorized,
                     source="accounts_service.cancel_order",
                 )
             result = connector.cancel(trading_pair=trading_pair, client_order_id=client_order_id)

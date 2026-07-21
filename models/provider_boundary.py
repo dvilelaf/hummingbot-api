@@ -61,6 +61,15 @@ class ProviderIntentRequest(BaseModel):
     wallet_identity: Optional[Dict[str, Any]] = None
 
 
+class ProviderCancelIntentRequest(BaseModel):
+    account_name: str = Field(min_length=1)
+    connector_name: str = Field(min_length=1)
+    action: Literal["order_cancel"]
+    mode: Literal["testnet", "mainnet"]
+    client_order_id: str = Field(min_length=1)
+    correlation_id: Optional[str] = None
+
+
 class ProviderIntentResponse(BaseModel):
     status: str
     correlation_id: Optional[str] = None

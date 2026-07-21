@@ -171,6 +171,18 @@ def test_marlin_runtime_blocks_direct_live_order_cancel_even_when_env_enabled(mo
     assert "/provider/intents" in str(exc_info.value.detail)
 
 
+def test_marlin_runtime_allows_authenticated_provider_intent_cancel(monkeypatch):
+    monkeypatch.setenv("MARLIN_RUNTIME_PROFILE", "marlin")
+    gate = _live_gate_module()
+
+    gate.assert_live_order_cancel_allowed(
+        account_name="master_account",
+        connector_name="cowswap",
+        marlin_provider_intent_authorized=True,
+        source="accounts_service.cancel_order",
+    )
+
+
 def test_gateway_mutation_gate_allows_test_networks_by_default(monkeypatch):
     monkeypatch.delenv("TRADING_SAFETY_LIVE_GATEWAY_MUTATIONS_ENABLED", raising=False)
     gate = _live_gate_module()

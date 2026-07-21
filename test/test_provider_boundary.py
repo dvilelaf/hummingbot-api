@@ -378,6 +378,8 @@ class FakeAccountsService:
         self.update_success = True
         self.place_trade_error = None
         self.place_trade_calls = []
+        self.cancel_order_calls = []
+        self.cancel_order_error = None
         self.account_positions = []
         self.position_calls = []
         self.position_refresh_error = None
@@ -421,6 +423,12 @@ class FakeAccountsService:
             raise self.place_trade_error
         return "order-1"
 
+    async def cancel_order(self, **kwargs):
+        self.cancel_order_calls.append(kwargs)
+        if self.cancel_order_error is not None:
+            raise self.cancel_order_error
+        return kwargs["client_order_id"]
+
 
 def _request_with_market_data():
     market_data_service = FakeMarketDataService()
@@ -428,6 +436,63 @@ def _request_with_market_data():
         app=SimpleNamespace(state=SimpleNamespace(market_data_service=market_data_service)),
     )
     return request, market_data_service
+
+
+def test_provider_cancel_intent_uses_authenticated_service_path(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            provider_boundary.ProviderCancelIntentRequest(
+                account_name="master_account",
+                action="order_cancel",
+                client_order_id="cowswap-WETH-USDC-order-1",
+                connector_name="cowswap",
+                correlation_id="marlin-order-1",
+                mode="mainnet",
+            ),
+            _authorized_request(),
+            service,
+        ),
+    )
+
+    assert result.status == "accepted"
+    assert result.provider_status == "cancel_requested"
+    assert result.external_order_id == "cowswap-WETH-USDC-order-1"
+    assert service.cancel_order_calls == [
+        {
+            "account_name": "master_account",
+            "client_order_id": "cowswap-WETH-USDC-order-1",
+            "connector_name": "cowswap",
+            "marlin_provider_intent_authorized": True,
+            "safe_testnet": False,
+        }
+    ]
+
+
+def test_provider_cancel_intent_rejects_mainnet_without_token(monkeypatch):
+    monkeypatch.setenv("MARLIN_PROVIDER_INTENT_TOKEN", PROVIDER_INTENT_TOKEN)
+    provider_boundary = _provider_boundary_module()
+    service = FakeAccountsService()
+
+    result = asyncio.run(
+        provider_boundary.submit_provider_intent(
+            provider_boundary.ProviderCancelIntentRequest(
+                account_name="master_account",
+                action="order_cancel",
+                client_order_id="order-1",
+                connector_name="cowswap",
+                mode="mainnet",
+            ),
+            SimpleNamespace(headers={}),
+            service,
+        ),
+    )
+
+    assert result.status == "rejected"
+    assert service.cancel_order_calls == []
 
 
 def test_hyperliquid_perpetual_snapshot_uses_native_market_and_exposes_logical_collateral():
