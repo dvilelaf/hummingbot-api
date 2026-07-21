@@ -2,6 +2,10 @@ FROM dvilela/hummingbot-api-marlin-base@sha256:abb76f79d3265e51be7d3d726730d3959
 
 WORKDIR /hummingbot-api
 
+ARG COWSWAP_CONNECTOR_COMMIT=f91755182cf02ac1b72c409f4d517b4e68663707
+RUN pip install --no-cache-dir --force-reinstall --no-deps \
+    "hummingbot-cowswap-connector @ git+https://github.com/dvilelaf/hummingbot-dex-connectors.git@${COWSWAP_CONNECTOR_COMMIT}#subdirectory=cowswap"
+
 COPY main.py config.py deps.py ./
 COPY models ./models
 COPY routers ./routers
