@@ -1845,13 +1845,10 @@ def test_cowswap_limit_reduce_approval_uses_clipped_submitted_amount(monkeypatch
     monkeypatch.setattr(
         provider_boundary,
         "PositionAction",
-        SimpleNamespace(OPEN="OPEN", CLOSE="CLOSE"),
+        SimpleNamespace(OPEN="OPEN"),
     )
     service = FakeAccountsService()
-    service.account_positions = [
-        {"trading_pair": "WETH-USDC", "side": "LONG", "amount": "0.0004"},
-    ]
-    service.cowswap_evm_reader.balances["WETH"] = "1000000000000000"
+    service.cowswap_evm_reader.balances["WETH"] = "400000000000000"
     service.cowswap_evm_reader.allowances["WETH"] = "0"
 
     body = provider_boundary.ProviderIntentRequest(
@@ -1880,7 +1877,8 @@ def test_cowswap_limit_reduce_approval_uses_clipped_submitted_amount(monkeypatch
     assert result.status == "submitted"
     assert result.submitted_quantity == Decimal("0.0004")
     assert service.place_trade_calls[0]["amount"] == Decimal("0.0004")
-    assert service.place_trade_calls[0]["position_action"] == "CLOSE"
+    assert service.place_trade_calls[0]["position_action"] == "OPEN"
+    assert service.position_calls == []
     assert service.cowswap_evm_reader.approval_calls == [
         ("WETH", "0xowner", "0xvaultrelayer", "400000000000000"),
     ]

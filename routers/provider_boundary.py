@@ -389,6 +389,29 @@ async def _resolve_reduce_order(
     accounts_service: AccountsService,
 ) -> tuple[Decimal, PositionAction]:
     """Refresh positions, validate, clip quantity, return (clipped_amount, position_action)."""
+    if body.connector_name == COWSWAP_CONNECTOR_NAME:
+        if body.side.upper() != "SELL":
+            raise HTTPException(status_code=400, detail="CowSwap reduce orders require SELL side")
+        runtime = getattr(accounts_service, "_cowswap_runtime", None)
+        dependencies = getattr(accounts_service, "_cowswap_runtime_dependencies", None)
+        evm_reader = getattr(dependencies, "evm_reader", None)
+        owner = getattr(dependencies, "owner_address", "")
+        try:
+            sell_token, _ = _cowswap_tokens_for_pair(runtime, body.market_id)
+            if evm_reader is None or not owner:
+                raise ValueError("CowSwap EVM reader or owner address missing")
+            fresh_position = _atomic_amount_to_human(
+                await asyncio.to_thread(evm_reader.balance_of, sell_token, owner),
+                int(sell_token.decimals),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"CowSwap balance unavailable: {exc}") from exc
+        if fresh_position <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"no available {sell_token.symbol} balance for {body.market_id}",
+            )
+        return min(body.quantity, fresh_position), PositionAction.OPEN
     positions = await accounts_service.get_account_positions(
         body.account_name,
         body.connector_name,
