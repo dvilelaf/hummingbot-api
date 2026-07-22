@@ -20,6 +20,7 @@ cowswap_order_records = cowswap_runtime.cowswap_order_records
 cowswap_order_submission_blocker = cowswap_runtime.cowswap_order_submission_blocker
 cowswap_runtime_prices = cowswap_runtime.cowswap_runtime_prices
 cowswap_supported_order_types = cowswap_runtime.cowswap_supported_order_types
+cowswap_trade_records = cowswap_runtime.cowswap_trade_records
 cowswap_token_map_from_json = cowswap_runtime.cowswap_token_map_from_json
 get_cowswap_runtime_status = cowswap_runtime.get_cowswap_runtime_status
 poll_cowswap_order = cowswap_runtime.poll_cowswap_order
@@ -768,6 +769,46 @@ def test_cowswap_order_records_reads_json_store(tmp_path):
             "order_uid": "0xuid",
             "state": "SUBMITTED",
             "trading_pair": "WETH-USDC",
+        },
+    ]
+
+
+def test_cowswap_trade_records_normalizes_filled_buy_economics_once():
+    records = [
+        {
+            "client_order_id": "cow-buy-1",
+            "trading_pair": "WETH-USDC",
+            "order_uid": "0xuid",
+            "state": "filled",
+            "partially_fillable": False,
+            "sell_token": {"symbol": "USDC", "decimals": 6},
+            "buy_token": {"symbol": "WETH", "decimals": 18},
+            "executed_sell": "5790012",
+            "executed_buy": "3000000000000000",
+            "settlement_tx_hash": "0xtx",
+        },
+        {
+            "client_order_id": "cow-open-1",
+            "trading_pair": "WETH-USDC",
+            "order_uid": "0xopen",
+            "state": "open",
+        },
+    ]
+
+    assert cowswap_trade_records(records, account_name="master_account") == [
+        {
+            "trade_id": "0xuid",
+            "order_id": "cow-buy-1",
+            "client_order_id": "cow-buy-1",
+            "account_name": "master_account",
+            "connector_name": COWSWAP_CONNECTOR_NAME,
+            "trading_pair": "WETH-USDC",
+            "trade_type": "BUY",
+            "amount": "0.003000000000000000",
+            "price": "1930.004",
+            "fee_paid": "0",
+            "fee_currency": "USDC",
+            "settlement_tx_hash": "0xtx",
         },
     ]
 

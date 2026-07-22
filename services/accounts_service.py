@@ -29,6 +29,7 @@ from services.cowswap_runtime import (
     cowswap_order_records,
     cowswap_order_submission_blocker,
     cowswap_supported_order_types,
+    cowswap_trade_records,
     place_cowswap_order,
     poll_cowswap_order,
     refreshed_cowswap_order_records,
@@ -2333,6 +2334,17 @@ class AccountsService:
                         start_time: Optional[int] = None, end_time: Optional[int] = None,
                         limit: int = 100, offset: int = 0) -> List[Dict]:
         """Get trade history using TradeRepository."""
+        if connector_name == COWSWAP_CONNECTOR_NAME:
+            orders = await refreshed_cowswap_order_records(
+                runtime=self._cowswap_runtime,
+                runtime_dependencies=self._cowswap_runtime_dependencies,
+                trading_pair=trading_pair,
+            )
+            trades = cowswap_trade_records(orders, account_name=account_name or "")
+            if trade_type:
+                trades = [trade for trade in trades if trade["trade_type"] == trade_type.upper()]
+            return trades[offset : offset + limit]
+
         await self.ensure_db_initialized()
         
         try:

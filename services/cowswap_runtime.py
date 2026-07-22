@@ -589,6 +589,22 @@ def cowswap_order_records(
     return list(deduped.values())
 
 
+def cowswap_trade_records(
+    records: list[dict[str, Any]],
+    *,
+    account_name: str,
+) -> list[dict[str, Any]]:
+    """Normalize settled, non-partial CoW orders as provider trade fills."""
+    trades: list[dict[str, Any]] = []
+    for record in records:
+        if str(record.get("state", "")).lower() != "filled" or record.get("partially_fillable") is True:
+            continue
+        trade = _cowswap_filled_trade(record, account_name=account_name)
+        if trade is not None:
+            trades.append(trade)
+    return trades
+
+
 async def refreshed_cowswap_order_records(
     *,
     runtime: Any | None,
@@ -764,6 +780,59 @@ def _serialize_cowswap_order(order: Any) -> dict[str, Any]:
     normalized["connector_name"] = COWSWAP_CONNECTOR_NAME
     normalized["exchange_order_id"] = normalized.get("order_uid")
     return normalized
+
+
+def _cowswap_filled_trade(record: Mapping[str, Any], *, account_name: str) -> dict[str, Any] | None:
+    trading_pair = str(record.get("trading_pair", ""))
+    pair_tokens = trading_pair.split("-")
+    if len(pair_tokens) != 2:
+        return None
+    base_symbol, quote_symbol = pair_tokens
+    sell_token = _object_field(record, "sell_token", {})
+    buy_token = _object_field(record, "buy_token", {})
+    sell_symbol = str(_object_field(sell_token, "symbol", ""))
+    buy_symbol = str(_object_field(buy_token, "symbol", ""))
+    try:
+        executed_sell = Decimal(str(record.get("executed_sell", "0"))).scaleb(
+            -int(_object_field(sell_token, "decimals", 0)),
+        )
+        executed_buy = Decimal(str(record.get("executed_buy", "0"))).scaleb(
+            -int(_object_field(buy_token, "decimals", 0)),
+        )
+    except (TypeError, ValueError):
+        return None
+    if executed_sell <= 0 or executed_buy <= 0:
+        return None
+
+    if (sell_symbol, buy_symbol) == (base_symbol, quote_symbol):
+        trade_type = "SELL"
+        amount = executed_sell
+        quote_amount = executed_buy
+    elif (sell_symbol, buy_symbol) == (quote_symbol, base_symbol):
+        trade_type = "BUY"
+        amount = executed_buy
+        quote_amount = executed_sell
+    else:
+        return None
+
+    order_uid = str(record.get("order_uid", ""))
+    client_order_id = str(record.get("client_order_id", ""))
+    if not order_uid or not client_order_id:
+        return None
+    return {
+        "trade_id": order_uid,
+        "order_id": client_order_id,
+        "client_order_id": client_order_id,
+        "account_name": account_name,
+        "connector_name": COWSWAP_CONNECTOR_NAME,
+        "trading_pair": trading_pair,
+        "trade_type": trade_type,
+        "amount": format(amount, "f"),
+        "price": format(quote_amount / amount, "f"),
+        "fee_paid": "0",
+        "fee_currency": quote_symbol,
+        "settlement_tx_hash": record.get("settlement_tx_hash"),
+    }
 
 
 def _has_raw_private_key_material(mapping: Mapping[str, Any] | None) -> bool:
