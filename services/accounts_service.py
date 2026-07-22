@@ -2340,6 +2340,8 @@ class AccountsService:
                 runtime_dependencies=self._cowswap_runtime_dependencies,
                 trading_pair=trading_pair,
             )
+            if trading_pair:
+                orders = [order for order in orders if order.get("trading_pair") == trading_pair]
             trades = cowswap_trade_records(orders, account_name=account_name or "")
             if trade_type:
                 trades = [trade for trade in trades if trade["trade_type"] == trade_type.upper()]
