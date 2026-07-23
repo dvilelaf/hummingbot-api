@@ -28,6 +28,7 @@ from services.cowswap_runtime import (
     cowswap_connector_config_map,
     cowswap_order_records,
     cowswap_order_submission_blocker,
+    cowswap_runtime_balance_rows,
     cowswap_supported_order_types,
     cowswap_trade_records,
     place_cowswap_order,
@@ -64,6 +65,7 @@ GATEWAY_PRICE_CONNECTORS = {
 }
 GATEWAY_PRICE_FETCH_TIMEOUT_SECONDS = 2
 COWSWAP_SAFE_TEST_NETWORKS = {"sepolia"}
+COWSWAP_ACCOUNT_NAME = "master_account"
 SAFE_TESTNET_ORDER_CONNECTORS = {"hyperliquid_perpetual_testnet", "hyperliquid_testnet"}
 ORDER_TRACKING_CONFIRM_TIMEOUT_SECONDS = 5
 ORDER_TRACKING_CONFIRM_POLL_SECONDS = 0.2
@@ -885,6 +887,13 @@ class AccountsService:
         tasks = []
         task_meta = []  # (account_name, connector_name)
         connector_refresh_success = True
+        cowswap_requested = COWSWAP_CONNECTOR_NAME in (connector_names or ())
+        if cowswap_requested or connector_names is None:
+            for account_name, account_state in self.accounts_state.items():
+                if account_name != COWSWAP_ACCOUNT_NAME:
+                    account_state.pop(COWSWAP_CONNECTOR_NAME, None)
+        if cowswap_requested and account_names and set(account_names) != {COWSWAP_ACCOUNT_NAME}:
+            return False
 
         for account_name, connectors in all_connectors.items():
             # Filter by account_names if specified
@@ -897,10 +906,45 @@ class AccountsService:
                 # Filter by connector_names if specified
                 if connector_names and connector_name not in connector_names:
                     continue
+                if connector_name == COWSWAP_CONNECTOR_NAME:
+                    continue
 
                 self._connector_balance_refresh_errors.pop(connector_name, None)
                 tasks.append(self._get_connector_tokens_info(connector, connector_name))
                 task_meta.append((account_name, connector_name))
+
+        if cowswap_requested or connector_names is None:
+            runtime_ready = (
+                getattr(self, "_cowswap_runtime", None) is not None
+                and cowswap_order_submission_blocker(
+                    COWSWAP_CONNECTOR_NAME,
+                    runtime_dependencies=getattr(self, "_cowswap_runtime_dependencies", None),
+                )
+                is None
+            )
+            if cowswap_requested and runtime_ready:
+                cowswap_accounts = {COWSWAP_ACCOUNT_NAME}
+            elif cowswap_requested:
+                cowswap_accounts = set()
+                connector_refresh_success = False
+                self.accounts_state.setdefault(COWSWAP_ACCOUNT_NAME, {})[
+                    COWSWAP_CONNECTOR_NAME
+                ] = []
+            else:
+                configured = runtime_ready or self._has_cowswap_credentials(COWSWAP_ACCOUNT_NAME)
+                if not configured:
+                    master_state = self.accounts_state.get(COWSWAP_ACCOUNT_NAME)
+                    if master_state is not None:
+                        master_state.pop(COWSWAP_CONNECTOR_NAME, None)
+                cowswap_accounts = (
+                    {COWSWAP_ACCOUNT_NAME}
+                    if configured and (not account_names or COWSWAP_ACCOUNT_NAME in account_names)
+                    else set()
+                )
+            for account_name in cowswap_accounts:
+                self.accounts_state.setdefault(account_name, {})
+                tasks.append(self._get_cowswap_tokens_info())
+                task_meta.append((account_name, COWSWAP_CONNECTOR_NAME))
 
         self._mark_filtered_cowswap_accounts_configured(
             account_names=account_names,
@@ -1032,6 +1076,13 @@ class AccountsService:
 
         return logical_balance_rows(connector_name, tokens_info)
 
+    async def _get_cowswap_tokens_info(self) -> List[Dict]:
+        """Read CowSwap balances through its provider-owned runtime."""
+        return await asyncio.to_thread(
+            cowswap_runtime_balance_rows,
+            getattr(self, "_cowswap_runtime_dependencies", None),
+        )
+
     def connector_balance_refresh_error(self, connector_name: str) -> str | None:
         """Return the latest balance refresh error for a connector, if any."""
         return self._connector_balance_refresh_errors.get(connector_name)
@@ -1155,6 +1206,8 @@ class AccountsService:
     ):
         if connector_names is not None and COWSWAP_CONNECTOR_NAME not in connector_names:
             return
+        if account_names and set(account_names) != {COWSWAP_ACCOUNT_NAME}:
+            return
 
         try:
             accounts = account_names if account_names is not None else self.list_accounts()
@@ -1162,10 +1215,13 @@ class AccountsService:
             return
 
         for account_name in accounts:
+            if account_name != COWSWAP_ACCOUNT_NAME:
+                continue
             runtime_ready = (
-                cowswap_order_submission_blocker(
+                getattr(self, "_cowswap_runtime", None) is not None
+                and cowswap_order_submission_blocker(
                     COWSWAP_CONNECTOR_NAME,
-                    runtime_dependencies=self._cowswap_runtime_dependencies,
+                    runtime_dependencies=getattr(self, "_cowswap_runtime_dependencies", None),
                 )
                 is None
             )

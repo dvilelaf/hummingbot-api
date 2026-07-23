@@ -5,13 +5,14 @@ from __future__ import annotations
 import importlib
 import hashlib
 import json
+import math
 import os
 import re
 import ssl
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -68,6 +69,63 @@ class CowSwapRuntimeDependencies(NamedTuple):
     token_map: Mapping[str, Any] | None = None
     order_store: Any | None = None
     owner_address: str = ""
+
+
+def cowswap_runtime_balance_rows(
+    runtime_dependencies: CowSwapRuntimeDependencies | None,
+) -> list[dict[str, Any]]:
+    """Read configured CowSwap token balances into Hummingbot API rows."""
+    if runtime_dependencies is None:
+        raise CowSwapRuntimeUnavailableError("CowSwap balance runtime is not initialized")
+    blocker = cowswap_order_submission_blocker(
+        COWSWAP_CONNECTOR_NAME,
+        runtime_dependencies=runtime_dependencies,
+    )
+    if blocker:
+        raise CowSwapRuntimeUnavailableError(blocker)
+    owner_address = runtime_dependencies.owner_address
+    signer_owner = getattr(runtime_dependencies.signer_provider, "owner_address", None)
+    if (
+        not callable(getattr(runtime_dependencies.evm_reader, "balance_of", None))
+        or not runtime_dependencies.token_map
+        or not isinstance(owner_address, str)
+        or not owner_address
+        or not isinstance(signer_owner, str)
+        or signer_owner.casefold() != owner_address.casefold()
+    ):
+        raise CowSwapRuntimeUnavailableError("CowSwap balance runtime owner or reader is invalid")
+
+    tokens_by_symbol: dict[str, Any] = {}
+    for mapped_tokens in runtime_dependencies.token_map.values():
+        if isinstance(mapped_tokens, Mapping):
+            tokens = mapped_tokens.values()
+        else:
+            tokens = mapped_tokens
+        for token in tokens:
+            symbol = str(getattr(token, "symbol", "")).strip().upper()
+            if symbol:
+                tokens_by_symbol.setdefault(symbol, token)
+
+    if not tokens_by_symbol:
+        raise CowSwapRuntimeUnavailableError("CowSwap token map contains no readable tokens")
+
+    rows = []
+    for symbol, token in tokens_by_symbol.items():
+        atomic = runtime_dependencies.evm_reader.balance_of(
+            token,
+            owner_address,
+        )
+        if not isinstance(atomic, str) or not atomic.isascii() or not atomic.isdecimal():
+            raise CowSwapRuntimeUnavailableError(f"CowSwap token {symbol} returned malformed atomic balance")
+        decimals = int(token.decimals)
+        if not 0 <= decimals <= 255:
+            raise CowSwapRuntimeUnavailableError(f"CowSwap token {symbol} has invalid decimals")
+        units = Decimal(atomic) / (Decimal(10) ** decimals)
+        units_float = float(units)
+        if not math.isfinite(units_float):
+            raise CowSwapRuntimeUnavailableError(f"CowSwap token {symbol} returned an unrepresentable balance")
+        rows.append({"token": symbol, "units": units_float, "available_units": units_float, "value": 0.0})
+    return rows
 
 
 class GatewayCowSigner:
@@ -194,7 +252,9 @@ class GatewayEvmReader:
         balances = response.get("balances")
         if not isinstance(balances, Mapping):
             raise CowSwapRuntimeUnavailableError("Gateway balances response is missing balances")
-        return _human_amount_to_atomic(str(balances.get(token.symbol, "0")), int(token.decimals))
+        if token.symbol not in balances:
+            raise CowSwapRuntimeUnavailableError(f"Gateway balances response is missing {token.symbol}")
+        return _human_amount_to_atomic(str(balances[token.symbol]), int(token.decimals))
 
     def allowance(self, token: Any, owner: str, spender: str) -> str:
         response = _gateway_post(
@@ -944,14 +1004,36 @@ def _canonical_payload_hash(value: Mapping[str, Any]) -> str:
 
 
 def _human_amount_to_atomic(amount: str, decimals: int) -> str:
-    parsed = Decimal(amount)
-    if parsed <= 0:
+    try:
+        parsed = Decimal(str(amount))
+    except (InvalidOperation, ValueError) as exc:
+        raise CowSwapRuntimeUnavailableError("Gateway amount is not a decimal") from exc
+    if not parsed.is_finite() or parsed < 0 or not 0 <= decimals <= 255:
+        raise CowSwapRuntimeUnavailableError("Gateway amount must be finite and non-negative")
+    _sign, digits, exponent = parsed.as_tuple()
+    coefficient = "".join(map(str, digits)).lstrip("0")
+    if not coefficient:
         return "0"
-    scale = Decimal(10) ** decimals
-    atomic = parsed * scale
-    if atomic != atomic.to_integral_value():
-        atomic = atomic.quantize(Decimal("1"))
-    return str(int(atomic))
+    scale_exponent = exponent + decimals
+    if scale_exponent >= 0:
+        atomic_digits = len(coefficient) + scale_exponent
+        if atomic_digits > 78:
+            raise CowSwapRuntimeUnavailableError("Gateway amount exceeds uint256")
+        atomic = coefficient + ("0" * scale_exponent)
+    else:
+        fractional_digits = -scale_exponent
+        if fractional_digits >= len(coefficient):
+            raise CowSwapRuntimeUnavailableError("Gateway amount has more precision than token decimals")
+        remainder = coefficient[-fractional_digits:]
+        if any(digit != "0" for digit in remainder):
+            raise CowSwapRuntimeUnavailableError("Gateway amount has more precision than token decimals")
+        atomic = coefficient[:-fractional_digits]
+    max_uint256 = str(2**256 - 1)
+    if len(atomic) > len(max_uint256) or (
+        len(atomic) == len(max_uint256) and atomic > max_uint256
+    ):
+        raise CowSwapRuntimeUnavailableError("Gateway amount exceeds uint256")
+    return atomic
 
 
 def _walk_mapping(mapping: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
