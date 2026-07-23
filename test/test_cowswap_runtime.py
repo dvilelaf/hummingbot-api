@@ -774,6 +774,7 @@ def test_cowswap_order_records_reads_json_store(tmp_path):
 
 
 def test_cowswap_trade_records_normalizes_filled_buy_economics_once():
+    executed_at = "2026-07-23T00:01:02+00:00"
     records = [
         {
             "client_order_id": "cow-buy-1",
@@ -795,7 +796,11 @@ def test_cowswap_trade_records_normalizes_filled_buy_economics_once():
         },
     ]
 
-    assert cowswap_trade_records(records, account_name="master_account") == [
+    assert cowswap_trade_records(
+        records,
+        account_name="master_account",
+        evm_reader=SimpleNamespace(transaction_timestamp=lambda _tx_hash: executed_at),
+    ) == [
         {
             "trade_id": "0xuid",
             "order_id": "cow-buy-1",
@@ -809,8 +814,27 @@ def test_cowswap_trade_records_normalizes_filled_buy_economics_once():
             "fee_paid": "0",
             "fee_currency": "USDC",
             "settlement_tx_hash": "0xtx",
+            "external_tx_id": "0xtx",
+            "timestamp": executed_at,
+            "executed_at": executed_at,
         },
     ]
+
+
+def test_gateway_reader_returns_and_caches_confirmed_transaction_timestamp(monkeypatch):
+    reader = GatewayEvmReader(gateway_url="http://gateway", network="base")
+    calls = []
+
+    def gateway_post(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"txStatus": 1, "blockTimestamp": 1_721_234_567}
+
+    monkeypatch.setattr(cowswap_runtime, "_gateway_post", gateway_post)
+
+    expected = "2024-07-17T16:42:47+00:00"
+    assert reader.transaction_timestamp("0xtx") == expected
+    assert reader.transaction_timestamp("0xtx") == expected
+    assert len(calls) == 1
 
 
 def test_refreshed_cowswap_order_records_polls_only_non_terminal_orders():

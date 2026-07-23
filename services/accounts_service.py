@@ -2398,7 +2398,16 @@ class AccountsService:
             )
             if trading_pair:
                 orders = [order for order in orders if order.get("trading_pair") == trading_pair]
-            trades = cowswap_trade_records(orders, account_name=account_name or "")
+            trades = await asyncio.to_thread(
+                cowswap_trade_records,
+                orders,
+                account_name=account_name or "",
+                evm_reader=(
+                    self._cowswap_runtime_dependencies.evm_reader
+                    if self._cowswap_runtime_dependencies is not None
+                    else None
+                ),
+            )
             if trade_type:
                 trades = [trade for trade in trades if trade["trade_type"] == trade_type.upper()]
             return trades[offset : offset + limit]

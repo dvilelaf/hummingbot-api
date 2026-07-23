@@ -12,6 +12,7 @@ import ssl
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -242,6 +243,7 @@ class GatewayEvmReader:
     def __init__(self, *, gateway_url: str, network: str) -> None:
         self.gateway_url = gateway_url.rstrip("/")
         self.network = network
+        self._transaction_timestamps: dict[str, str] = {}
 
     def balance_of(self, token: Any, owner: str) -> str:
         response = _gateway_post(
@@ -266,6 +268,22 @@ class GatewayEvmReader:
         if not isinstance(approvals, Mapping):
             raise CowSwapRuntimeUnavailableError("Gateway allowances response is missing approvals")
         return _human_amount_to_atomic(str(approvals.get(token.symbol, "0")), int(token.decimals))
+
+    def transaction_timestamp(self, tx_hash: str) -> str:
+        """Return the authoritative confirmed block timestamp for a transaction."""
+        if tx_hash in self._transaction_timestamps:
+            return self._transaction_timestamps[tx_hash]
+        response = _gateway_post(
+            self.gateway_url,
+            "chains/ethereum/poll",
+            {"network": self.network, "signature": tx_hash},
+        )
+        timestamp = response.get("blockTimestamp")
+        if response.get("txStatus") != 1 or type(timestamp) is not int or timestamp <= 0:
+            raise CowSwapRuntimeUnavailableError("Gateway transaction timestamp is not confirmed")
+        value = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+        self._transaction_timestamps[tx_hash] = value
+        return value
 
     def approve_cowswap_allowance(self, token: Any, owner: str, spender: str, amount_atomic: str) -> dict[str, Any]:
         """Approve the exact CoW VaultRelayer spend amount through Gateway."""
@@ -653,13 +671,20 @@ def cowswap_trade_records(
     records: list[dict[str, Any]],
     *,
     account_name: str,
+    evm_reader: Any,
 ) -> list[dict[str, Any]]:
     """Normalize settled, non-partial CoW orders as provider trade fills."""
+    if not callable(getattr(evm_reader, "transaction_timestamp", None)):
+        raise CowSwapRuntimeUnavailableError("CowSwap transaction timestamp reader is unavailable")
     trades: list[dict[str, Any]] = []
     for record in records:
         if str(record.get("state", "")).lower() != "filled" or record.get("partially_fillable") is True:
             continue
-        trade = _cowswap_filled_trade(record, account_name=account_name)
+        trade = _cowswap_filled_trade(
+            record,
+            account_name=account_name,
+            evm_reader=evm_reader,
+        )
         if trade is not None:
             trades.append(trade)
     return trades
@@ -842,7 +867,12 @@ def _serialize_cowswap_order(order: Any) -> dict[str, Any]:
     return normalized
 
 
-def _cowswap_filled_trade(record: Mapping[str, Any], *, account_name: str) -> dict[str, Any] | None:
+def _cowswap_filled_trade(
+    record: Mapping[str, Any],
+    *,
+    account_name: str,
+    evm_reader: Any,
+) -> dict[str, Any] | None:
     trading_pair = str(record.get("trading_pair", ""))
     pair_tokens = trading_pair.split("-")
     if len(pair_tokens) != 2:
@@ -879,6 +909,10 @@ def _cowswap_filled_trade(record: Mapping[str, Any], *, account_name: str) -> di
     client_order_id = str(record.get("client_order_id", ""))
     if not order_uid or not client_order_id:
         return None
+    settlement_tx_hash = str(record.get("settlement_tx_hash", ""))
+    if not settlement_tx_hash:
+        raise CowSwapRuntimeUnavailableError("Filled CowSwap order is missing settlement transaction")
+    executed_at = evm_reader.transaction_timestamp(settlement_tx_hash)
     return {
         "trade_id": order_uid,
         "order_id": client_order_id,
@@ -891,7 +925,10 @@ def _cowswap_filled_trade(record: Mapping[str, Any], *, account_name: str) -> di
         "price": format(quote_amount / amount, "f"),
         "fee_paid": "0",
         "fee_currency": quote_symbol,
-        "settlement_tx_hash": record.get("settlement_tx_hash"),
+        "settlement_tx_hash": settlement_tx_hash,
+        "external_tx_id": settlement_tx_hash,
+        "timestamp": executed_at,
+        "executed_at": executed_at,
     }
 
 
