@@ -76,15 +76,32 @@ async def test_cowswap_order_book_initialization_fails_without_runtime_price(mon
 
 
 @pytest.mark.asyncio
-async def test_cowswap_order_book_data_does_not_fabricate_depth():
+async def test_cowswap_order_book_data_uses_independent_runtime_quotes(monkeypatch):
+    from services import market_data_service as module
     from services.market_data_service import MarketDataService
 
     class ConnectorService:
         def get_best_connector_for_market(self, *_args, **_kwargs):
-            return None
+            raise AssertionError("CowSwap order book must not use generic connectors")
 
+    class AccountsService:
+        _cowswap_runtime = object()
+
+    async def fake_order_book(*, runtime, trading_pair):
+        assert runtime is AccountsService._cowswap_runtime
+        assert trading_pair == "WETH-USDC"
+        return {
+            "trading_pair": trading_pair,
+            "bids": [[2499.0, 1.0]],
+            "asks": [[2501.0, 1.0]],
+            "timestamp": 1_721_234_567.0,
+        }
+
+    monkeypatch.setattr(module, "cowswap_runtime_order_book", fake_order_book)
     service = MarketDataService(connector_service=ConnectorService(), rate_oracle=object())
+    service.configure_accounts_service(AccountsService())
 
     data = await service.get_order_book_data("cowswap", "WETH-USDC")
 
-    assert data == {"error": "No connector available for cowswap"}
+    assert data["bids"] == [[2499.0, 1.0]]
+    assert data["asks"] == [[2501.0, 1.0]]

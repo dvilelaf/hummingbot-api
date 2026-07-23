@@ -1,9 +1,35 @@
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 pytest.importorskip("hummingbot")
+
+
+@pytest.mark.asyncio
+async def test_cowswap_get_trades_normalizes_blocking_chain_data_off_event_loop(monkeypatch):
+    from services import accounts_service as module
+    from services.accounts_service import AccountsService
+
+    event_loop_thread = threading.get_ident()
+
+    async def refreshed_orders(**_kwargs):
+        return [{"client_order_id": "cow-1"}]
+
+    def normalized_trades(*_args, **_kwargs):
+        assert threading.get_ident() != event_loop_thread
+        return [{"trade_type": "BUY"}]
+
+    monkeypatch.setattr(module, "refreshed_cowswap_order_records", refreshed_orders)
+    monkeypatch.setattr(module, "cowswap_trade_records", normalized_trades)
+    service = AccountsService.__new__(AccountsService)
+    service._cowswap_runtime = object()
+    service._cowswap_runtime_dependencies = SimpleNamespace(evm_reader=object())
+
+    trades = await service.get_trades(connector_name="cowswap")
+
+    assert trades == [{"trade_type": "BUY"}]
 
 
 @pytest.mark.asyncio

@@ -278,10 +278,16 @@ class GatewayEvmReader:
             "chains/ethereum/poll",
             {"network": self.network, "signature": tx_hash},
         )
+        status = response.get("txStatus")
         timestamp = response.get("blockTimestamp")
-        if response.get("txStatus") != 1 or type(timestamp) is not int or timestamp <= 0:
+        if type(status) is not int or status != 1 or type(timestamp) is not int or timestamp <= 0:
             raise CowSwapRuntimeUnavailableError("Gateway transaction timestamp is not confirmed")
-        value = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+        try:
+            value = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError) as exc:
+            raise CowSwapRuntimeUnavailableError(
+                "Gateway transaction timestamp is invalid",
+            ) from exc
         self._transaction_timestamps[tx_hash] = value
         return value
 
@@ -624,6 +630,62 @@ async def cowswap_runtime_prices(
     return {"error": "; ".join(f"{pair}: {reason}" for pair, reason in errors.items())}
 
 
+async def cowswap_runtime_order_book(
+    *,
+    runtime: Any | None,
+    trading_pair: str,
+) -> dict[str, Any]:
+    """Return one executable bid and ask from independent CowSwap quotes."""
+    if runtime is None:
+        return {"error": "CowSwap runtime is not initialized"}
+    try:
+        base_token, quote_token = runtime._tokens_for_pair(trading_pair)  # noqa: SLF001
+        sell_quote, _ = await runtime._connector.quote_sell(  # noqa: SLF001
+            base_token,
+            quote_token,
+            "1",
+        )
+        if _object_field(sell_quote, "verified", False) is not True:
+            raise CowSwapRuntimeUnavailableError("CowSwap quote is not verified")
+        buy_quote, _ = await runtime._connector.quote_buy(  # noqa: SLF001
+            quote_token,
+            base_token,
+            "1",
+        )
+        if _object_field(buy_quote, "verified", False) is not True:
+            raise CowSwapRuntimeUnavailableError("CowSwap quote is not verified")
+        now = int(datetime.now(timezone.utc).timestamp())
+        if any(
+            int(_quote_field(quote, "validTo")) <= now
+            for quote in (sell_quote, buy_quote)
+        ):
+            raise CowSwapRuntimeUnavailableError("CowSwap quote is stale")
+        base_scale = Decimal(10) ** int(base_token.decimals)
+        quote_scale = Decimal(10) ** int(quote_token.decimals)
+        bid_amount = (
+            Decimal(_quote_field(sell_quote, "sellAmount"))
+            + Decimal(_quote_field(sell_quote, "feeAmount"))
+        ) / base_scale
+        bid_quote = Decimal(_quote_field(sell_quote, "buyAmount")) / quote_scale
+        ask_amount = Decimal(_quote_field(buy_quote, "buyAmount")) / base_scale
+        ask_quote = (
+            Decimal(_quote_field(buy_quote, "sellAmount"))
+            + Decimal(_quote_field(buy_quote, "feeAmount"))
+        ) / quote_scale
+        bid = bid_quote / bid_amount
+        ask = ask_quote / ask_amount
+        if bid_amount <= 0 or ask_amount <= 0 or bid <= 0 or ask <= 0 or bid > ask:
+            raise CowSwapRuntimeUnavailableError("CowSwap quotes returned an invalid market")
+        return {
+            "trading_pair": trading_pair,
+            "bids": [[float(bid), float(bid_amount)]],
+            "asks": [[float(ask), float(ask_amount)]],
+            "timestamp": datetime.now(timezone.utc).timestamp(),
+        }
+    except Exception as exc:  # noqa: BLE001 - returned as market-data error, not hidden.
+        return {"error": str(exc)}
+
+
 async def cancel_cowswap_order(
     *,
     live_action_authorization: Mapping[str, Any] | None = None,
@@ -889,9 +951,14 @@ def _cowswap_filled_trade(
         executed_buy = Decimal(str(record.get("executed_buy", "0"))).scaleb(
             -int(_object_field(buy_token, "decimals", 0)),
         )
-    except (TypeError, ValueError):
+    except (InvalidOperation, TypeError, ValueError):
         return None
-    if executed_sell <= 0 or executed_buy <= 0:
+    if (
+        not executed_sell.is_finite()
+        or not executed_buy.is_finite()
+        or executed_sell <= 0
+        or executed_buy <= 0
+    ):
         return None
 
     if (sell_symbol, buy_symbol) == (base_symbol, quote_symbol):
@@ -911,9 +978,12 @@ def _cowswap_filled_trade(
         return None
     settlement_tx_hash = str(record.get("settlement_tx_hash", ""))
     if not settlement_tx_hash:
-        raise CowSwapRuntimeUnavailableError("Filled CowSwap order is missing settlement transaction")
-    executed_at = evm_reader.transaction_timestamp(settlement_tx_hash)
-    return {
+        return None
+    try:
+        executed_at = evm_reader.transaction_timestamp(settlement_tx_hash)
+    except CowSwapRuntimeUnavailableError:
+        return None
+    trade = {
         "trade_id": order_uid,
         "order_id": client_order_id,
         "client_order_id": client_order_id,
@@ -930,6 +1000,7 @@ def _cowswap_filled_trade(
         "timestamp": executed_at,
         "executed_at": executed_at,
     }
+    return trade
 
 
 def _has_raw_private_key_material(mapping: Mapping[str, Any] | None) -> bool:

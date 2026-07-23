@@ -19,6 +19,7 @@ cowswap_connector_metadata = cowswap_runtime.cowswap_connector_metadata
 cowswap_order_records = cowswap_runtime.cowswap_order_records
 cowswap_order_submission_blocker = cowswap_runtime.cowswap_order_submission_blocker
 cowswap_runtime_prices = cowswap_runtime.cowswap_runtime_prices
+cowswap_runtime_order_book = cowswap_runtime.cowswap_runtime_order_book
 cowswap_supported_order_types = cowswap_runtime.cowswap_supported_order_types
 cowswap_trade_records = cowswap_runtime.cowswap_trade_records
 cowswap_token_map_from_json = cowswap_runtime.cowswap_token_map_from_json
@@ -621,6 +622,62 @@ def test_cowswap_runtime_prices_quotes_configured_pair():
     assert runtime.calls == [("quote_sell", "WETH", "USDC", "1")]
 
 
+def test_cowswap_runtime_order_book_uses_independent_bid_and_ask_quotes():
+    class Connector:
+        async def quote_sell(self, *_args):
+            return SimpleNamespace(
+                verified=True,
+                quote=SimpleNamespace(
+                    sellAmount="1000000000000000000",
+                    buyAmount="2499000000",
+                    feeAmount="1000000000000000",
+                    validTo=4_000_000_000,
+                ),
+            ), "0"
+
+        async def quote_buy(self, *_args):
+            return SimpleNamespace(
+                verified=True,
+                quote=SimpleNamespace(
+                    sellAmount="2500000000",
+                    buyAmount="1000000000000000000",
+                    feeAmount="1000000",
+                    validTo=4_000_000_000,
+                ),
+            ), "0"
+
+    runtime = SimpleNamespace(
+        _connector=Connector(),
+        _tokens_for_pair=lambda _pair: (
+            SimpleNamespace(decimals=18),
+            SimpleNamespace(decimals=6),
+        ),
+    )
+
+    book = asyncio.run(cowswap_runtime_order_book(runtime=runtime, trading_pair="WETH-USDC"))
+
+    assert book["bids"] == [[pytest.approx(2499 / 1.001), 1.001]]
+    assert book["asks"] == [[2501.0, 1.0]]
+
+
+def test_cowswap_runtime_order_book_rejects_unverified_quote():
+    class Connector:
+        async def quote_sell(self, *_args):
+            return SimpleNamespace(verified=False, quote=SimpleNamespace()), "0"
+
+        async def quote_buy(self, *_args):
+            raise AssertionError("unverified bid quote must fail closed")
+
+    runtime = SimpleNamespace(
+        _connector=Connector(),
+        _tokens_for_pair=lambda _pair: (SimpleNamespace(decimals=18), SimpleNamespace(decimals=6)),
+    )
+
+    book = asyncio.run(cowswap_runtime_order_book(runtime=runtime, trading_pair="WETH-USDC"))
+
+    assert book == {"error": "CowSwap quote is not verified"}
+
+
 def test_place_cowswap_order_delegates_market_buy():
     runtime = FakeCowSwapRuntime()
 
@@ -821,6 +878,39 @@ def test_cowswap_trade_records_normalizes_filled_buy_economics_once():
     ]
 
 
+def test_cowswap_trade_records_skips_bad_settlement_and_economics():
+    valid = {
+        "client_order_id": "cow-valid",
+        "trading_pair": "WETH-USDC",
+        "order_uid": "0xvalid",
+        "state": "filled",
+        "partially_fillable": False,
+        "sell_token": {"symbol": "USDC", "decimals": 6},
+        "buy_token": {"symbol": "WETH", "decimals": 18},
+        "executed_sell": "5790012",
+        "executed_buy": "3000000000000000",
+        "settlement_tx_hash": "0xvalidtx",
+    }
+    malformed_records = [
+        {**valid, "client_order_id": "cow-bad-decimal", "executed_sell": value}
+        for value in ("bad", "NaN", "Infinity")
+    ]
+    reverted = {**valid, "client_order_id": "cow-reverted", "settlement_tx_hash": "0xreverted"}
+
+    def transaction_timestamp(tx_hash):
+        if tx_hash == "0xreverted":
+            raise CowSwapRuntimeUnavailableError("transaction reverted")
+        return "2026-07-23T00:01:02+00:00"
+
+    trades = cowswap_trade_records(
+        [*malformed_records, reverted, valid],
+        account_name="master_account",
+        evm_reader=SimpleNamespace(transaction_timestamp=transaction_timestamp),
+    )
+
+    assert [trade["client_order_id"] for trade in trades] == ["cow-valid"]
+
+
 def test_gateway_reader_returns_and_caches_confirmed_transaction_timestamp(monkeypatch):
     reader = GatewayEvmReader(gateway_url="http://gateway", network="base")
     calls = []
@@ -835,6 +925,21 @@ def test_gateway_reader_returns_and_caches_confirmed_transaction_timestamp(monke
     assert reader.transaction_timestamp("0xtx") == expected
     assert reader.transaction_timestamp("0xtx") == expected
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"txStatus": True, "blockTimestamp": 1_721_234_567},
+        {"txStatus": 1, "blockTimestamp": 10**100},
+    ],
+)
+def test_gateway_reader_rejects_non_authoritative_transaction_timestamp(monkeypatch, response):
+    reader = GatewayEvmReader(gateway_url="http://gateway", network="base")
+    monkeypatch.setattr(cowswap_runtime, "_gateway_post", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(CowSwapRuntimeUnavailableError, match="timestamp"):
+        reader.transaction_timestamp("0xbad")
 
 
 def test_refreshed_cowswap_order_records_polls_only_non_terminal_orders():

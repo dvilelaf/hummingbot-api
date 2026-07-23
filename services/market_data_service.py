@@ -18,7 +18,11 @@ if TYPE_CHECKING:
 from hummingbot.core.rate_oracle.rate_oracle import RateOracle
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory, UnsupportedConnectorException
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
-from services.cowswap_runtime import COWSWAP_CONNECTOR_NAME, cowswap_runtime_prices
+from services.cowswap_runtime import (
+    COWSWAP_CONNECTOR_NAME,
+    cowswap_runtime_order_book,
+    cowswap_runtime_prices,
+)
 from services.hyperliquid_market import connector_trading_pair
 
 logger = logging.getLogger(__name__)
@@ -266,6 +270,16 @@ class MarketDataService:
             Dictionary with bids, asks, and metadata
         """
         try:
+            if connector_name == COWSWAP_CONNECTOR_NAME:
+                runtime = (
+                    getattr(self._accounts_service, "_cowswap_runtime", None)
+                    if self._accounts_service is not None
+                    else None
+                )
+                return await cowswap_runtime_order_book(
+                    runtime=runtime,
+                    trading_pair=trading_pair,
+                )
             connector = self._connector_service.get_best_connector_for_market(
                 connector_name, account_name
             )
