@@ -27,6 +27,7 @@ from models import (
     VWAPForVolumeRequest,
 )
 from models.market_data import CandlesConfigRequest
+from services.hyperliquid_market import connector_trading_pair
 from services.market_data_service import MarketDataService
 
 logger = logging.getLogger(__name__)
@@ -65,19 +66,21 @@ async def get_candles(request: Request, candles_config: CandlesConfigRequest):
                    f"Expected format: BASE-QUOTE (e.g., BTC-USDT)"
         )
 
+    trading_pair = connector_trading_pair(candles_config.connector_name, candles_config.trading_pair)
+
     try:
         market_data_service: MarketDataService = request.app.state.market_data_service
 
         # Validate trading pair exists on the exchange before starting a feed
         try:
             await market_data_service.validate_trading_pair(
-                candles_config.connector_name, candles_config.trading_pair, candles_config.interval
+                candles_config.connector_name, trading_pair, candles_config.interval
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
         candles_cfg = CandlesConfig(
-            connector=candles_config.connector_name, trading_pair=candles_config.trading_pair,
+            connector=candles_config.connector_name, trading_pair=trading_pair,
             interval=candles_config.interval, max_records=candles_config.max_records)
         candles_feed = market_data_service.get_candles_feed(candles_cfg)
 
@@ -91,7 +94,7 @@ async def get_candles(request: Request, candles_config: CandlesConfigRequest):
                 raise HTTPException(
                     status_code=504,
                     detail=f"Candle feed for {candles_config.connector_name} "
-                           f"{candles_config.trading_pair} did not become ready within "
+                           f"{trading_pair} did not become ready within "
                            f"{timeout}s. The trading pair may not exist on this exchange."
                 )
             await asyncio.sleep(0.1)

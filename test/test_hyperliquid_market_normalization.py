@@ -97,6 +97,44 @@ def test_market_data_reads_connector_book_with_logical_market():
     assert result is book
 
 
+def test_candles_endpoint_normalizes_hyperliquid_perpetual_pair(monkeypatch):
+    pytest.importorskip("hummingbot")
+    import routers.market_data as module
+    from models.market_data import CandlesConfigRequest
+
+    candles_df = MagicMock(empty=False)
+    candles_df.tail.return_value = candles_df
+    candles_df.drop_duplicates.return_value = candles_df
+    candles_df.to_dict.return_value = [{"timestamp": 1}]
+    market_data = SimpleNamespace(
+        validate_trading_pair=AsyncMock(),
+        get_candles_feed=MagicMock(
+            return_value=SimpleNamespace(ready=True, candles_df=candles_df)
+        ),
+        stop_candle_feed=MagicMock(),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(market_data_service=market_data))
+    )
+    monkeypatch.setattr(module.CandlesFactory, "_candles_map", {"hyperliquid_perpetual": object()})
+
+    result = asyncio.run(
+        module.get_candles(
+            request,
+            CandlesConfigRequest(
+                connector_name="hyperliquid_perpetual",
+                trading_pair="HYPE-USDC",
+            ),
+        )
+    )
+
+    assert result == [{"timestamp": 1}]
+    market_data.validate_trading_pair.assert_awaited_once_with(
+        "hyperliquid_perpetual", "HYPE-USD", "1m"
+    )
+    assert market_data.get_candles_feed.call_args.args[0].trading_pair == "HYPE-USD"
+
+
 def test_logical_observation_normalizes_market_and_usd_fee_currency():
     assert logical_observation(
         {
