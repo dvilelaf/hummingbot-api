@@ -105,6 +105,7 @@ def test_candles_endpoint_normalizes_hyperliquid_perpetual_pair(monkeypatch):
     candles_df = MagicMock(empty=False)
     candles_df.tail.return_value = candles_df
     candles_df.drop_duplicates.return_value = candles_df
+    candles_df.sort_values.return_value = candles_df
     candles_df.to_dict.return_value = [{"timestamp": 1}]
     market_data = SimpleNamespace(
         validate_trading_pair=AsyncMock(),
@@ -133,6 +134,7 @@ def test_candles_endpoint_normalizes_hyperliquid_perpetual_pair(monkeypatch):
         "hyperliquid_perpetual", "HYPE-USD", "1m"
     )
     assert market_data.get_candles_feed.call_args.args[0].trading_pair == "HYPE-USD"
+    candles_df.sort_values.assert_called_once_with("timestamp")
 
 
 def test_logical_observation_normalizes_market_and_usd_fee_currency():

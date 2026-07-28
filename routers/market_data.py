@@ -102,8 +102,9 @@ async def get_candles(request: Request, candles_config: CandlesConfigRequest):
         df = candles_feed.candles_df
 
         if df is not None and not df.empty:
-            df = df.tail(candles_config.max_records)
             df = df.drop_duplicates(subset=["timestamp"], keep="last")
+            df = df.sort_values("timestamp")
+            df = df.tail(candles_config.max_records)
             return df.to_dict(orient="records")
         else:
             raise HTTPException(status_code=404, detail="No candles data available")
