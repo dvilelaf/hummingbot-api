@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -42,6 +43,12 @@ async def test_load_existing_orders_preserves_existing_adds_missing(service, mon
         SimpleNamespace(client_order_id="ORD-2", trading_pair="HYPE-USDC", order_type="LIMIT",
                         trade_type="BUY", amount=5.0, price=2.0, status="OPEN",
                         filled_amount=0.0, exchange_order_id="e2", error_message=None, created_at=None),
+        SimpleNamespace(client_order_id="ORD-3", trading_pair="HYPE-USDC", order_type="LIMIT",
+                        trade_type="BUY", amount=5.0, price=2.0, status="FILLED",
+                        filled_amount=0.0, exchange_order_id="e3", error_message=None, created_at=None),
+        SimpleNamespace(client_order_id="ORD-4", trading_pair="HYPE-USDC", order_type="LIMIT",
+                        trade_type="BUY", amount=5.0, price=2.0, status="FILLED",
+                        filled_amount=2.0, exchange_order_id="e4", error_message=None, created_at=None),
     ]
     repo = MagicMock()
     repo.get_active_orders = AsyncMock(return_value=db_orders)
@@ -52,6 +59,49 @@ async def test_load_existing_orders_preserves_existing_adds_missing(service, mon
 
     assert connector.in_flight_orders["ORD-1"] is existing
     assert connector.in_flight_orders["ORD-2"].client_order_id == "ORD-2"
+    assert connector.in_flight_orders["ORD-3"].client_order_id == "ORD-3"
+    assert connector.in_flight_orders["ORD-4"].client_order_id == "ORD-4"
+
+
+@pytest.mark.asyncio
+async def test_active_orders_query_recovers_filled_without_durable_trades():
+    from datetime import datetime, timezone
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from database.models import Base, Order, Trade
+    from database.repositories.order_repository import OrderRepository
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        missing_trade = Order(
+            client_order_id="missing", account_name="acc", connector_name="hl",
+            trading_pair="ETH-USDC", trade_type="BUY", order_type="MARKET",
+            amount=5, filled_amount=5, status="FILLED",
+        )
+        complete = Order(
+            client_order_id="complete", account_name="acc", connector_name="hl",
+            trading_pair="ETH-USDC", trade_type="BUY", order_type="MARKET",
+            amount=5, filled_amount=5, status="FILLED",
+        )
+        session.add_all([missing_trade, complete])
+        session.flush()
+        session.add(Trade(
+            order_id=complete.id, trade_id="trade-1", trading_pair="ETH-USDC",
+            trade_type="BUY", amount=5, price=1, fee_paid=0,
+            timestamp=datetime.now(timezone.utc),
+        ))
+        session.commit()
+
+        class AsyncSession:
+            async def execute(self, statement):
+                return session.execute(statement)
+
+        active = await OrderRepository(AsyncSession()).get_active_orders()
+
+    assert [order.client_order_id for order in active] == ["missing"]
 
 
 @pytest.mark.asyncio
@@ -297,7 +347,7 @@ async def test_reconcile_persistence_selects_fills_or_tracked(service, monkeypat
     order.client_order_id = "ORD-1"
     order.exchange_order_id = "e1"
     connector.in_flight_orders = {"ORD-1": order}
-    service._trading_connectors = {"acc": {"hl": connector}}
+    service._trading_connectors = {"acc": {"binance": connector}}
 
     order_update = MagicMock()
     order_update.new_state = OrderState.FILLED
@@ -326,3 +376,193 @@ async def test_reconcile_persistence_selects_fills_or_tracked(service, monkeypat
     else:
         persist_tracked.assert_awaited_once()
         persist_external.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_completion_before_fill_keeps_order_reconcilable(monkeypatch):
+    from services.orders_recorder import OrdersRecorder
+
+    order = SimpleNamespace(
+        status="OPEN", filled_amount=0, amount=5, exchange_order_id=None,
+    )
+    order_repo = MagicMock()
+    order_repo.get_order_by_client_id_with_lock = AsyncMock(return_value=order)
+    monkeypatch.setattr("services.orders_recorder.OrderRepository", lambda _session: order_repo)
+    db_manager = MagicMock()
+    db_manager.get_session_context.side_effect = _session_context
+    event = SimpleNamespace(order_id="ORD-1", exchange_order_id="999")
+
+    await OrdersRecorder(db_manager, "acc", "hyperliquid_perpetual")._handle_order_completed(event)
+
+    assert order.status == "OPEN"
+    assert order.exchange_order_id == "999"
+
+
+@pytest.mark.asyncio
+async def test_sync_keeps_terminal_fill_tracked_until_reconcile(service, monkeypatch):
+    import database
+    from hummingbot.core.data_type.in_flight_order import OrderState
+
+    order = SimpleNamespace(client_order_id="ORD-1", current_state=OrderState.FILLED)
+    connector = SimpleNamespace(in_flight_orders={"ORD-1": order})
+    db_order = SimpleNamespace(status="OPEN")
+    order_repo = MagicMock()
+    order_repo.get_order_by_client_id = AsyncMock(return_value=db_order)
+    order_repo.update_order_status = AsyncMock()
+    monkeypatch.setattr(database, "OrderRepository", lambda _session: order_repo)
+    service.db_manager.get_session_context.side_effect = _session_context
+
+    await service._sync_orders_to_database(connector, "acc", "hl")
+
+    assert connector.in_flight_orders["ORD-1"] is order
+    order_repo.update_order_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_filled_zero_is_retried_without_publishing_false_fill(service, monkeypatch):
+    import database
+    from database.repositories import trade_repository
+    from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
+
+    connector = MagicMock()
+    order = MagicMock(spec=InFlightOrder)
+    order.client_order_id = "ORD-1"
+    order.exchange_order_id = "999"
+    connector.in_flight_orders = {"ORD-1": order}
+    connector._request_order_status = AsyncMock(return_value=SimpleNamespace(new_state=OrderState.FILLED))
+    connector._is_order_not_found_during_status_update_error = MagicMock(return_value=False)
+    service._trading_connectors = {"acc": {"hyperliquid_perpetual": connector}}
+    db_order = SimpleNamespace(id=1, status="FILLED", filled_amount=0, amount=5)
+    order_repo = MagicMock()
+    order_repo.get_order_by_client_id = AsyncMock(return_value=db_order)
+    order_repo.update_order_status = AsyncMock()
+    monkeypatch.setattr(database, "OrderRepository", lambda _session: order_repo)
+    trade_repo = MagicMock()
+    trade_repo.get_trades_by_order_id = AsyncMock(return_value=[])
+    monkeypatch.setattr(trade_repository, "TradeRepository", lambda _session: trade_repo)
+    monkeypatch.setattr(service, "_fetch_hyperliquid_order_fills", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service, "_persist_tracked_order_fill", AsyncMock())
+    service.db_manager.get_session_context.side_effect = _session_context
+
+    await service.reconcile_active_orders()
+
+    assert connector.in_flight_orders["ORD-1"] is order
+    order_repo.update_order_status.assert_awaited_once_with(
+        client_order_id="ORD-1", status="SUBMITTED", error_message=None,
+    )
+    service._persist_tracked_order_fill.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_partial_terminal_fill_stays_partial(service, monkeypatch):
+    import database
+    from database.repositories import trade_repository
+    from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
+
+    connector = MagicMock()
+    order = MagicMock(spec=InFlightOrder)
+    order.client_order_id = "ORD-1"
+    order.exchange_order_id = "999"
+    connector.in_flight_orders = {"ORD-1": order}
+    connector._request_order_status = AsyncMock(return_value=SimpleNamespace(new_state=OrderState.FILLED))
+    connector._is_order_not_found_during_status_update_error = MagicMock(return_value=False)
+    service._trading_connectors = {"acc": {"hyperliquid_perpetual": connector}}
+    db_order = SimpleNamespace(id=1, status="FILLED", filled_amount=2, amount=5)
+    order_repo = MagicMock()
+    order_repo.get_order_by_client_id = AsyncMock(return_value=db_order)
+    order_repo.update_order_status = AsyncMock()
+    monkeypatch.setattr(database, "OrderRepository", lambda _session: order_repo)
+    trade_repo = MagicMock()
+    trade_repo.get_trades_by_order_id = AsyncMock(
+        return_value=[SimpleNamespace(amount=2)]
+    )
+    monkeypatch.setattr(trade_repository, "TradeRepository", lambda _session: trade_repo)
+    monkeypatch.setattr(service, "_fetch_hyperliquid_order_fills", AsyncMock(return_value=[]))
+    service.db_manager.get_session_context.side_effect = _session_context
+
+    await service.reconcile_active_orders()
+
+    order_repo.update_order_status.assert_awaited_once_with(
+        client_order_id="ORD-1", status="PARTIALLY_FILLED", error_message=None,
+    )
+    assert "ORD-1" in connector.in_flight_orders
+
+
+@pytest.mark.asyncio
+async def test_reconcile_calls_are_serialized(service, monkeypatch):
+    entered = 0
+    max_entered = 0
+
+    async def reconcile_once():
+        nonlocal entered, max_entered
+        entered += 1
+        max_entered = max(max_entered, entered)
+        await asyncio.sleep(0)
+        entered -= 1
+        return {}
+
+    monkeypatch.setattr(service, "_reconcile_active_orders_once", reconcile_once)
+
+    await asyncio.gather(service.reconcile_active_orders(), service.reconcile_active_orders())
+
+    assert max_entered == 1
+
+
+@pytest.mark.asyncio
+async def test_order_not_found_remains_tracked_and_unverified(service):
+    from hummingbot.core.data_type.in_flight_order import InFlightOrder
+
+    connector = MagicMock()
+    order = MagicMock(spec=InFlightOrder)
+    order.client_order_id = "ORD-1"
+    connector.in_flight_orders = {"ORD-1": order}
+    connector._request_order_status = AsyncMock(side_effect=RuntimeError("not found"))
+    connector._is_order_not_found_during_status_update_error = MagicMock(return_value=True)
+    service._trading_connectors = {"acc": {"hyperliquid_perpetual": connector}}
+
+    summary = await service.reconcile_active_orders()
+
+    assert "ORD-1" in connector.in_flight_orders
+    assert summary["unverified"] == 1
+
+
+@pytest.mark.asyncio
+async def test_user_fills_make_filled_consistent_and_remove_once(service, monkeypatch):
+    import database
+    from database.repositories import trade_repository
+    from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
+
+    connector = MagicMock()
+    order = MagicMock(spec=InFlightOrder)
+    order.client_order_id = "ORD-1"
+    order.exchange_order_id = "999"
+    connector.in_flight_orders = {"ORD-1": order}
+    connector._request_order_status = AsyncMock(return_value=SimpleNamespace(new_state=OrderState.FILLED))
+    connector._is_order_not_found_during_status_update_error = MagicMock(return_value=False)
+    service._trading_connectors = {"acc": {"hl": connector}}
+    db_order = SimpleNamespace(id=1, status="OPEN", filled_amount=0, amount=5)
+    order_repo = MagicMock()
+    order_repo.get_order_by_client_id = AsyncMock(return_value=db_order)
+    order_repo.update_order_status = AsyncMock()
+    monkeypatch.setattr(database, "OrderRepository", lambda _session: order_repo)
+    trade_repo = MagicMock()
+    trade_repo.get_trades_by_order_id = AsyncMock(
+        return_value=[SimpleNamespace(amount=5)]
+    )
+    monkeypatch.setattr(trade_repository, "TradeRepository", lambda _session: trade_repo)
+    monkeypatch.setattr(service, "_fetch_hyperliquid_order_fills", AsyncMock(return_value=[{"tid": "1"}]))
+
+    async def persist_external(**_kwargs):
+        db_order.filled_amount = 5
+        db_order.status = "FILLED"
+
+    monkeypatch.setattr(service, "_persist_external_order_fills", persist_external)
+    service.db_manager.get_session_context.side_effect = _session_context
+
+    await service.reconcile_active_orders()
+    await service.reconcile_active_orders()
+
+    assert "ORD-1" not in connector.in_flight_orders
+    order_repo.update_order_status.assert_awaited_once_with(
+        client_order_id="ORD-1", status="FILLED", error_message=None,
+    )

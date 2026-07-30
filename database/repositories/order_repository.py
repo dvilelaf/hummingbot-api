@@ -1,11 +1,11 @@
 from datetime import datetime
-from typing import Dict, List, Optional
 from decimal import Decimal
+from typing import Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import Order
+from database.models import Order, Trade
 
 
 class OrderRepository:
@@ -166,9 +166,26 @@ class OrderRepository:
     async def get_active_orders(self, account_name: Optional[str] = None,
                               connector_name: Optional[str] = None,
                               trading_pair: Optional[str] = None) -> List[Order]:
-        """Get active orders (SUBMITTED, OPEN, PARTIALLY_FILLED, PENDING_CANCEL)."""
+        """Get active orders plus inconsistent fills that still need repair."""
+        durable_fill_amount = (
+            select(func.coalesce(func.sum(Trade.amount), 0))
+            .where(Trade.order_id == Order.id)
+            .scalar_subquery()
+        )
         query = select(Order).where(
-            Order.status.in_(["SUBMITTED", "OPEN", "PARTIALLY_FILLED", "PENDING_CANCEL"])
+            or_(
+                Order.status.in_(["SUBMITTED", "OPEN", "PARTIALLY_FILLED", "PENDING_CANCEL"]),
+                and_(
+                    Order.status == "FILLED",
+                    or_(
+                        Order.amount.is_(None),
+                        Order.amount <= 0,
+                        Order.filled_amount.is_(None),
+                        Order.filled_amount < Order.amount,
+                        durable_fill_amount < Order.amount,
+                    ),
+                ),
+            )
         )
         
         # Apply filters

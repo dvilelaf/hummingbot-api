@@ -16,7 +16,7 @@ import logging
 import time
 import urllib.request
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
 from hummingbot.client.config.config_crypt import ETHKeyFileSecretManger
@@ -980,8 +980,6 @@ class UnifiedConnectorService:
             OrderState.FILLED, OrderState.CANCELED,
             OrderState.FAILED, OrderState.COMPLETED
         ]
-        orders_to_remove = []
-
         for client_order_id, order in list(connector.in_flight_orders.items()):
             try:
                 from database import OrderRepository
@@ -991,18 +989,16 @@ class UnifiedConnectorService:
                     db_order = await order_repo.get_order_by_client_id(client_order_id)
 
                     if db_order:
+                        if order.current_state in terminal_states:
+                            # Reconciliation must persist fills before terminal
+                            # state is published or tracking is removed.
+                            continue
                         new_status = self._map_order_state_to_status(order.current_state)
                         if db_order.status != new_status:
                             await order_repo.update_order_status(client_order_id, new_status)
 
-                    if order.current_state in terminal_states:
-                        orders_to_remove.append(client_order_id)
-
             except Exception as e:
                 logger.error(f"Error syncing order {client_order_id}: {e}")
-
-        for order_id in orders_to_remove:
-            connector.in_flight_orders.pop(order_id, None)
 
     @staticmethod
     def _supports_order_status_query(connector: ConnectorBase) -> bool:
@@ -1014,6 +1010,14 @@ class UnifiedConnectorService:
         )
 
     async def reconcile_active_orders(self) -> Dict[str, int]:
+        """Serialize reconciliation so one durable order transition wins."""
+        lock = getattr(self, "_order_reconciliation_lock", None)
+        if lock is None:
+            lock = self._order_reconciliation_lock = asyncio.Lock()
+        async with lock:
+            return await self._reconcile_active_orders_once()
+
+    async def _reconcile_active_orders_once(self) -> Dict[str, int]:
         """Reconcile persisted active orders against the exchange on startup.
 
         Must be called AFTER ``initialize_all_trading_connectors`` so that each
@@ -1065,9 +1069,12 @@ class UnifiedConnectorService:
                             external_fills = await self._fetch_hyperliquid_order_fills(connector, order)
                     except Exception as exc:
                         if connector._is_order_not_found_during_status_update_error(exc):
-                            # The exchange does not know this order -> it is gone.
-                            new_state = OrderState.CANCELED
-                            note = "Reconciled on startup: order not found on exchange"
+                            logger.warning(
+                                f"Order {client_order_id} was not found on "
+                                f"{account_name}/{connector_name}; keeping it tracked"
+                            )
+                            summary["unverified"] += 1
+                            continue
                         else:
                             # Transient/unknown error - do not touch the order.
                             logger.warning(
@@ -1091,6 +1098,30 @@ class UnifiedConnectorService:
                                 )
                             else:
                                 await self._persist_tracked_order_fill(order_repo, order)
+                            db_order = await order_repo.get_order_by_client_id(client_order_id)
+                            durable_trades = (
+                                await trade_repo.get_trades_by_order_id(db_order.id)
+                                if db_order is not None
+                                else []
+                            )
+                            if (
+                                new_state in terminal_states
+                                and not self._has_durable_terminal_fill(
+                                    db_order,
+                                    durable_trades,
+                                    require_complete=new_state in {
+                                        OrderState.FILLED,
+                                        OrderState.COMPLETED,
+                                    },
+                                )
+                            ):
+                                await order_repo.update_order_status(
+                                    client_order_id=client_order_id,
+                                    status=self._incomplete_fill_status(db_order),
+                                    error_message=None,
+                                )
+                                summary["unverified"] += 1
+                                continue
                             await order_repo.update_order_status(
                                 client_order_id=client_order_id,
                                 status=db_status,
@@ -1115,6 +1146,36 @@ class UnifiedConnectorService:
             f"{summary['unverified']} unverified"
         )
         return summary
+
+    @staticmethod
+    def _has_durable_terminal_fill(
+        order: Any,
+        trades: List[Any],
+        *,
+        require_complete: bool,
+    ) -> bool:
+        if order is None:
+            return False
+        try:
+            filled_amount = Decimal(str(order.filled_amount or 0))
+            order_amount = Decimal(str(order.amount or 0))
+            durable_amount = sum(
+                (Decimal(str(trade.amount or 0)) for trade in trades),
+                start=Decimal(0),
+            )
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+        required_amount = order_amount if require_complete else filled_amount
+        if required_amount <= 0:
+            return not require_complete
+        return filled_amount >= required_amount and durable_amount >= required_amount
+
+    @staticmethod
+    def _incomplete_fill_status(order: Any) -> str:
+        try:
+            return "PARTIALLY_FILLED" if Decimal(str(order.filled_amount or 0)) > 0 else "SUBMITTED"
+        except (AttributeError, InvalidOperation, TypeError, ValueError):
+            return "SUBMITTED"
 
     async def _refresh_tracked_order_fills(self, connector: ConnectorBase, order: InFlightOrder) -> None:
         """Ask a connector to hydrate fills for a tracked order before terminal reconciliation."""

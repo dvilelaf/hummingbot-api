@@ -474,10 +474,13 @@ class OrdersRecorder:
         try:
             async with self.db_manager.get_session_context() as session:
                 order_repo = OrderRepository(session)
-                order = await order_repo.get_order_by_client_id(event.order_id)
+                order = await order_repo.get_order_by_client_id_with_lock(event.order_id)
                 if order:
-                    order.status = "FILLED"
                     order.exchange_order_id = getattr(event, 'exchange_order_id', None)
+                    filled_amount = Decimal(str(order.filled_amount or 0))
+                    order_amount = Decimal(str(order.amount or 0))
+                    if order_amount > 0 and filled_amount >= order_amount:
+                        order.status = "FILLED"
 
             logger.debug(f"Recorded order completed: {event.order_id}")
         except Exception as e:
