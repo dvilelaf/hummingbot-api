@@ -6,9 +6,11 @@ using the UnifiedConnectorService to ensure proper connector usage.
 """
 import asyncio
 import logging
+import math
 import time
 from decimal import Decimal
 from enum import Enum
+from numbers import Number
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
@@ -688,13 +690,26 @@ class MarketDataService:
                 funding_info = await orderbook_ds.get_funding_info(connector_pair)
 
                 if funding_info:
+                    values = tuple(getattr(funding_info, field, None) for field in ("rate", "mark_price", "index_price"))
+                    try:
+                        rate, mark_price, index_price = map(float, values)
+                    except (TypeError, ValueError, OverflowError):
+                        return {"error": f"No funding info available for {trading_pair}"}
+                    if (
+                        getattr(funding_info, "trading_pair", None) != connector_pair
+                        or any(not isinstance(raw, Number) or isinstance(raw, bool) or not math.isfinite(value)
+                               for raw, value in zip(values, (rate, mark_price, index_price)))
+                        or mark_price <= 0
+                        or index_price <= 0
+                    ):
+                        return {"error": f"No funding info available for {trading_pair}"}
                     return {
                         "trading_pair": trading_pair,
-                        "funding_rate": float(funding_info.rate) if funding_info.rate is not None else None,
+                        "funding_rate": rate,
                         "next_funding_time": float(
                             funding_info.next_funding_utc_timestamp) if funding_info.next_funding_utc_timestamp else None,
-                        "mark_price": float(funding_info.mark_price) if funding_info.mark_price else None,
-                        "index_price": float(funding_info.index_price) if funding_info.index_price else None,
+                        "mark_price": mark_price,
+                        "index_price": index_price,
                         "funding_interval_seconds": funding_interval_seconds(connector_name),
                         "observed_at": time.time(),
                     }

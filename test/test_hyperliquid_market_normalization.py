@@ -51,6 +51,7 @@ def test_market_data_funding_info_normalizes_pair_and_preserves_zero_rate(monkey
     data_source = SimpleNamespace(
         get_funding_info=AsyncMock(
             return_value=SimpleNamespace(
+                trading_pair="ETH-USD",
                 rate=0,
                 next_funding_utc_timestamp=1700003600,
                 mark_price=2000,
@@ -74,6 +75,39 @@ def test_market_data_funding_info_normalizes_pair_and_preserves_zero_rate(monkey
     assert response.funding_rate == 0.0
     assert response.funding_interval_seconds == 3600
     assert response.observed_at == 1700000000.0
+
+
+@pytest.mark.parametrize(
+    ("provider_pair", "mark_price", "index_price"),
+    [("BTC-USD", 2000, 1999), ("ETH-USD", 0, 1999), ("ETH-USD", 2000, 0)],
+)
+def test_market_data_funding_info_rejects_invalid_provider_data(
+    provider_pair, mark_price, index_price
+):
+    pytest.importorskip("hummingbot")
+    from services.market_data_service import MarketDataService
+
+    data_source = SimpleNamespace(
+        get_funding_info=AsyncMock(
+            return_value=SimpleNamespace(
+                trading_pair=provider_pair,
+                rate=0,
+                next_funding_utc_timestamp=1700003600,
+                mark_price=mark_price,
+                index_price=index_price,
+            )
+        )
+    )
+    connector = SimpleNamespace(_orderbook_ds=data_source)
+    service = MarketDataService.__new__(MarketDataService)
+    service._connector_service = MagicMock()
+    service._connector_service.get_best_connector_for_market.return_value = connector
+
+    result = asyncio.run(
+        service.get_funding_info("hyperliquid_perpetual", "ETH-USDC")
+    )
+
+    assert result == {"error": "No funding info available for ETH-USDC"}
 
 
 @pytest.mark.parametrize(
