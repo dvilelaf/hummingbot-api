@@ -23,7 +23,7 @@ from services.cowswap_runtime import (
     cowswap_runtime_order_book,
     cowswap_runtime_prices,
 )
-from services.hyperliquid_market import connector_trading_pair
+from services.hyperliquid_market import connector_trading_pair, funding_interval_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -684,16 +684,19 @@ class MarketDataService:
 
             if hasattr(connector, '_orderbook_ds') and connector._orderbook_ds:
                 orderbook_ds = connector._orderbook_ds
-                funding_info = await orderbook_ds.get_funding_info(trading_pair)
+                connector_pair = connector_trading_pair(connector_name, trading_pair)
+                funding_info = await orderbook_ds.get_funding_info(connector_pair)
 
                 if funding_info:
                     return {
                         "trading_pair": trading_pair,
-                        "funding_rate": float(funding_info.rate) if funding_info.rate else None,
+                        "funding_rate": float(funding_info.rate) if funding_info.rate is not None else None,
                         "next_funding_time": float(
                             funding_info.next_funding_utc_timestamp) if funding_info.next_funding_utc_timestamp else None,
                         "mark_price": float(funding_info.mark_price) if funding_info.mark_price else None,
                         "index_price": float(funding_info.index_price) if funding_info.index_price else None,
+                        "funding_interval_seconds": funding_interval_seconds(connector_name),
+                        "observed_at": time.time(),
                     }
                 else:
                     return {"error": f"No funding info available for {trading_pair}"}

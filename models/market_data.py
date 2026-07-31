@@ -100,6 +100,8 @@ class FundingInfoResponse(BaseModel):
     next_funding_time: Optional[float] = Field(description="Next funding time timestamp")
     mark_price: Optional[float] = Field(description="Mark price")
     index_price: Optional[float] = Field(description="Index price")
+    funding_interval_seconds: Optional[int] = Field(default=None, description="Funding interval in seconds")
+    observed_at: float = Field(description="Observation epoch timestamp")
 
 
 class OrderBookRequest(BaseModel):

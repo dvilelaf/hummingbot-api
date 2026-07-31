@@ -7,6 +7,7 @@ import pytest
 
 from services.hyperliquid_market import (
     connector_trading_pair,
+    funding_interval_seconds,
     logical_observation,
     logical_trading_pair,
     logical_trading_rule,
@@ -29,6 +30,50 @@ def test_connector_trading_pair_normalizes_hyperliquid_collateral(
     connector_name, trading_pair, expected
 ):
     assert connector_trading_pair(connector_name, trading_pair) == expected
+
+
+@pytest.mark.parametrize(
+    ("connector_name", "expected"),
+    [("hyperliquid_perpetual", 3600), ("unknown", None)],
+)
+def test_funding_interval_seconds_is_known_only_for_hyperliquid_perpetual(
+    connector_name, expected
+):
+    assert funding_interval_seconds(connector_name) == expected
+
+
+def test_market_data_funding_info_normalizes_pair_and_preserves_zero_rate(monkeypatch):
+    pytest.importorskip("hummingbot")
+    import services.market_data_service as service_module
+    from models.market_data import FundingInfoResponse
+    from services.market_data_service import MarketDataService
+
+    data_source = SimpleNamespace(
+        get_funding_info=AsyncMock(
+            return_value=SimpleNamespace(
+                rate=0,
+                next_funding_utc_timestamp=1700003600,
+                mark_price=2000,
+                index_price=1999,
+            )
+        )
+    )
+    connector = SimpleNamespace(_orderbook_ds=data_source)
+    service = MarketDataService.__new__(MarketDataService)
+    service._connector_service = MagicMock()
+    service._connector_service.get_best_connector_for_market.return_value = connector
+    monkeypatch.setattr(service_module.time, "time", lambda: 1700000000.0)
+
+    result = asyncio.run(
+        service.get_funding_info("hyperliquid_perpetual", "ETH-USDC")
+    )
+
+    data_source.get_funding_info.assert_awaited_once_with("ETH-USD")
+    response = FundingInfoResponse(**result)
+    assert response.trading_pair == "ETH-USDC"
+    assert response.funding_rate == 0.0
+    assert response.funding_interval_seconds == 3600
+    assert response.observed_at == 1700000000.0
 
 
 @pytest.mark.parametrize(

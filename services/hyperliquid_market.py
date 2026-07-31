@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Optional
 
 
 HYPERLIQUID_PERPETUAL_CONNECTOR = "hyperliquid_perpetual"
@@ -15,6 +15,12 @@ def connector_trading_pair(connector_name: str, trading_pair: str) -> str:
     if connector_name == HYPERLIQUID_PERPETUAL_CONNECTOR:
         return _replace_quote(trading_pair, "USDC", "USD")
     return trading_pair
+
+
+def funding_interval_seconds(connector_name: str) -> Optional[int]:
+    if connector_name == HYPERLIQUID_PERPETUAL_CONNECTOR:
+        return 3600
+    return None
 
 
 def logical_trading_pair(connector_name: str, trading_pair: str) -> str:
