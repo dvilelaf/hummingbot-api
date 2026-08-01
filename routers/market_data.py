@@ -152,6 +152,10 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
             candles.fetch_candles(end_time=int(time.time()), limit=config.max_records),
             timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
         )
+        if not hasattr(df, "drop_duplicates"):
+            from pandas import DataFrame
+
+            df = DataFrame(df, columns=candles.columns)
         if df is None or df.empty:
             raise HTTPException(status_code=404, detail="No candles data available")
         df = df.drop_duplicates(subset=["timestamp"], keep="last")

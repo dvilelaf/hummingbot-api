@@ -219,7 +219,10 @@ def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolu
     service = SimpleNamespace(
         resolve_candle_source=AsyncMock(return_value="alpha"),
     )
-    feed = SimpleNamespace(fetch_candles=AsyncMock(return_value=candles_df))
+    feed = SimpleNamespace(
+        columns=["timestamp", "open", "high", "low", "close", "volume"],
+        fetch_candles=AsyncMock(return_value=candles_df.rows),
+    )
     factory.get_candle = MagicMock(return_value=feed)
 
     result = asyncio.run(
