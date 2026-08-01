@@ -28,6 +28,7 @@ from services.cowswap_runtime import (
 from services.hyperliquid_market import connector_trading_pair, funding_interval_seconds
 
 logger = logging.getLogger(__name__)
+CANDLE_SOURCE_RESOLUTION_TIMEOUT = 10
 
 
 class FeedType(Enum):
@@ -73,7 +74,7 @@ class MarketDataService:
 
         # Candle feeds management
         self._candle_feeds: Dict[str, Any] = {}
-        self._candle_source_cache: Dict[Tuple[str, str], Optional[str]] = {}
+        self._candle_source_cache: Dict[str, Optional[str]] = {}
         self._last_access_times: Dict[str, float] = {}
         self._feed_configs: Dict[str, Tuple[FeedType, Any]] = {}
 
@@ -449,7 +450,7 @@ class MarketDataService:
 
     async def resolve_candle_source(self, trading_pair: str, interval: str = "1m") -> str:
         """Find and cache the first factory candle source that supports a pair."""
-        cache_key = (trading_pair, interval)
+        cache_key = trading_pair
         candidates = tuple(sorted(CandlesFactory._candles_map.keys()))
         if cache_key in self._candle_source_cache:
             cached_source = self._candle_source_cache[cache_key]
@@ -459,7 +460,7 @@ class MarketDataService:
                 return cached_source
             self._candle_source_cache.pop(cache_key)
 
-        for connector_name in candidates:
+        async def supported(connector_name: str) -> str | None:
             try:
                 await self.validate_trading_pair(
                     connector_name,
@@ -467,9 +468,22 @@ class MarketDataService:
                     interval,
                 )
             except (ValueError, UnsupportedConnectorException):
-                continue
-            self._candle_source_cache[cache_key] = connector_name
+                return None
             return connector_name
+
+        tasks = tuple(asyncio.create_task(supported(connector)) for connector in candidates)
+        try:
+            async with asyncio.timeout(CANDLE_SOURCE_RESOLUTION_TIMEOUT):
+                for completed in asyncio.as_completed(tasks):
+                    if connector_name := await completed:
+                        self._candle_source_cache[cache_key] = connector_name
+                        return connector_name
+        except TimeoutError:
+            pass
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         self._candle_source_cache[cache_key] = None
         raise ValueError(f"No candle source supports {trading_pair} at {interval}")

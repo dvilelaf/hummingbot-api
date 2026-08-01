@@ -128,7 +128,10 @@ def test_resolve_candle_source_uses_sorted_candidates_and_caches_success(monkeyp
 
     assert asyncio.run(service.resolve_candle_source("BTC-USDT", "1m")) == "zulu"
     assert asyncio.run(service.resolve_candle_source("BTC-USDT", "1m")) == "zulu"
-    assert calls == [("alpha", "BTC-USDT", "1m"), ("zulu", "BTC-USDT", "1m")]
+    assert sorted(calls) == [
+        ("alpha", "BTC-USDT", "1m"),
+        ("zulu", "BTC-USDT", "1m"),
+    ]
 
 
 def test_resolve_candle_source_fails_clearly_when_no_candidate_supports_pair(monkeypatch):
@@ -146,6 +149,20 @@ def test_resolve_candle_source_fails_clearly_when_no_candidate_supports_pair(mon
         asyncio.run(service.resolve_candle_source("BTC-USDT", "1m"))
 
     assert service.validate_trading_pair.await_count == 2
+
+
+def test_resolve_candle_source_reuses_source_across_intervals(monkeypatch):
+    factory, _, _ = _install_hummingbot_stubs(monkeypatch)
+    from services.market_data_service import MarketDataService
+
+    factory._candles_map = {"alpha": object()}
+    service = MarketDataService.__new__(MarketDataService)
+    service._candle_source_cache = {}
+    service.validate_trading_pair = AsyncMock()
+
+    assert asyncio.run(service.resolve_candle_source("BTC-USDT", "1h")) == "alpha"
+    assert asyncio.run(service.resolve_candle_source("BTC-USDT", "1d")) == "alpha"
+    service.validate_trading_pair.assert_awaited_once_with("alpha", "BTC-USDT", "1h")
 
 
 def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolution(monkeypatch):
