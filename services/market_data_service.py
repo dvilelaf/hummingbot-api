@@ -73,6 +73,7 @@ class MarketDataService:
 
         # Candle feeds management
         self._candle_feeds: Dict[str, Any] = {}
+        self._candle_source_cache: Dict[Tuple[str, str], Optional[str]] = {}
         self._last_access_times: Dict[str, float] = {}
         self._feed_configs: Dict[str, Tuple[FeedType, Any]] = {}
 
@@ -124,6 +125,7 @@ class MarketDataService:
                 logger.error(f"Error stopping candle feed {feed_key}: {e}")
 
         self._candle_feeds.clear()
+        self._candle_source_cache.clear()
         self._last_access_times.clear()
         self._feed_configs.clear()
 
@@ -444,6 +446,33 @@ class MarketDataService:
             raise ValueError(
                 f"Trading pair '{trading_pair}' appears to be invalid on '{connector_name}': {e}"
             )
+
+    async def resolve_candle_source(self, trading_pair: str, interval: str = "1m") -> str:
+        """Find and cache the first factory candle source that supports a pair."""
+        cache_key = (trading_pair, interval)
+        candidates = tuple(sorted(CandlesFactory._candles_map.keys()))
+        if cache_key in self._candle_source_cache:
+            cached_source = self._candle_source_cache[cache_key]
+            if cached_source is None:
+                raise ValueError(f"No candle source supports {trading_pair} at {interval}")
+            if cached_source in candidates:
+                return cached_source
+            self._candle_source_cache.pop(cache_key)
+
+        for connector_name in candidates:
+            try:
+                await self.validate_trading_pair(
+                    connector_name,
+                    connector_trading_pair(connector_name, trading_pair),
+                    interval,
+                )
+            except (ValueError, UnsupportedConnectorException):
+                continue
+            self._candle_source_cache[cache_key] = connector_name
+            return connector_name
+
+        self._candle_source_cache[cache_key] = None
+        raise ValueError(f"No candle source supports {trading_pair} at {interval}")
 
     def get_candles_feed(self, config: CandlesConfig):
         """

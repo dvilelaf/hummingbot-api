@@ -26,13 +26,67 @@ from models import (
     VolumeForPriceRequest,
     VWAPForVolumeRequest,
 )
-from models.market_data import CandlesConfigRequest
+from models.market_data import CandleHistoryRequest, CandlesConfigRequest
 from services.hyperliquid_market import connector_trading_pair
 from services.market_data_service import MarketDataService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Market Data"], prefix="/market-data")
+
+
+async def _fetch_candle_rows(
+        request: Request,
+        candles_config: CandlesConfigRequest,
+        *,
+        validate_pair: bool = True,
+):
+    if "-" not in candles_config.trading_pair:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid trading pair format '{candles_config.trading_pair}'. "
+                   f"Expected format: BASE-QUOTE (e.g., BTC-USDT)"
+        )
+
+    trading_pair = connector_trading_pair(candles_config.connector_name, candles_config.trading_pair)
+    market_data_service: MarketDataService = request.app.state.market_data_service
+
+    if validate_pair:
+        try:
+            await market_data_service.validate_trading_pair(
+                candles_config.connector_name, trading_pair, candles_config.interval
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    candles_cfg = CandlesConfig(
+        connector=candles_config.connector_name,
+        trading_pair=trading_pair,
+        interval=candles_config.interval,
+        max_records=candles_config.max_records,
+    )
+    candles_feed = market_data_service.get_candles_feed(candles_cfg)
+
+    timeout = settings.market_data.candles_ready_timeout
+    start = time.time()
+    while not candles_feed.ready:
+        if time.time() - start > timeout:
+            market_data_service.stop_candle_feed(candles_cfg)
+            raise HTTPException(
+                status_code=504,
+                detail=f"Candle feed for {candles_config.connector_name} "
+                       f"{trading_pair} did not become ready within "
+                       f"{timeout}s. The trading pair may not exist on this exchange."
+            )
+        await asyncio.sleep(0.1)
+
+    df = candles_feed.candles_df
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail="No candles data available")
+
+    df = df.drop_duplicates(subset=["timestamp"], keep="last")
+    df = df.sort_values("timestamp")
+    return df.tail(candles_config.max_records).to_dict(orient="records")
 
 
 @router.post("/candles")
@@ -59,55 +113,8 @@ async def get_candles(request: Request, candles_config: CandlesConfigRequest):
                    f"Available connectors: {available}"
         )
 
-    if "-" not in candles_config.trading_pair:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid trading pair format '{candles_config.trading_pair}'. "
-                   f"Expected format: BASE-QUOTE (e.g., BTC-USDT)"
-        )
-
-    trading_pair = connector_trading_pair(candles_config.connector_name, candles_config.trading_pair)
-
     try:
-        market_data_service: MarketDataService = request.app.state.market_data_service
-
-        # Validate trading pair exists on the exchange before starting a feed
-        try:
-            await market_data_service.validate_trading_pair(
-                candles_config.connector_name, trading_pair, candles_config.interval
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-        candles_cfg = CandlesConfig(
-            connector=candles_config.connector_name, trading_pair=trading_pair,
-            interval=candles_config.interval, max_records=candles_config.max_records)
-        candles_feed = market_data_service.get_candles_feed(candles_cfg)
-
-        # Wait for the candles feed to be ready with a timeout
-        timeout = settings.market_data.candles_ready_timeout
-        start = time.time()
-        while not candles_feed.ready:
-            if time.time() - start > timeout:
-                # Clean up the stale feed so it doesn't stay cached
-                market_data_service.stop_candle_feed(candles_cfg)
-                raise HTTPException(
-                    status_code=504,
-                    detail=f"Candle feed for {candles_config.connector_name} "
-                           f"{trading_pair} did not become ready within "
-                           f"{timeout}s. The trading pair may not exist on this exchange."
-                )
-            await asyncio.sleep(0.1)
-
-        df = candles_feed.candles_df
-
-        if df is not None and not df.empty:
-            df = df.drop_duplicates(subset=["timestamp"], keep="last")
-            df = df.sort_values("timestamp")
-            df = df.tail(candles_config.max_records)
-            return df.to_dict(orient="records")
-        else:
-            raise HTTPException(status_code=404, detail="No candles data available")
+        return await _fetch_candle_rows(request, candles_config)
 
     except HTTPException:
         raise
@@ -115,6 +122,40 @@ async def get_candles(request: Request, candles_config: CandlesConfigRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error fetching candles: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal error fetching candles: {str(e)}")
+
+
+@router.post("/candles/history")
+async def get_candle_history(request: Request, config: CandleHistoryRequest):
+    """Get recent candle history without exposing provider selection."""
+    if "-" not in config.trading_pair:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid trading pair format '{config.trading_pair}'. "
+                   f"Expected format: BASE-QUOTE (e.g., BTC-USDT)"
+        )
+
+    market_data_service: MarketDataService = request.app.state.market_data_service
+    try:
+        connector_name = await market_data_service.resolve_candle_source(
+            config.trading_pair, config.interval
+        )
+        return await _fetch_candle_rows(
+            request,
+            CandlesConfigRequest(
+                connector_name=connector_name,
+                trading_pair=config.trading_pair,
+                interval=config.interval,
+                max_records=config.max_records,
+            ),
+            validate_pair=False,
+        )
+    except HTTPException:
+        raise
+    except (ValueError, UnsupportedConnectorException) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error fetching provider-neutral candles: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal error fetching candles: {str(e)}")
 
 

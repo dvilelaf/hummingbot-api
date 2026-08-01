@@ -28,6 +28,14 @@ class CandlesConfigRequest(BaseModel):
     interval: str = "1m"
     max_records: int = 500
 
+
+class CandleHistoryRequest(BaseModel):
+    """Provider-neutral request for recent candle history."""
+    trading_pair: str
+    interval: str = "1m"
+    max_records: int = 500
+
+
 class CandlesResponse(BaseModel):
     """Response for candles data"""
     candles: List[CandleData] = Field(description="List of candle data")
