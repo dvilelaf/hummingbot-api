@@ -28,7 +28,7 @@ from models import (
 )
 from models.market_data import CandleHistoryRequest, CandlesConfigRequest
 from services.hyperliquid_market import connector_trading_pair
-from services.market_data_service import MarketDataService
+from services.market_data_service import CANDLE_SOURCE_RESOLUTION_TIMEOUT, MarketDataService
 
 logger = logging.getLogger(__name__)
 
@@ -140,16 +140,23 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
         connector_name = await market_data_service.resolve_candle_source(
             config.trading_pair, config.interval
         )
-        return await _fetch_candle_rows(
-            request,
-            CandlesConfigRequest(
-                connector_name=connector_name,
-                trading_pair=config.trading_pair,
+        candles = CandlesFactory.get_candle(
+            CandlesConfig(
+                connector=connector_name,
+                trading_pair=connector_trading_pair(connector_name, config.trading_pair),
                 interval=config.interval,
                 max_records=config.max_records,
-            ),
-            validate_pair=False,
+            )
         )
+        df = await asyncio.wait_for(
+            candles.fetch_candles(end_time=int(time.time()), limit=config.max_records),
+            timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
+        )
+        if df is None or df.empty:
+            raise HTTPException(status_code=404, detail="No candles data available")
+        df = df.drop_duplicates(subset=["timestamp"], keep="last")
+        df = df.sort_values("timestamp")
+        return df.tail(config.max_records).to_dict(orient="records")
     except HTTPException as e:
         if e.status_code == 404:
             detail = "No candle data available."

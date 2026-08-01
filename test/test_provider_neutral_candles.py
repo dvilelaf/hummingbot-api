@@ -205,7 +205,7 @@ def test_resolve_candle_source_cache_is_separate_per_interval(monkeypatch):
 
 
 def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolution(monkeypatch):
-    _, _, router = _install_hummingbot_stubs(monkeypatch)
+    factory, _, router = _install_hummingbot_stubs(monkeypatch)
     from models.market_data import CandleHistoryRequest
 
     candles_df = _FakeDataFrame(
@@ -218,10 +218,9 @@ def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolu
     )
     service = SimpleNamespace(
         resolve_candle_source=AsyncMock(return_value="alpha"),
-        validate_trading_pair=AsyncMock(),
-        get_candles_feed=MagicMock(return_value=SimpleNamespace(ready=True, candles_df=candles_df)),
-        stop_candle_feed=MagicMock(),
     )
+    feed = SimpleNamespace(fetch_candles=AsyncMock(return_value=candles_df))
+    factory.get_candle = MagicMock(return_value=feed)
 
     result = asyncio.run(
         router.get_candle_history(
@@ -232,10 +231,10 @@ def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolu
 
     assert [row["timestamp"] for row in result] == [1, 2, 3]
     assert result[1]["close"] == 20
-    service.validate_trading_pair.assert_not_awaited()
-    config = service.get_candles_feed.call_args.args[0]
+    config = factory.get_candle.call_args.args[0]
     assert config.connector == "alpha"
     assert config.trading_pair == "BTC-USDT"
+    feed.fetch_candles.assert_awaited_once()
 
 
 def test_candle_history_redacts_provider_errors(monkeypatch, caplog):
