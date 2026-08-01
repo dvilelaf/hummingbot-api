@@ -169,6 +169,8 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
         else:
             detail = "Unable to fetch candle history."
         raise HTTPException(status_code=e.status_code, detail=detail)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Candle history request timed out.")
     except (ValueError, UnsupportedConnectorException):
         raise HTTPException(
             status_code=404,

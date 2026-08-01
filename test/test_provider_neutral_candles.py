@@ -261,3 +261,26 @@ def test_candle_history_redacts_provider_errors(monkeypatch, caplog):
     assert raised.value.status_code == 500
     assert raised.value.detail == "Unable to fetch candle history."
     assert provider_error not in caplog.text
+
+
+def test_candle_history_maps_fetch_timeout_to_gateway_timeout(monkeypatch):
+    factory, _, router = _install_hummingbot_stubs(monkeypatch)
+    from models.market_data import CandleHistoryRequest
+
+    service = SimpleNamespace(resolve_candle_source=AsyncMock(return_value="alpha"))
+    factory.get_candle = MagicMock(
+        return_value=SimpleNamespace(
+            fetch_candles=AsyncMock(side_effect=asyncio.TimeoutError),
+        )
+    )
+
+    with pytest.raises(router.HTTPException) as raised:
+        asyncio.run(
+            router.get_candle_history(
+                _request(service),
+                CandleHistoryRequest(trading_pair="BTC-USDT", interval="1m", max_records=20),
+            )
+        )
+
+    assert raised.value.status_code == 504
+    assert raised.value.detail == "Candle history request timed out."
