@@ -29,6 +29,9 @@ from services.hyperliquid_market import connector_trading_pair, funding_interval
 
 logger = logging.getLogger(__name__)
 CANDLE_SOURCE_RESOLUTION_TIMEOUT = 10
+CANDLE_SOURCE_BATCH_SIZE = 5
+CANDLE_SOURCE_BATCH_TIMEOUT = 2
+CANDLE_SOURCE_NEGATIVE_CACHE_TTL = 300
 
 
 class FeedType(Enum):
@@ -74,7 +77,7 @@ class MarketDataService:
 
         # Candle feeds management
         self._candle_feeds: Dict[str, Any] = {}
-        self._candle_source_cache: Dict[str, Optional[str]] = {}
+        self._candle_source_cache: Dict[Tuple[str, str], Tuple[Optional[str], Optional[float]]] = {}
         self._last_access_times: Dict[str, float] = {}
         self._feed_configs: Dict[str, Tuple[FeedType, Any]] = {}
 
@@ -449,16 +452,18 @@ class MarketDataService:
             )
 
     async def resolve_candle_source(self, trading_pair: str, interval: str = "1m") -> str:
-        """Find and cache the first factory candle source that supports a pair."""
-        cache_key = trading_pair
+        """Find and cache the first sorted factory candle source that supports a pair and interval."""
+        cache_key = (trading_pair, interval)
         candidates = tuple(sorted(CandlesFactory._candles_map.keys()))
-        if cache_key in self._candle_source_cache:
-            cached_source = self._candle_source_cache[cache_key]
+        cache_entry = self._candle_source_cache.get(cache_key)
+        if cache_entry is not None:
+            cached_source, expires_at = cache_entry
             if cached_source is None:
-                raise ValueError(f"No candle source supports {trading_pair} at {interval}")
-            if cached_source in candidates:
+                if expires_at is not None and expires_at > time.monotonic():
+                    raise ValueError(f"No candle source supports {trading_pair} at {interval}")
+            elif cached_source in candidates:
                 return cached_source
-            self._candle_source_cache.pop(cache_key)
+            self._candle_source_cache.pop(cache_key, None)
 
         async def supported(connector_name: str) -> str | None:
             try:
@@ -471,21 +476,34 @@ class MarketDataService:
                 return None
             return connector_name
 
-        tasks = tuple(asyncio.create_task(supported(connector)) for connector in candidates)
+        async def bounded_support(connector_name: str) -> str | None:
+            try:
+                return await asyncio.wait_for(
+                    supported(connector_name),
+                    timeout=CANDLE_SOURCE_BATCH_TIMEOUT,
+                )
+            except TimeoutError:
+                return None
+
         try:
             async with asyncio.timeout(CANDLE_SOURCE_RESOLUTION_TIMEOUT):
-                for completed in asyncio.as_completed(tasks):
-                    if connector_name := await completed:
-                        self._candle_source_cache[cache_key] = connector_name
-                        return connector_name
+                for batch_start in range(0, len(candidates), CANDLE_SOURCE_BATCH_SIZE):
+                    batch = candidates[batch_start:batch_start + CANDLE_SOURCE_BATCH_SIZE]
+                    results = await asyncio.gather(
+                        *(bounded_support(connector) for connector in batch),
+                    )
+
+                    for connector_name in results:
+                        if connector_name is not None:
+                            self._candle_source_cache[cache_key] = (connector_name, None)
+                            return connector_name
         except TimeoutError:
             pass
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
 
-        self._candle_source_cache[cache_key] = None
+        self._candle_source_cache[cache_key] = (
+            None,
+            time.monotonic() + CANDLE_SOURCE_NEGATIVE_CACHE_TTL,
+        )
         raise ValueError(f"No candle source supports {trading_pair} at {interval}")
 
     def get_candles_feed(self, config: CandlesConfig):

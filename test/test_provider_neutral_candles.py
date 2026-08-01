@@ -122,36 +122,71 @@ def test_resolve_candle_source_uses_sorted_candidates_and_caches_success(monkeyp
     async def validate(connector_name, trading_pair, interval):
         calls.append((connector_name, trading_pair, interval))
         if connector_name == "alpha":
-            raise ValueError("pair unavailable")
+            await asyncio.sleep(0.01)
 
     service.validate_trading_pair = validate
 
-    assert asyncio.run(service.resolve_candle_source("BTC-USDT", "1m")) == "zulu"
-    assert asyncio.run(service.resolve_candle_source("BTC-USDT", "1m")) == "zulu"
+    assert asyncio.run(service.resolve_candle_source("BTC-USDT", "1m")) == "alpha"
+    assert asyncio.run(service.resolve_candle_source("BTC-USDT", "1m")) == "alpha"
     assert sorted(calls) == [
         ("alpha", "BTC-USDT", "1m"),
         ("zulu", "BTC-USDT", "1m"),
     ]
 
 
-def test_resolve_candle_source_fails_clearly_when_no_candidate_supports_pair(monkeypatch):
+def test_resolve_candle_source_limits_sorted_probe_batches(monkeypatch):
     factory, _, _ = _install_hummingbot_stubs(monkeypatch)
+    from services.market_data_service import MarketDataService
+
+    factory._candles_map = {name: object() for name in ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot")}
+    service = MarketDataService.__new__(MarketDataService)
+    service._candle_source_cache = {}
+    calls = []
+    active = 0
+    max_active = 0
+
+    async def validate(connector_name, trading_pair, interval):
+        nonlocal active, max_active
+        calls.append(connector_name)
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        if connector_name != "foxtrot":
+            raise ValueError("pair unavailable")
+
+    service.validate_trading_pair = validate
+
+    assert asyncio.run(service.resolve_candle_source("BTC-USDT", "1m")) == "foxtrot"
+    assert calls == ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]
+    assert max_active <= 5
+
+
+def test_resolve_candle_source_negative_cache_expires(monkeypatch):
+    factory, service_module, _ = _install_hummingbot_stubs(monkeypatch)
     from services.market_data_service import MarketDataService
 
     factory._candles_map = {"alpha": object(), "beta": object()}
     service = MarketDataService.__new__(MarketDataService)
     service._candle_source_cache = {}
     service.validate_trading_pair = AsyncMock(side_effect=ValueError("pair unavailable"))
+    now = [100.0]
+    monkeypatch.setattr(service_module.time, "monotonic", lambda: now[0])
 
     with pytest.raises(ValueError, match="No candle source supports BTC-USDT at 1m"):
         asyncio.run(service.resolve_candle_source("BTC-USDT", "1m"))
     with pytest.raises(ValueError, match="No candle source supports BTC-USDT at 1m"):
         asyncio.run(service.resolve_candle_source("BTC-USDT", "1m"))
-
     assert service.validate_trading_pair.await_count == 2
 
+    now[0] += service_module.CANDLE_SOURCE_NEGATIVE_CACHE_TTL + 1
+    with pytest.raises(ValueError, match="No candle source supports BTC-USDT at 1m"):
+        asyncio.run(service.resolve_candle_source("BTC-USDT", "1m"))
 
-def test_resolve_candle_source_reuses_source_across_intervals(monkeypatch):
+    assert service.validate_trading_pair.await_count == 4
+
+
+def test_resolve_candle_source_cache_is_separate_per_interval(monkeypatch):
     factory, _, _ = _install_hummingbot_stubs(monkeypatch)
     from services.market_data_service import MarketDataService
 
@@ -162,7 +197,9 @@ def test_resolve_candle_source_reuses_source_across_intervals(monkeypatch):
 
     assert asyncio.run(service.resolve_candle_source("BTC-USDT", "1h")) == "alpha"
     assert asyncio.run(service.resolve_candle_source("BTC-USDT", "1d")) == "alpha"
-    service.validate_trading_pair.assert_awaited_once_with("alpha", "BTC-USDT", "1h")
+    assert service.validate_trading_pair.await_count == 2
+    service.validate_trading_pair.assert_any_await("alpha", "BTC-USDT", "1h")
+    service.validate_trading_pair.assert_any_await("alpha", "BTC-USDT", "1d")
 
 
 def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolution(monkeypatch):
@@ -197,3 +234,26 @@ def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolu
     config = service.get_candles_feed.call_args.args[0]
     assert config.connector == "alpha"
     assert config.trading_pair == "BTC-USDT"
+
+
+def test_candle_history_redacts_provider_errors(monkeypatch, caplog):
+    _, _, router = _install_hummingbot_stubs(monkeypatch)
+    from models.market_data import CandleHistoryRequest
+
+    provider_error = "provider secret endpoint details"
+    service = SimpleNamespace(
+        resolve_candle_source=AsyncMock(side_effect=RuntimeError(provider_error)),
+    )
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(router.HTTPException) as raised:
+            asyncio.run(
+                router.get_candle_history(
+                    _request(service),
+                    CandleHistoryRequest(trading_pair="BTC-USDT", interval="1m", max_records=20),
+                )
+            )
+
+    assert raised.value.status_code == 500
+    assert raised.value.detail == "Unable to fetch candle history."
+    assert provider_error not in caplog.text

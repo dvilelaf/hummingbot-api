@@ -150,13 +150,22 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
             ),
             validate_pair=False,
         )
-    except HTTPException:
-        raise
-    except (ValueError, UnsupportedConnectorException) as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Unexpected error fetching provider-neutral candles: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Internal error fetching candles: {str(e)}")
+    except HTTPException as e:
+        if e.status_code == 404:
+            detail = "No candle data available."
+        elif e.status_code == 504:
+            detail = "Candle history request timed out."
+        else:
+            detail = "Unable to fetch candle history."
+        raise HTTPException(status_code=e.status_code, detail=detail)
+    except (ValueError, UnsupportedConnectorException):
+        raise HTTPException(
+            status_code=404,
+            detail="No candle source is available for the requested trading pair and interval.",
+        )
+    except Exception:
+        logger.error("Unexpected error fetching provider-neutral candles")
+        raise HTTPException(status_code=500, detail="Unable to fetch candle history.")
 
 
 @router.post("/historical-candles")
