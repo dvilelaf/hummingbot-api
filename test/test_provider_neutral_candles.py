@@ -135,7 +135,7 @@ def test_resolve_candle_source_uses_sorted_candidates_and_caches_success(monkeyp
 
 
 def test_resolve_candle_source_limits_sorted_probe_batches(monkeypatch):
-    factory, _, _ = _install_hummingbot_stubs(monkeypatch)
+    factory, service_module, _ = _install_hummingbot_stubs(monkeypatch)
     from services.market_data_service import MarketDataService
 
     factory._candles_map = {name: object() for name in ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot")}
@@ -145,12 +145,14 @@ def test_resolve_candle_source_limits_sorted_probe_batches(monkeypatch):
     active = 0
     max_active = 0
 
+    monkeypatch.setattr(service_module, "CANDLE_SOURCE_BATCH_TIMEOUT", 0.01)
+
     async def validate(connector_name, trading_pair, interval):
         nonlocal active, max_active
         calls.append(connector_name)
         active += 1
         max_active = max(max_active, active)
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.05 if connector_name == "alpha" else 0)
         active -= 1
         if connector_name != "foxtrot":
             raise ValueError("pair unavailable")
