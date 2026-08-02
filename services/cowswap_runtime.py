@@ -125,7 +125,15 @@ def cowswap_runtime_balance_rows(
         units_float = float(units)
         if not math.isfinite(units_float):
             raise CowSwapRuntimeUnavailableError(f"CowSwap token {symbol} returned an unrepresentable balance")
-        rows.append({"token": symbol, "units": units_float, "available_units": units_float, "value": 0.0})
+        rows.append(
+            {
+                "token": symbol,
+                "units": units_float,
+                "price": 0.0,
+                "value": 0.0,
+                "available_units": units_float,
+            }
+        )
     return rows
 
 

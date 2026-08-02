@@ -239,8 +239,14 @@ async def test_cowswap_runtime_refresh_returns_real_deduplicated_rows(tmp_path):
         assert result == {
             "master_account": {
                 "cowswap": [
-                    {"token": "WETH", "units": 1.5, "available_units": 1.5, "value": 0.0},
-                    {"token": "USDC", "units": 1.234567, "available_units": 1.234567, "value": 0.0},
+                    {"token": "WETH", "units": 1.5, "price": 0.0, "available_units": 1.5, "value": 0.0},
+                    {
+                        "token": "USDC",
+                        "units": 1.234567,
+                        "price": 0.0,
+                        "available_units": 1.234567,
+                        "value": 0.0,
+                    },
                 ],
             },
         }

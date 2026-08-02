@@ -258,9 +258,121 @@ def test_candle_history_redacts_provider_errors(monkeypatch, caplog):
                 )
             )
 
-    assert raised.value.status_code == 500
-    assert raised.value.detail == "Unable to fetch candle history."
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "Candle history is temporarily unavailable."
     assert provider_error not in caplog.text
+
+
+def test_candle_history_retries_one_transient_fetch_error(monkeypatch):
+    factory, _, router = _install_hummingbot_stubs(monkeypatch)
+    from models.market_data import CandleHistoryRequest
+
+    rows = [
+        {"timestamp": 1, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
+    ]
+    fetch_candles = AsyncMock(side_effect=[RuntimeError("transient"), rows])
+    service = SimpleNamespace(resolve_candle_source=AsyncMock(return_value="alpha"))
+    factory.get_candle = MagicMock(
+        return_value=SimpleNamespace(
+            columns=["timestamp", "open", "high", "low", "close", "volume"],
+            fetch_candles=fetch_candles,
+        )
+    )
+
+    result = asyncio.run(
+        router.get_candle_history(
+            _request(service),
+            CandleHistoryRequest(trading_pair="BTC-USDT", interval="1m", max_records=20),
+        )
+    )
+
+    assert result == rows
+    assert fetch_candles.await_count == 2
+
+
+def test_candle_history_redacts_second_fetch_error(monkeypatch, caplog):
+    factory, _, router = _install_hummingbot_stubs(monkeypatch)
+    from models.market_data import CandleHistoryRequest
+
+    provider_error = "provider secret endpoint details"
+    fetch_candles = AsyncMock(side_effect=RuntimeError(provider_error))
+    service = SimpleNamespace(resolve_candle_source=AsyncMock(return_value="alpha"))
+    factory.get_candle = MagicMock(
+        return_value=SimpleNamespace(fetch_candles=fetch_candles)
+    )
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(router.HTTPException) as raised:
+            asyncio.run(
+                router.get_candle_history(
+                    _request(service),
+                    CandleHistoryRequest(
+                        trading_pair="BTC-USDT",
+                        interval="1m",
+                        max_records=20,
+                    ),
+                )
+            )
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "Candle history is temporarily unavailable."
+    assert fetch_candles.await_count == 2
+    assert provider_error not in caplog.text
+
+
+def test_order_book_retries_one_transient_error(monkeypatch):
+    _, _, router = _install_hummingbot_stubs(monkeypatch)
+    from models.market_data import OrderBookRequest
+
+    service = SimpleNamespace(
+        get_order_book_data=AsyncMock(
+            side_effect=[
+                {"error": "transient"},
+                {
+                    "trading_pair": "BTC-USDT",
+                    "bids": [[100, 2]],
+                    "asks": [[101, 3]],
+                    "timestamp": 1,
+                },
+            ]
+        )
+    )
+
+    result = asyncio.run(
+        router.get_order_book(
+            OrderBookRequest(connector_name="alpha", trading_pair="BTC-USDT", depth=5),
+            service,
+        )
+    )
+
+    assert result.bids[0].price == 100
+    assert result.asks[0].price == 101
+    assert service.get_order_book_data.await_count == 2
+
+
+def test_order_book_redacts_second_transient_error(monkeypatch):
+    _, _, router = _install_hummingbot_stubs(monkeypatch)
+    from models.market_data import OrderBookRequest
+
+    service = SimpleNamespace(
+        get_order_book_data=AsyncMock(return_value={"error": "provider secret details"})
+    )
+
+    with pytest.raises(router.HTTPException) as raised:
+        asyncio.run(
+            router.get_order_book(
+                OrderBookRequest(
+                    connector_name="alpha",
+                    trading_pair="BTC-USDT",
+                    depth=5,
+                ),
+                service,
+            )
+        )
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "Order book is temporarily unavailable."
+    assert service.get_order_book_data.await_count == 2
 
 
 def test_candle_history_maps_fetch_timeout_to_gateway_timeout(monkeypatch):

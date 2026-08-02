@@ -148,10 +148,18 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
                 max_records=config.max_records,
             )
         )
-        df = await asyncio.wait_for(
-            candles.fetch_candles(end_time=int(time.time()), limit=config.max_records),
-            timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
-        )
+        try:
+            df = await asyncio.wait_for(
+                candles.fetch_candles(end_time=int(time.time()), limit=config.max_records),
+                timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise
+        except Exception:
+            df = await asyncio.wait_for(
+                candles.fetch_candles(end_time=int(time.time()), limit=config.max_records),
+                timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
+            )
         if not hasattr(df, "drop_duplicates"):
             from pandas import DataFrame
 
@@ -178,7 +186,7 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
         )
     except Exception:
         logger.error("Unexpected error fetching provider-neutral candles")
-        raise HTTPException(status_code=500, detail="Unable to fetch candle history.")
+        raise HTTPException(status_code=503, detail="Candle history is temporarily unavailable.")
 
 
 @router.post("/historical-candles")
@@ -396,7 +404,7 @@ async def get_order_book(
         Order book snapshot with bids and asks
 
     Raises:
-        HTTPException: 500 if there's an error fetching order book
+        HTTPException: 503 if the order book remains unavailable after one retry
     """
     try:
         order_book_data = await market_data_manager.get_order_book_data(
@@ -404,9 +412,15 @@ async def get_order_book(
             request.trading_pair,
             request.depth
         )
+        if "error" in order_book_data:
+            order_book_data = await market_data_manager.get_order_book_data(
+                request.connector_name,
+                request.trading_pair,
+                request.depth,
+            )
 
         if "error" in order_book_data:
-            raise HTTPException(status_code=500, detail=order_book_data["error"])
+            raise HTTPException(status_code=503, detail="Order book is temporarily unavailable.")
 
         # Convert to response format - data comes as [price, amount] lists
         bids = [OrderBookLevel(price=bid[0], amount=bid[1]) for bid in order_book_data["bids"]]
