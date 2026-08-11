@@ -1,5 +1,7 @@
 import importlib.util
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +17,9 @@ SPEC.loader.exec_module(PATCH)
 # hyperliquid_perpetual_derivative.py as of commit 9d048b34.
 
 _BASE_SOURCE = """\
+class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):
+    web_utils = web_utils
+
     def __init__(
             self,
             ...
@@ -66,13 +71,43 @@ _BASE_SOURCE = """\
         ...
 """
 
+_EXCHANGE_BASE_SOURCE = """\
+from hummingbot.core.data_type.common import OrderType, TradeType
+
+class ExchangePyBase:
+    async def _create_order(self, trading_rule, notional_size, **kwargs):
+        if False:
+            return
+        elif notional_size < trading_rule.min_notional_size:
+            return "blocked"
+        return "submitted", kwargs.get("position_action")
+"""
+
+
+def _run_patch(
+    connector_source: str,
+    exchange_source: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[str, str]:
+    connector_path = tmp_path / "hyperliquid_perpetual_derivative.py"
+    exchange_path = tmp_path / "exchange_py_base.py"
+    connector_path.write_text(connector_source)
+    exchange_path.write_text(exchange_source)
+    monkeypatch.setattr(PATCH, "HYPERLIQUID_PERP", connector_path)
+    monkeypatch.setattr(PATCH, "EXCHANGE_PY_BASE", exchange_path)
+    PATCH.main()
+    return connector_path.read_text(), exchange_path.read_text()
+
 
 def _run_main_on(source: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
-    connector_path = tmp_path / "hyperliquid_perpetual_derivative.py"
-    connector_path.write_text(source)
-    monkeypatch.setattr(PATCH, "HYPERLIQUID_PERP", connector_path)
-    PATCH.main()
-    return connector_path.read_text()
+    connector_source, _ = _run_patch(
+        source,
+        _EXCHANGE_BASE_SOURCE,
+        tmp_path,
+        monkeypatch,
+    )
+    return connector_source
 
 
 def test_builder_attribution_is_disabled(
@@ -129,9 +164,59 @@ def test_symbol_split_still_fixed(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert 'exchange_symbol.split(":")' not in patched
 
 
+def test_close_reductions_defer_minimum_notional_to_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connector, patched = _run_patch(
+        _BASE_SOURCE,
+        _EXCHANGE_BASE_SOURCE,
+        tmp_path,
+        monkeypatch,
+    )
+
+    assert "_marlin_defer_close_notional_to_provider = True" in connector
+    assert "OrderType, PositionAction, TradeType" in patched
+    assert 'kwargs.get("position_action") == PositionAction.CLOSE' in patched
+
+    executable = patched.replace(
+        "from hummingbot.core.data_type.common import OrderType, PositionAction, TradeType",
+        "from enum import Enum\n"
+        "class PositionAction(Enum):\n"
+        "    OPEN = 'OPEN'\n"
+        "    CLOSE = 'CLOSE'\n"
+        "class OrderType: pass\n"
+        "class TradeType: pass",
+    )
+    namespace: dict[str, object] = {}
+    exec(executable, namespace)
+    base_type = namespace["ExchangePyBase"]
+    position_action = namespace["PositionAction"]
+    rule = SimpleNamespace(min_notional_size=10)
+
+    class Hyperliquid(base_type):
+        _marlin_defer_close_notional_to_provider = True
+
+    assert asyncio.run(
+        Hyperliquid()._create_order(rule, 9, position_action=position_action.CLOSE)
+    ) == ("submitted", position_action.CLOSE)
+    assert asyncio.run(
+        Hyperliquid()._create_order(rule, 9, position_action=position_action.OPEN)
+    ) == "blocked"
+    assert asyncio.run(
+        base_type()._create_order(rule, 9, position_action=position_action.CLOSE)
+    ) == "blocked"
+    assert asyncio.run(base_type()._create_order(rule, 10)) == ("submitted", None)
+
+
 def test_patch_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    once = _run_main_on(_BASE_SOURCE, tmp_path, monkeypatch)
-    twice = _run_main_on(once, tmp_path, monkeypatch)
+    once = _run_patch(
+        _BASE_SOURCE,
+        _EXCHANGE_BASE_SOURCE,
+        tmp_path,
+        monkeypatch,
+    )
+    twice = _run_patch(once[0], once[1], tmp_path, monkeypatch)
 
     assert once == twice
 
@@ -152,3 +237,32 @@ def test_drift_detection_raises_on_unexpected_source(
     )
     with pytest.raises(RuntimeError, match="Expected patch target not found"):
         _run_main_on(drifted, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "exchange_source",
+    [
+        _EXCHANGE_BASE_SOURCE.replace(
+            "from hummingbot.core.data_type.common import OrderType, TradeType",
+            "from hummingbot.core.data_type.common import OrderType, TradeType, X",
+        ),
+        _EXCHANGE_BASE_SOURCE.replace(
+            "        elif notional_size < trading_rule.min_notional_size:",
+            "        elif notional_size <= trading_rule.min_notional_size:",
+        ),
+        _EXCHANGE_BASE_SOURCE
+        + "\n        elif notional_size < trading_rule.min_notional_size:\n            pass\n",
+        _EXCHANGE_BASE_SOURCE.replace(
+            "\n\nclass ExchangePyBase:",
+            "\nfrom hummingbot.core.data_type.common import "
+            "OrderType, PositionAction, TradeType\n\nclass ExchangePyBase:",
+        ),
+    ],
+)
+def test_exchange_base_drift_is_rejected(
+    exchange_source: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(RuntimeError, match="Expected (patch target not found|exactly one)"):
+        _run_patch(_BASE_SOURCE, exchange_source, tmp_path, monkeypatch)

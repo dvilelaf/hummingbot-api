@@ -6,14 +6,24 @@ HYPERLIQUID_PERP = Path(
     "hummingbot/connector/derivative/hyperliquid_perpetual/"
     "hyperliquid_perpetual_derivative.py"
 )
+EXCHANGE_PY_BASE = Path(
+    "/opt/conda/envs/hummingbot-api/lib/python3.12/site-packages/"
+    "hummingbot/connector/exchange_py_base.py"
+)
 
 
 def replace_once(source: str, old: str, new: str) -> str:
-    if old not in source:
-        if new in source:
-            return source
+    old_count = source.count(old)
+    new_count = source.count(new)
+    if old_count == 1 and new_count == 0:
+        return source.replace(old, new, 1)
+    if old_count == 0 and new_count == 1:
+        return source
+    if old_count == 0 and new_count == 0:
         raise RuntimeError(f"Expected patch target not found: {old!r}")
-    return source.replace(old, new, 1)
+    raise RuntimeError(
+        f"Expected exactly one original or patched target, found old={old_count}, new={new_count}: {old!r}"
+    )
 
 
 def main() -> None:
@@ -22,6 +32,14 @@ def main() -> None:
         source,
         "enable_hip3_markets: bool = True,",
         "enable_hip3_markets: bool = False,",
+    )
+    source = replace_once(
+        source,
+        "class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):\n"
+        "    web_utils = web_utils",
+        "class HyperliquidPerpetualDerivative(PerpetualDerivativePyBase):\n"
+        "    _marlin_defer_close_notional_to_provider = True\n"
+        "    web_utils = web_utils",
     )
     source = replace_once(
         source,
@@ -58,6 +76,25 @@ def main() -> None:
         "        return None\n",
     )
     HYPERLIQUID_PERP.write_text(source)
+
+    exchange_source = EXCHANGE_PY_BASE.read_text()
+    exchange_source = replace_once(
+        exchange_source,
+        "from hummingbot.core.data_type.common import OrderType, TradeType\n",
+        "from hummingbot.core.data_type.common import OrderType, PositionAction, TradeType\n",
+    )
+    exchange_source = replace_once(
+        exchange_source,
+        "        elif notional_size < trading_rule.min_notional_size:",
+        "        elif (\n"
+        "            notional_size < trading_rule.min_notional_size\n"
+        "            and not (\n"
+        "                getattr(self, \"_marlin_defer_close_notional_to_provider\", False)\n"
+        "                and kwargs.get(\"position_action\") == PositionAction.CLOSE\n"
+        "            )\n"
+        "        ):",
+    )
+    EXCHANGE_PY_BASE.write_text(exchange_source)
 
 
 if __name__ == "__main__":
