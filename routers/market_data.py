@@ -35,6 +35,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Market Data"], prefix="/market-data")
 
 
+def _normalize_candle_trading_pair(trading_pair: str) -> str:
+    native_assets = {"ETH", "SOL", "BNB", "POL", "AVAX"}
+    return "-".join(
+        asset[1:] if asset.startswith("W") and asset[1:] in native_assets else asset
+        for asset in trading_pair.split("-")
+    )
+
+
 def _opening_timestamp_rows(rows, *, end_time: int, interval_seconds: int):
     """Normalize a provider series stamped at candle close to candle-open time."""
     if not rows or interval_seconds <= 0:
@@ -154,7 +162,7 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
         )
 
     market_data_service: MarketDataService = request.app.state.market_data_service
-    trading_pair = config.trading_pair.upper()
+    trading_pair = _normalize_candle_trading_pair(config.trading_pair.upper())
     try:
         connector_name = await market_data_service.resolve_candle_source(
             trading_pair, config.interval

@@ -264,6 +264,43 @@ def test_candle_history_normalizes_pair_case_before_source_resolution(monkeypatc
     assert factory.get_candle.call_args.args[0].trading_pair == "CBBTC-USDC"
 
 
+@pytest.mark.parametrize(
+    ("requested_pair", "normalized_pair"),
+    [
+        ("WETH-USDC", "ETH-USDC"),
+        ("WSOL-USDC", "SOL-USDC"),
+        ("WBNB-USDC", "BNB-USDC"),
+        ("WPOL-USDC", "POL-USDC"),
+        ("WAVAX-USDC", "AVAX-USDC"),
+        ("USDC-WETH", "USDC-ETH"),
+    ],
+)
+def test_candle_history_unwraps_native_pair_for_source_and_fetch(
+    monkeypatch, requested_pair, normalized_pair
+):
+    factory, _, router = _install_hummingbot_stubs(monkeypatch)
+    from models.market_data import CandleHistoryRequest
+
+    rows = [{"timestamp": 1, "close": 2500}]
+    service = SimpleNamespace(resolve_candle_source=AsyncMock(return_value="alpha"))
+    feed = SimpleNamespace(
+        columns=["timestamp", "close"],
+        fetch_candles=AsyncMock(return_value=rows),
+    )
+    factory.get_candle = MagicMock(return_value=feed)
+
+    result = asyncio.run(
+        router.get_candle_history(
+            _request(service),
+            CandleHistoryRequest(trading_pair=requested_pair, interval="1h", max_records=1),
+        )
+    )
+
+    assert result == rows
+    service.resolve_candle_source.assert_awaited_once_with(normalized_pair, "1h")
+    assert factory.get_candle.call_args.args[0].trading_pair == normalized_pair
+
+
 def test_candle_history_normalizes_one_current_close_timestamp(monkeypatch):
     factory, _, router = _install_hummingbot_stubs(monkeypatch)
     from models.market_data import CandleHistoryRequest
