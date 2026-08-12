@@ -3,8 +3,10 @@ Tests for Portfolio State refresh behavior.
 
 Run with: pytest test/test_portfolio_state.py -v
 """
+import asyncio
 import inspect
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -759,6 +761,117 @@ class TestConnectorStartup:
         assert service.list_available_credentials("master_account") == ["hyperliquid_perpetual"]
         assert service.list_available_credentials("secondary") == []
 
+
+class TestHyperliquidUserFeeRates:
+    @staticmethod
+    def _service(connectors):
+        from services.unified_connector_service import UnifiedConnectorService
+
+        service = UnifiedConnectorService.__new__(UnifiedConnectorService)
+        service._trading_connectors = connectors
+        return service
+
+    @staticmethod
+    def _connector(
+        address,
+        *,
+        address_field="hyperliquid_perpetual_address",
+        url="https://api.hyperliquid.xyz/info",
+    ):
+        connector = SimpleNamespace(
+            _api_request_url=AsyncMock(return_value=url),
+            _api_post=AsyncMock(return_value={
+                "userAddRate": "0.00015",
+                "userCrossRate": "0.00045",
+            }),
+        )
+        setattr(connector, address_field, address)
+        return connector
+
+    @pytest.mark.parametrize(
+        ("connector_name", "address_field", "url", "expected"),
+        [
+            ("hyperliquid_perpetual", "hyperliquid_perpetual_address", "https://api.hyperliquid.xyz/info", ("0.00015", "0.00045")),
+            ("hyperliquid_perpetual_testnet", "hyperliquid_perpetual_testnet_address", "https://api.hyperliquid-testnet.xyz/info", ("0.00015", "0.00045")),
+            ("hyperliquid_testnet", "hyperliquid_address", "https://api.hyperliquid-testnet.xyz/info", ("0.00025", "0.00055")),
+        ],
+    )
+    def test_user_fee_rates_follow_account_and_connector_variant(
+        self,
+        connector_name,
+        address_field,
+        url,
+        expected,
+    ):
+        other = self._connector("0xother")
+        connector = self._connector("0xaccount", address_field=address_field, url=url)
+        connector._api_post.return_value.update({
+            "userSpotAddRate": "0.00025",
+            "userSpotCrossRate": "0.00055",
+        })
+        service = self._service({
+            "other": {connector_name: other},
+            "account": {connector_name: connector},
+        })
+
+        assert asyncio.run(service.get_hyperliquid_user_fee_rates(
+            "account",
+            connector_name,
+        )) == tuple(Decimal(value) for value in expected)
+        other._api_post.assert_not_awaited()
+        connector._api_post.assert_awaited_once_with(
+            path_url="/info",
+            overwrite_url=url,
+            data={"type": "userFees", "user": "0xaccount"},
+        )
+
+    def test_generic_connector_fails_closed(self):
+        service = self._service({"account": {"hyperliquid": self._connector("0xgeneric")}})
+        assert asyncio.run(
+            service.get_hyperliquid_user_fee_rates("account", "hyperliquid"),
+        ) is None
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            {"error": "unavailable"},
+            {"userAddRate": "0.00015"},
+            {"userAddRate": True, "userCrossRate": "0.00045"},
+            {"userAddRate": "-0.1", "userCrossRate": "0.00045"},
+            {"userAddRate": "NaN", "userCrossRate": "0.00045"},
+        ],
+    )
+    def test_malformed_user_fee_response_fails_closed(self, response):
+        connector = self._connector("0xaccount")
+        connector._api_post.return_value = response
+        service = self._service({"account": {"hyperliquid_perpetual": connector}})
+
+        assert asyncio.run(
+            service.get_hyperliquid_user_fee_rates("account", "hyperliquid_perpetual"),
+        ) is None
+
+    def test_user_fee_transport_error_fails_closed_without_logging_raw_error(self, caplog):
+        connector = self._connector("0xaccount")
+        connector._api_post.side_effect = RuntimeError("private_key=secret")
+        service = self._service({"account": {"hyperliquid_perpetual": connector}})
+
+        assert asyncio.run(
+            service.get_hyperliquid_user_fee_rates("account", "hyperliquid_perpetual"),
+        ) is None
+        assert "private_key" not in caplog.text
+        assert "secret" not in caplog.text
+
+    def test_user_fee_query_rejects_unexpected_endpoint(self):
+        connector = self._connector("0xaccount", url="https://example.com/info")
+        service = self._service({"account": {"hyperliquid_perpetual": connector}})
+
+        assert asyncio.run(
+            service.get_hyperliquid_user_fee_rates("account", "hyperliquid_perpetual"),
+        ) is None
+        connector._api_post.assert_not_awaited()
+
+
+class TestConnectorStartupCredentials:
     def test_marlin_hyperliquid_uses_ephemeral_derived_keys_after_login(self, monkeypatch):
         import services.unified_connector_service as module
         from services.unified_connector_service import UnifiedConnectorService

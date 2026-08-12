@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import re
 import secrets
@@ -51,6 +52,11 @@ GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS = {
 }
 COWSWAP_DEFAULT_RATE_LIMIT_RETRY_AFTER_SECONDS = 1800
 COWSWAP_ADAPTER_ORDER_TYPES = {"LIMIT", "MARKET"}
+HYPERLIQUID_ACCOUNT_FEE_CONNECTORS = {
+    "hyperliquid_perpetual",
+    "hyperliquid_perpetual_testnet",
+    "hyperliquid_testnet",
+}
 
 
 @router.post("/snapshot", response_model=ProviderSnapshotResponse)
@@ -77,6 +83,7 @@ async def provider_snapshot(
         request,
         accounts_service,
         metadata_connector,
+        body.account_name,
         body.trading_pair,
     )
     portfolio: dict[str, Any] | None = None
@@ -1660,6 +1667,7 @@ async def _provider_trading_rule(
     request: Request,
     accounts_service: AccountsService,
     connector_name: str,
+    account_name: str,
     trading_pair: str,
 ) -> dict[str, Any] | None:
     if connector_name in GATEWAY_SWAP_CONNECTOR_PORTFOLIO_KEYS:
@@ -1694,25 +1702,53 @@ async def _provider_trading_rule(
         connector_name,
         _normalized_provider_trading_rule(connector_name, rule),
     )
-    return {**logical_rule, **_provider_expected_fee_bps(request, connector_name)}
+    expected_fees = await _provider_expected_fee_bps(
+        request,
+        connector_name,
+        account_name,
+    )
+    if connector_name in HYPERLIQUID_ACCOUNT_FEE_CONNECTORS and not expected_fees:
+        return None
+    return {**logical_rule, **expected_fees}
 
 
-def _provider_expected_fee_bps(request: Request, connector_name: str) -> dict[str, float]:
+async def _provider_expected_fee_bps(
+    request: Request,
+    connector_name: str,
+    account_name: str,
+) -> dict[str, float]:
     """Expose connector-owned expected maker/taker fees for economic decisions."""
+    if connector_name in HYPERLIQUID_ACCOUNT_FEE_CONNECTORS:
+        try:
+            connector_service = request.app.state.market_data_service.connector_service
+            rates = await connector_service.get_hyperliquid_user_fee_rates(
+                account_name,
+                connector_name,
+            )
+            if rates is None:
+                return {}
+            maker, taker = rates
+        except Exception:
+            return {}
+    else:
+        try:
+            connector_service = request.app.state.market_data_service.connector_service
+            connector = connector_service.get_data_connector(connector_name)
+            estimate_fee_pct = connector.estimate_fee_pct
+            maker = Decimal(str(estimate_fee_pct(is_maker=True)))
+            taker = Decimal(str(estimate_fee_pct(is_maker=False)))
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            return {}
     try:
-        connector = request.app.state.market_data_service.connector_service.get_data_connector(
-            connector_name,
-        )
-        estimate_fee_pct = connector.estimate_fee_pct
-        maker = Decimal(str(estimate_fee_pct(is_maker=True))) * Decimal(10000)
-        taker = Decimal(str(estimate_fee_pct(is_maker=False))) * Decimal(10000)
-    except (ArithmeticError, AttributeError, TypeError, ValueError):
+        maker_bps = float(maker * Decimal(10000))
+        taker_bps = float(taker * Decimal(10000))
+    except (ArithmeticError, TypeError, ValueError):
         return {}
-    if not maker.is_finite() or maker < 0 or not taker.is_finite() or taker < 0:
+    if not math.isfinite(maker_bps) or maker_bps < 0 or not math.isfinite(taker_bps) or taker_bps < 0:
         return {}
     return {
-        "expected_maker_fee_bps": float(maker),
-        "expected_taker_fee_bps": float(taker),
+        "expected_maker_fee_bps": maker_bps,
+        "expected_taker_fee_bps": taker_bps,
     }
 
 

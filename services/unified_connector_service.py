@@ -49,6 +49,23 @@ from utils.security import BackendAPISecurity
 
 logger = logging.getLogger(__name__)
 EARLY_NETWORK_CONNECTORS = frozenset({"xrpl"})
+HYPERLIQUID_ACCOUNT_FEE_QUERIES = {
+    "hyperliquid_perpetual": (
+        "https://api.hyperliquid.xyz/info",
+        "userAddRate",
+        "userCrossRate",
+    ),
+    "hyperliquid_perpetual_testnet": (
+        "https://api.hyperliquid-testnet.xyz/info",
+        "userAddRate",
+        "userCrossRate",
+    ),
+    "hyperliquid_testnet": (
+        "https://api.hyperliquid-testnet.xyz/info",
+        "userSpotAddRate",
+        "userSpotCrossRate",
+    ),
+}
 
 
 class UnifiedConnectorService:
@@ -165,6 +182,49 @@ class UnifiedConnectorService:
             Dict mapping connector_name -> ConnectorBase for this account
         """
         return self._trading_connectors.get(account_name, {})
+
+    async def get_hyperliquid_user_fee_rates(
+        self,
+        account_name: str,
+        connector_name: str,
+    ) -> Optional[tuple[Decimal, Decimal]]:
+        """Return account-effective Hyperliquid maker/taker rates without signing data."""
+        query = HYPERLIQUID_ACCOUNT_FEE_QUERIES.get(connector_name)
+        if query is None:
+            return None
+        expected_url, maker_field, taker_field = query
+        try:
+            connector = self.get_account_connectors(account_name).get(connector_name)
+            address = next(filter(None, (
+                getattr(connector, field, None)
+                for field in (
+                    "hyperliquid_perpetual_address",
+                    "hyperliquid_perpetual_testnet_address",
+                    "hyperliquid_testnet_address",
+                    "hyperliquid_address",
+                )
+            )), None)
+            if not isinstance(address, str) or not address.strip():
+                return None
+            resolved_url = await connector._api_request_url(path_url="/info")
+            if resolved_url != expected_url:
+                return None
+            response = await connector._api_post(
+                path_url="/info",
+                overwrite_url=resolved_url,
+                data={"type": "userFees", "user": address.strip()},
+            )
+            if not isinstance(response, dict) or "error" in response:
+                return None
+            values = (response[maker_field], response[taker_field])
+            if any(isinstance(value, bool) for value in values):
+                return None
+            rates = tuple(Decimal(str(value)) for value in values)
+        except Exception:
+            return None
+        if any(not rate.is_finite() or rate < 0 for rate in rates):
+            return None
+        return rates
 
     def is_trading_connector_initialized(
         self,

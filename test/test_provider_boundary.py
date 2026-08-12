@@ -329,15 +329,27 @@ class FakeMarketDataService:
     def __init__(self):
         self.rate_calls = []
         self.trading_rule_calls = []
+        self.estimate_fee_calls = []
+        self.fee_rate_calls = []
+        self.fee_rates = (Decimal("0.00015"), Decimal("0.00045"))
         self.rates = {
             "USDC-ETH": Decimal("0.0004"),
             "ETH-USDC": Decimal("2500"),
         }
-        connector = SimpleNamespace(
-            estimate_fee_pct=lambda *, is_maker: Decimal("0.00015" if is_maker else "0.00045"),
-        )
+
+        def estimate_fee_pct(*, is_maker):
+            self.estimate_fee_calls.append(is_maker)
+            return Decimal("0.0002" if is_maker else "0.0007")
+
+        async def get_hyperliquid_user_fee_rates(account_name, connector_name):
+            self.fee_rate_calls.append((account_name, connector_name))
+            return self.fee_rates
+
         self.connector_service = SimpleNamespace(
-            get_data_connector=lambda _connector_name: connector,
+            get_data_connector=lambda _connector_name: SimpleNamespace(
+                estimate_fee_pct=estimate_fee_pct,
+            ),
+            get_hyperliquid_user_fee_rates=get_hyperliquid_user_fee_rates,
         )
 
     def get_rate(self, base, quote):
@@ -546,6 +558,52 @@ def test_hyperliquid_perpetual_snapshot_uses_native_market_and_exposes_logical_c
         },
     }
     assert result.portfolio_observed_at_utc is None
+    assert market_data_service.fee_rate_calls == [
+        ("master_account", "hyperliquid_perpetual"),
+    ]
+    assert market_data_service.estimate_fee_calls == []
+
+
+def test_hyperliquid_snapshot_is_not_tradable_without_account_fees():
+    provider_boundary = _provider_boundary_module()
+    provider_boundary._provider_available = _async_return(True)  # noqa: SLF001
+    provider_boundary._provider_capabilities = _async_return((['MARKET'], ['order', 'cancel']))  # noqa: SLF001
+    service = FakeAccountsService()
+    request, market_data_service = _request_with_market_data()
+    market_data_service.fee_rates = None
+
+    result = asyncio.run(
+        provider_boundary.provider_snapshot(
+            provider_boundary.ProviderSnapshotRequest(
+                account_name="master_account",
+                connector_name="hyperliquid_perpetual",
+                refresh_portfolio=False,
+                trading_pair="HYPE-USDC",
+            ),
+            request,
+            service,
+        ),
+    )
+
+    assert result.status == "issues"
+    assert result.trading_rule is None
+    assert "trading rules missing for HYPE-USDC" in result.operator_issues
+
+
+def test_generic_hyperliquid_expected_fee_bps_retains_connector_estimate():
+    provider_boundary = _provider_boundary_module()
+    request, market_data_service = _request_with_market_data()
+
+    result = asyncio.run(
+        provider_boundary._provider_expected_fee_bps(request, "hyperliquid", "master_account"),  # noqa: SLF001
+    )
+
+    assert result == {
+        "expected_maker_fee_bps": 2.0,
+        "expected_taker_fee_bps": 7.0,
+    }
+    assert market_data_service.estimate_fee_calls == [True, False]
+    assert market_data_service.fee_rate_calls == []
 
 
 def test_swap_provider_snapshot_omits_observation_time_when_gateway_refresh_fails():
