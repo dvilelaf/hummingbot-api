@@ -333,6 +333,12 @@ class FakeMarketDataService:
             "USDC-ETH": Decimal("0.0004"),
             "ETH-USDC": Decimal("2500"),
         }
+        connector = SimpleNamespace(
+            estimate_fee_pct=lambda *, is_maker: Decimal("0.00015" if is_maker else "0.00045"),
+        )
+        self.connector_service = SimpleNamespace(
+            get_data_connector=lambda _connector_name: connector,
+        )
 
     def get_rate(self, base, quote):
         self.rate_calls.append((base, quote))
@@ -527,6 +533,8 @@ def test_hyperliquid_perpetual_snapshot_uses_native_market_and_exposes_logical_c
     assert service.position_calls == [("master_account", "hyperliquid_perpetual")]
     assert result.trading_rule == {
         "buy_order_collateral_token": "USDC",
+        "expected_maker_fee_bps": 1.5,
+        "expected_taker_fee_bps": 4.5,
         "min_notional_size": 10.0,
         "sell_order_collateral_token": "USDC",
     }

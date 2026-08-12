@@ -1690,10 +1690,30 @@ async def _provider_trading_rule(
     rule = rules.get(connector_market) if isinstance(rules, dict) else None
     if not isinstance(rule, dict) or "error" in rule:
         return None
-    return logical_trading_rule(
+    logical_rule = logical_trading_rule(
         connector_name,
         _normalized_provider_trading_rule(connector_name, rule),
     )
+    return {**logical_rule, **_provider_expected_fee_bps(request, connector_name)}
+
+
+def _provider_expected_fee_bps(request: Request, connector_name: str) -> dict[str, float]:
+    """Expose connector-owned expected maker/taker fees for economic decisions."""
+    try:
+        connector = request.app.state.market_data_service.connector_service.get_data_connector(
+            connector_name,
+        )
+        estimate_fee_pct = connector.estimate_fee_pct
+        maker = Decimal(str(estimate_fee_pct(is_maker=True))) * Decimal(10000)
+        taker = Decimal(str(estimate_fee_pct(is_maker=False))) * Decimal(10000)
+    except (ArithmeticError, AttributeError, TypeError, ValueError):
+        return {}
+    if not maker.is_finite() or maker < 0 or not taker.is_finite() or taker < 0:
+        return {}
+    return {
+        "expected_maker_fee_bps": float(maker),
+        "expected_taker_fee_bps": float(taker),
+    }
 
 
 def _normalized_provider_trading_rule(connector_name: str, rule: dict[str, Any]) -> dict[str, Any]:
