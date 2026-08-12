@@ -222,6 +222,7 @@ def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolu
     feed = SimpleNamespace(
         columns=["timestamp", "open", "high", "low", "close", "volume"],
         fetch_candles=AsyncMock(return_value=candles_df.rows),
+        interval_in_seconds=60,
     )
     factory.get_candle = MagicMock(return_value=feed)
 
@@ -238,6 +239,60 @@ def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolu
     assert config.connector == "alpha"
     assert config.trading_pair == "BTC-USDT"
     feed.fetch_candles.assert_awaited_once()
+
+
+def test_candle_history_normalizes_one_current_close_timestamp(monkeypatch):
+    factory, _, router = _install_hummingbot_stubs(monkeypatch)
+    from models.market_data import CandleHistoryRequest
+
+    monkeypatch.setattr(router.time, "time", lambda: 1000)
+    rows = [
+        {"timestamp": 940, "close": 1},
+        {"timestamp": 1000, "close": 2},
+        {"timestamp": 1060, "close": 3},
+    ]
+    service = SimpleNamespace(resolve_candle_source=AsyncMock(return_value="alpha"))
+    factory.get_candle = MagicMock(
+        return_value=SimpleNamespace(
+            columns=["timestamp", "close"],
+            fetch_candles=AsyncMock(return_value=rows),
+            interval_in_seconds=60,
+        )
+    )
+
+    result = asyncio.run(
+        router.get_candle_history(
+            _request(service),
+            CandleHistoryRequest(trading_pair="BTC-USDT", interval="1m", max_records=3),
+        )
+    )
+
+    assert [row["timestamp"] for row in result] == [880, 940, 1000]
+
+
+def test_candle_history_does_not_normalize_distant_future_timestamp(monkeypatch):
+    factory, _, router = _install_hummingbot_stubs(monkeypatch)
+    from models.market_data import CandleHistoryRequest
+
+    monkeypatch.setattr(router.time, "time", lambda: 1000)
+    rows = [{"timestamp": 1120, "close": 1}]
+    service = SimpleNamespace(resolve_candle_source=AsyncMock(return_value="alpha"))
+    factory.get_candle = MagicMock(
+        return_value=SimpleNamespace(
+            columns=["timestamp", "close"],
+            fetch_candles=AsyncMock(return_value=rows),
+            interval_in_seconds=60,
+        )
+    )
+
+    result = asyncio.run(
+        router.get_candle_history(
+            _request(service),
+            CandleHistoryRequest(trading_pair="BTC-USDT", interval="1m", max_records=1),
+        )
+    )
+
+    assert result == rows
 
 
 def test_candle_history_redacts_provider_errors(monkeypatch, caplog):

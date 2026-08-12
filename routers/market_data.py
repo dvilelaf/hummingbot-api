@@ -35,6 +35,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Market Data"], prefix="/market-data")
 
 
+def _opening_timestamp_rows(rows, *, end_time: int, interval_seconds: int):
+    """Normalize a provider series stamped at candle close to candle-open time."""
+    if not rows or interval_seconds <= 0:
+        return rows
+    last_timestamp = rows[-1].get("timestamp")
+    if not isinstance(last_timestamp, (int, float)):
+        return rows
+    if not end_time < last_timestamp <= end_time + interval_seconds:
+        return rows
+    normalized = []
+    for row in rows:
+        timestamp = row.get("timestamp")
+        if not isinstance(timestamp, (int, float)):
+            return rows
+        normalized.append({**row, "timestamp": timestamp - interval_seconds})
+    return normalized
+
+
 async def _fetch_candle_rows(
         request: Request,
         candles_config: CandlesConfigRequest,
@@ -148,16 +166,17 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
                 max_records=config.max_records,
             )
         )
+        end_time = int(time.time())
         try:
             df = await asyncio.wait_for(
-                candles.fetch_candles(end_time=int(time.time()), limit=config.max_records),
+                candles.fetch_candles(end_time=end_time, limit=config.max_records),
                 timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
             )
         except asyncio.TimeoutError:
             raise
         except Exception:
             df = await asyncio.wait_for(
-                candles.fetch_candles(end_time=int(time.time()), limit=config.max_records),
+                candles.fetch_candles(end_time=end_time, limit=config.max_records),
                 timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
             )
         if not hasattr(df, "drop_duplicates"):
@@ -168,7 +187,12 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
             raise HTTPException(status_code=404, detail="No candles data available")
         df = df.drop_duplicates(subset=["timestamp"], keep="last")
         df = df.sort_values("timestamp")
-        return df.tail(config.max_records).to_dict(orient="records")
+        rows = df.tail(config.max_records).to_dict(orient="records")
+        return _opening_timestamp_rows(
+            rows,
+            end_time=end_time,
+            interval_seconds=getattr(candles, "interval_in_seconds", 0),
+        )
     except HTTPException as e:
         if e.status_code == 404:
             detail = "No candle data available."
