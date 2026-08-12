@@ -154,14 +154,15 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
         )
 
     market_data_service: MarketDataService = request.app.state.market_data_service
+    trading_pair = config.trading_pair.upper()
     try:
         connector_name = await market_data_service.resolve_candle_source(
-            config.trading_pair, config.interval
+            trading_pair, config.interval
         )
         candles = CandlesFactory.get_candle(
             CandlesConfig(
                 connector=connector_name,
-                trading_pair=connector_trading_pair(connector_name, config.trading_pair),
+                trading_pair=connector_trading_pair(connector_name, trading_pair),
                 interval=config.interval,
                 max_records=config.max_records,
             )

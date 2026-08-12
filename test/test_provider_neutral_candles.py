@@ -241,6 +241,29 @@ def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolu
     feed.fetch_candles.assert_awaited_once()
 
 
+def test_candle_history_normalizes_pair_case_before_source_resolution(monkeypatch):
+    factory, _, router = _install_hummingbot_stubs(monkeypatch)
+    from models.market_data import CandleHistoryRequest
+
+    service = SimpleNamespace(resolve_candle_source=AsyncMock(return_value="alpha"))
+    feed = SimpleNamespace(
+        columns=["timestamp", "close"],
+        fetch_candles=AsyncMock(return_value=[{"timestamp": 1, "close": 1}]),
+        interval_in_seconds=60,
+    )
+    factory.get_candle = MagicMock(return_value=feed)
+
+    asyncio.run(
+        router.get_candle_history(
+            _request(service),
+            CandleHistoryRequest(trading_pair="cbBTC-USDC", interval="1h", max_records=1),
+        )
+    )
+
+    service.resolve_candle_source.assert_awaited_once_with("CBBTC-USDC", "1h")
+    assert factory.get_candle.call_args.args[0].trading_pair == "CBBTC-USDC"
+
+
 def test_candle_history_normalizes_one_current_close_timestamp(monkeypatch):
     factory, _, router = _install_hummingbot_stubs(monkeypatch)
     from models.market_data import CandleHistoryRequest
