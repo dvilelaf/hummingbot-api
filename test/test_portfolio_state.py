@@ -825,6 +825,96 @@ class TestHyperliquidUserFeeRates:
             data={"type": "userFees", "user": "0xaccount"},
         )
 
+    def test_user_fee_rates_cache_successful_identity(self):
+        connector = self._connector("0xaccount")
+        service = self._service({"account": {"hyperliquid_perpetual": connector}})
+
+        first = asyncio.run(service.get_hyperliquid_user_fee_rates(
+            "account", "hyperliquid_perpetual",
+        ))
+        second = asyncio.run(service.get_hyperliquid_user_fee_rates(
+            "account", "hyperliquid_perpetual",
+        ))
+
+        assert first == second == (Decimal("0.00015"), Decimal("0.00045"))
+        connector._api_post.assert_awaited_once()
+        connector._api_request_url.return_value = "https://example.com/info"
+        assert asyncio.run(service.get_hyperliquid_user_fee_rates("account", "hyperliquid_perpetual")) is None
+
+    def test_user_fee_rates_cache_isolated_by_each_identity_dimension(self):
+        account = self._connector("0xsame")
+        other = self._connector("0xsame")
+        testnet = self._connector(
+            "0xsame",
+            address_field="hyperliquid_perpetual_testnet_address",
+            url="https://api.hyperliquid-testnet.xyz/info",
+        )
+        service = self._service({
+            "account": {
+                "hyperliquid_perpetual": account,
+                "hyperliquid_perpetual_testnet": testnet,
+            },
+            "other": {"hyperliquid_perpetual": other},
+        })
+
+        for account_name, connector_name in (
+            ("account", "hyperliquid_perpetual"),
+            ("other", "hyperliquid_perpetual"),
+            ("account", "hyperliquid_perpetual_testnet"),
+        ):
+            asyncio.run(service.get_hyperliquid_user_fee_rates(
+                account_name, connector_name,
+            ))
+        changed_address = self._connector("0xchanged")
+        service._trading_connectors["account"]["hyperliquid_perpetual"] = changed_address
+        asyncio.run(service.get_hyperliquid_user_fee_rates(
+            "account", "hyperliquid_perpetual",
+        ))
+
+        account._api_post.assert_awaited_once()
+        other._api_post.assert_awaited_once()
+        testnet._api_post.assert_awaited_once()
+        changed_address._api_post.assert_awaited_once()
+
+    def test_user_fee_rates_cache_expires(self, monkeypatch):
+        now = 100.0
+        monkeypatch.setattr(
+            "services.unified_connector_service.time.monotonic",
+            lambda: now,
+        )
+        connector = self._connector("0xaccount")
+        service = self._service({"account": {"hyperliquid_perpetual": connector}})
+
+        first = asyncio.run(service.get_hyperliquid_user_fee_rates(
+            "account", "hyperliquid_perpetual",
+        ))
+        now += 60
+        second = asyncio.run(service.get_hyperliquid_user_fee_rates(
+            "account", "hyperliquid_perpetual",
+        ))
+
+        assert first == second
+        connector._api_post.assert_awaited_twice()
+
+    def test_user_fee_rates_cache_evicts_oldest_identity_at_bound(self):
+        connectors = {
+            f"account-{index}": {"hyperliquid_perpetual": self._connector(f"0x{index}")}
+            for index in range(33)
+        }
+        service = self._service(connectors)
+
+        for account_name in connectors:
+            asyncio.run(service.get_hyperliquid_user_fee_rates(
+                account_name, "hyperliquid_perpetual",
+            ))
+
+        assert len(service._hyperliquid_user_fee_rates_cache) == 32
+        first = connectors["account-0"]["hyperliquid_perpetual"]
+        asyncio.run(service.get_hyperliquid_user_fee_rates(
+            "account-0", "hyperliquid_perpetual",
+        ))
+        first._api_post.assert_awaited_twice()
+
     def test_generic_connector_fails_closed(self):
         service = self._service({"account": {"hyperliquid": self._connector("0xgeneric")}})
         assert asyncio.run(
@@ -846,18 +936,22 @@ class TestHyperliquidUserFeeRates:
         connector._api_post.return_value = response
         service = self._service({"account": {"hyperliquid_perpetual": connector}})
 
-        assert asyncio.run(
-            service.get_hyperliquid_user_fee_rates("account", "hyperliquid_perpetual"),
-        ) is None
+        for _ in range(2):
+            assert asyncio.run(
+                service.get_hyperliquid_user_fee_rates("account", "hyperliquid_perpetual"),
+            ) is None
+        connector._api_post.assert_awaited_twice()
 
     def test_user_fee_transport_error_fails_closed_without_logging_raw_error(self, caplog):
         connector = self._connector("0xaccount")
         connector._api_post.side_effect = RuntimeError("private_key=secret")
         service = self._service({"account": {"hyperliquid_perpetual": connector}})
 
-        assert asyncio.run(
-            service.get_hyperliquid_user_fee_rates("account", "hyperliquid_perpetual"),
-        ) is None
+        for _ in range(2):
+            assert asyncio.run(
+                service.get_hyperliquid_user_fee_rates("account", "hyperliquid_perpetual"),
+            ) is None
+        connector._api_post.assert_awaited_twice()
         assert "private_key" not in caplog.text
         assert "secret" not in caplog.text
 

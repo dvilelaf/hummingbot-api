@@ -66,6 +66,8 @@ HYPERLIQUID_ACCOUNT_FEE_QUERIES = {
         "userSpotCrossRate",
     ),
 }
+HYPERLIQUID_USER_FEE_CACHE_TTL = 60
+HYPERLIQUID_USER_FEE_CACHE_MAX_SIZE = 32
 
 
 class UnifiedConnectorService:
@@ -206,13 +208,26 @@ class UnifiedConnectorService:
             )), None)
             if not isinstance(address, str) or not address.strip():
                 return None
+            address = address.strip()
             resolved_url = await connector._api_request_url(path_url="/info")
             if resolved_url != expected_url:
                 return None
+            cache = getattr(self, "_hyperliquid_user_fee_rates_cache", None)
+            if cache is None:
+                cache = {}
+                self._hyperliquid_user_fee_rates_cache = cache
+            now = time.monotonic()
+            for key, (expires_at, _) in list(cache.items()):
+                if expires_at <= now:
+                    del cache[key]
+            cache_key = (account_name, connector_name, address)
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached[1]
             response = await connector._api_post(
                 path_url="/info",
                 overwrite_url=resolved_url,
-                data={"type": "userFees", "user": address.strip()},
+                data={"type": "userFees", "user": address},
             )
             if not isinstance(response, dict) or "error" in response:
                 return None
@@ -224,6 +239,9 @@ class UnifiedConnectorService:
             return None
         if any(not rate.is_finite() or rate < 0 for rate in rates):
             return None
+        cache[cache_key] = (time.monotonic() + HYPERLIQUID_USER_FEE_CACHE_TTL, rates)
+        while len(cache) > HYPERLIQUID_USER_FEE_CACHE_MAX_SIZE:
+            cache.pop(next(iter(cache)))
         return rates
 
     def is_trading_connector_initialized(
