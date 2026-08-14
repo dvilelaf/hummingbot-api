@@ -1,6 +1,5 @@
 from datetime import datetime
-from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -32,8 +31,8 @@ class CandlesConfigRequest(BaseModel):
 class CandleHistoryRequest(BaseModel):
     """Provider-neutral request for recent candle history."""
     trading_pair: str
-    interval: str = "1m"
-    max_records: int = 500
+    interval: Literal["1m", "1h", "1d"] = "1m"
+    max_records: int = Field(default=500, ge=1, le=500)
 
 
 class CandlesResponse(BaseModel):

@@ -77,7 +77,7 @@ class MarketDataService:
 
         # Candle feeds management
         self._candle_feeds: Dict[str, Any] = {}
-        self._candle_source_cache: Dict[Tuple[str, str], Tuple[Optional[str], Optional[float]]] = {}
+        self._candle_source_cache: Dict[Tuple[str, str, int], Tuple[Optional[str], Optional[float]]] = {}
         self._candle_history_cache: Dict[Tuple[str, str, str, int], Tuple[int, List[Dict[str, Any]]]] = {}
         self._last_access_times: Dict[str, float] = {}
         self._feed_configs: Dict[str, Tuple[FeedType, Any]] = {}
@@ -451,7 +451,12 @@ class MarketDataService:
             raise UnsupportedConnectorException(connector_name)
 
     @staticmethod
-    async def validate_trading_pair(connector_name: str, trading_pair: str, interval: str = "1m") -> None:
+    async def validate_trading_pair(
+            connector_name: str,
+            trading_pair: str,
+            interval: str = "1m",
+            minimum_records: int = 1,
+    ) -> None:
         """
         Validate that a trading pair exists on the exchange by attempting a small REST candle fetch.
 
@@ -463,15 +468,15 @@ class MarketDataService:
             connector=connector_name,
             trading_pair=trading_pair,
             interval=interval,
-            max_records=10,
+            max_records=max(10, minimum_records),
         ))
         try:
             end_time = int(_time.time())
-            candles = await feed.fetch_candles(end_time=end_time, limit=1)
-            if candles is None or len(candles) == 0:
+            candles = await feed.fetch_candles(end_time=end_time, limit=minimum_records)
+            if candles is None or len(candles) < minimum_records:
                 raise ValueError(
                     f"Trading pair '{trading_pair}' not found on '{connector_name}'. "
-                    f"No candle data returned."
+                    f"Insufficient candle history returned."
                 )
         except ValueError:
             raise
@@ -480,9 +485,16 @@ class MarketDataService:
                 f"Trading pair '{trading_pair}' appears to be invalid on '{connector_name}': {e}"
             )
 
-    async def resolve_candle_source(self, trading_pair: str, interval: str = "1m") -> str:
+    async def resolve_candle_source(
+            self,
+            trading_pair: str,
+            interval: str = "1m",
+            minimum_records: int = 1,
+    ) -> str:
         """Find and cache the first sorted factory candle source that supports a pair and interval."""
-        cache_key = (trading_pair, interval)
+        if minimum_records < 1:
+            raise ValueError("minimum_records must be positive")
+        cache_key = (trading_pair, interval, minimum_records)
         candidates = tuple(sorted(CandlesFactory._candles_map.keys()))
         cache_entry = self._candle_source_cache.get(cache_key)
         if cache_entry is not None:
@@ -496,11 +508,18 @@ class MarketDataService:
 
         async def supported(connector_name: str) -> str | None:
             try:
-                await self.validate_trading_pair(
+                validation_args = (
                     connector_name,
                     connector_trading_pair(connector_name, trading_pair),
                     interval,
                 )
+                if minimum_records == 1:
+                    await self.validate_trading_pair(*validation_args)
+                else:
+                    await self.validate_trading_pair(
+                        *validation_args,
+                        minimum_records=minimum_records,
+                    )
             except (ValueError, UnsupportedConnectorException):
                 return None
             return connector_name

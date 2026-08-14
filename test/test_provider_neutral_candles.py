@@ -119,6 +119,13 @@ def test_candle_history_request_has_no_provider_field(monkeypatch):
     assert request.max_records == 20
     assert not hasattr(request, "connector_name")
 
+    with pytest.raises(ValueError):
+        CandleHistoryRequest(trading_pair="BTC-USDT", max_records=0)
+    with pytest.raises(ValueError):
+        CandleHistoryRequest(trading_pair="BTC-USDT", max_records=501)
+    with pytest.raises(ValueError):
+        CandleHistoryRequest(trading_pair="BTC-USDT", interval="1w")
+
 
 def test_resolve_candle_source_uses_sorted_candidates_and_caches_success(monkeypatch):
     factory, _, _ = _install_hummingbot_stubs(monkeypatch)
@@ -214,16 +221,45 @@ def test_resolve_candle_source_cache_is_separate_per_interval(monkeypatch):
     service.validate_trading_pair.assert_any_await("alpha", "BTC-USDT", "1d")
 
 
+def test_resolve_candle_source_skips_sources_with_insufficient_history(monkeypatch):
+    factory, _, _ = _install_hummingbot_stubs(monkeypatch)
+    from services.market_data_service import MarketDataService
+
+    factory._candles_map = {"alpha": object(), "beta": object()}
+    service = MarketDataService.__new__(MarketDataService)
+    service._candle_source_cache = {}
+
+    async def validate(connector_name, trading_pair, interval, minimum_records=1):
+        if connector_name == "alpha" and minimum_records > 2:
+            raise ValueError("insufficient history")
+
+    service.validate_trading_pair = AsyncMock(side_effect=validate)
+
+    resolved = asyncio.run(
+        service.resolve_candle_source("BTC-USDT", "1h", minimum_records=501)
+    )
+
+    assert resolved == "beta"
+    service.validate_trading_pair.assert_any_await(
+        "alpha", "BTC-USDT", "1h", minimum_records=501
+    )
+    service.validate_trading_pair.assert_any_await(
+        "beta", "BTC-USDT", "1h", minimum_records=501
+    )
+
+
 def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolution(monkeypatch):
     factory, _, router = _install_hummingbot_stubs(monkeypatch)
     from models.market_data import CandleHistoryRequest
 
+    monkeypatch.setattr(router.time, "time", lambda: 241)
+
     candles_df = _FakeDataFrame(
         [
-            {"timestamp": 3, "open": 3, "high": 3, "low": 3, "close": 3, "volume": 3},
-            {"timestamp": 1, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
-            {"timestamp": 2, "open": 2, "high": 2, "low": 2, "close": 2, "volume": 2},
-            {"timestamp": 2, "open": 20, "high": 20, "low": 20, "close": 20, "volume": 20},
+            {"timestamp": 180, "open": 3, "high": 3, "low": 3, "close": 3, "volume": 3},
+            {"timestamp": 60, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
+            {"timestamp": 120, "open": 2, "high": 2, "low": 2, "close": 2, "volume": 2},
+            {"timestamp": 120, "open": 20, "high": 20, "low": 20, "close": 20, "volume": 20},
         ]
     )
     service = SimpleNamespace(
@@ -243,7 +279,7 @@ def test_candle_history_reuses_candle_normalization_and_skips_probe_after_resolu
         )
     )
 
-    assert [row["timestamp"] for row in result] == [1, 2, 3]
+    assert [row["timestamp"] for row in result] == [60, 120, 180]
     assert result[1]["close"] == 20
     config = factory.get_candle.call_args.args[0]
     assert config.connector == "alpha"
@@ -257,7 +293,7 @@ def test_candle_history_hits_long_interval_cache_before_boundary(monkeypatch):
 
     now = [86390]
     monkeypatch.setattr(router.time, "time", lambda: now[0])
-    rows = [{"timestamp": 1, "close": 10}]
+    rows = [{"timestamp": -86400, "close": 10}]
     service = _history_service(service_module, resolve_candle_source=AsyncMock(return_value="alpha"))
     feed = _history_feed(AsyncMock(return_value=rows), 86400)
     factory.get_candle = MagicMock(return_value=feed)
@@ -280,7 +316,7 @@ def test_candle_history_bypasses_cache_for_one_minute(monkeypatch):
 
     service = _history_service(service_module, resolve_candle_source=AsyncMock(return_value="alpha"))
     feed = _history_feed(
-        AsyncMock(side_effect=[[{"timestamp": 1, "close": 10}], [{"timestamp": 2, "close": 20}]]), 60
+        AsyncMock(side_effect=[[{"timestamp": 1, "close": 10}], [{"timestamp": 2, "close": 20}]]), 0
     )
     factory.get_candle = MagicMock(return_value=feed)
     config = CandleHistoryRequest(trading_pair="BTC-USDT", interval="1m", max_records=1)
@@ -304,7 +340,7 @@ def test_candle_history_refetches_when_long_interval_boundary_is_reached(monkeyp
         if fetch_candles.calls == 0:
             now[0] = 3600
         fetch_candles.calls += 1
-        return [{"timestamp": 1, "close": 10 + fetch_candles.calls - 1}]
+        return [{"timestamp": -3600, "close": 10 + fetch_candles.calls - 1}]
 
     fetch_candles.calls = 0
     feed = _history_feed(
@@ -391,10 +427,12 @@ def test_candle_history_normalizes_pair_case_before_source_resolution(monkeypatc
     factory, _, router = _install_hummingbot_stubs(monkeypatch)
     from models.market_data import CandleHistoryRequest
 
+    monkeypatch.setattr(router.time, "time", lambda: 121)
+
     service = SimpleNamespace(resolve_candle_source=AsyncMock(return_value="alpha"))
     feed = SimpleNamespace(
         columns=["timestamp", "close"],
-        fetch_candles=AsyncMock(return_value=[{"timestamp": 1, "close": 1}]),
+        fetch_candles=AsyncMock(return_value=[{"timestamp": 60, "close": 1}]),
         interval_in_seconds=60,
     )
     factory.get_candle = MagicMock(return_value=feed)
@@ -406,7 +444,9 @@ def test_candle_history_normalizes_pair_case_before_source_resolution(monkeypatc
         )
     )
 
-    service.resolve_candle_source.assert_awaited_once_with("CBBTC-USDC", "1h")
+    service.resolve_candle_source.assert_awaited_once_with(
+        "CBBTC-USDC", "1h", minimum_records=501
+    )
     assert factory.get_candle.call_args.args[0].trading_pair == "CBBTC-USDC"
 
 
@@ -443,7 +483,9 @@ def test_candle_history_unwraps_native_pair_for_source_and_fetch(
     )
 
     assert result == rows
-    service.resolve_candle_source.assert_awaited_once_with(normalized_pair, "1h")
+    service.resolve_candle_source.assert_awaited_once_with(
+        normalized_pair, "1h", minimum_records=501
+    )
     assert factory.get_candle.call_args.args[0].trading_pair == normalized_pair
 
 
@@ -453,9 +495,10 @@ def test_candle_history_normalizes_one_current_close_timestamp(monkeypatch):
 
     monkeypatch.setattr(router.time, "time", lambda: 1000)
     rows = [
-        {"timestamp": 940, "close": 1},
-        {"timestamp": 1000, "close": 2},
-        {"timestamp": 1060, "close": 3},
+        {"timestamp": 840, "close": 0},
+        {"timestamp": 900, "close": 1},
+        {"timestamp": 960, "close": 2},
+        {"timestamp": 1020, "close": 3},
     ]
     service = SimpleNamespace(resolve_candle_source=AsyncMock(return_value="alpha"))
     factory.get_candle = MagicMock(
@@ -473,7 +516,7 @@ def test_candle_history_normalizes_one_current_close_timestamp(monkeypatch):
         )
     )
 
-    assert [row["timestamp"] for row in result] == [880, 940, 1000]
+    assert [row["timestamp"] for row in result] == [780, 840, 900]
 
 
 def test_candle_history_does_not_normalize_distant_future_timestamp(monkeypatch):
@@ -491,14 +534,15 @@ def test_candle_history_does_not_normalize_distant_future_timestamp(monkeypatch)
         )
     )
 
-    result = asyncio.run(
-        router.get_candle_history(
-            _request(service),
-            CandleHistoryRequest(trading_pair="BTC-USDT", interval="1m", max_records=1),
+    with pytest.raises(router.HTTPException) as raised:
+        asyncio.run(
+            router.get_candle_history(
+                _request(service),
+                CandleHistoryRequest(trading_pair="BTC-USDT", interval="1m", max_records=1),
+            )
         )
-    )
 
-    assert result == rows
+    assert raised.value.status_code == 503
 
 
 def test_candle_history_redacts_provider_errors(monkeypatch, caplog):
@@ -543,7 +587,7 @@ def test_candle_history_retries_one_transient_fetch_error(monkeypatch):
     result = asyncio.run(
         router.get_candle_history(
             _request(service),
-            CandleHistoryRequest(trading_pair="BTC-USDT", interval="1m", max_records=20),
+            CandleHistoryRequest(trading_pair="BTC-USDT", interval="1m", max_records=1),
         )
     )
 

@@ -165,7 +165,9 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
     trading_pair = _normalize_candle_trading_pair(config.trading_pair.upper())
     try:
         connector_name = await market_data_service.resolve_candle_source(
-            trading_pair, config.interval
+            trading_pair,
+            config.interval,
+            minimum_records=max(config.max_records + 1, 501),
         )
         candles = CandlesFactory.get_candle(
             CandlesConfig(
@@ -175,27 +177,32 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
                 max_records=config.max_records,
             )
         )
-        end_time = int(time.time())
         interval_seconds = getattr(candles, "interval_in_seconds", 0)
+        period_time = int(time.time())
+        exact_boundary = interval_seconds > 0 and period_time % interval_seconds == 0
+        end_time = period_time - int(exact_boundary)
         cache_key = (connector_name, trading_pair, config.interval, config.max_records)
-        cacheable_interval = (config.interval, interval_seconds) in (("1h", 3600), ("1d", 86400))
+        cacheable_interval = (
+            (config.interval, interval_seconds) in (("1h", 3600), ("1d", 86400))
+            and not exact_boundary
+        )
         if cacheable_interval:
             cached_rows = market_data_service.get_cached_candle_history(
-                cache_key, end_time, interval_seconds
+                cache_key, period_time, interval_seconds
             )
             if cached_rows is not None:
                 return cached_rows
         for fetch_attempt in range(2 if cacheable_interval else 1):
             try:
                 df = await asyncio.wait_for(
-                    candles.fetch_candles(end_time=end_time, limit=config.max_records),
+                    candles.fetch_candles(end_time=end_time, limit=config.max_records + 1),
                     timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
                 )
             except asyncio.TimeoutError:
                 raise
             except Exception:
                 df = await asyncio.wait_for(
-                    candles.fetch_candles(end_time=end_time, limit=config.max_records),
+                    candles.fetch_candles(end_time=end_time, limit=config.max_records + 1),
                     timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
                 )
             if cacheable_interval:
@@ -203,7 +210,10 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
                 if observed_time // interval_seconds != end_time // interval_seconds:
                     if fetch_attempt:
                         raise RuntimeError("Candle history crossed its cache boundary twice")
-                    end_time = observed_time
+                    period_time = observed_time
+                    exact_boundary = observed_time % interval_seconds == 0
+                    end_time = observed_time - int(exact_boundary)
+                    cacheable_interval = not exact_boundary
                     continue
             break
         if not hasattr(df, "drop_duplicates"):
@@ -214,15 +224,34 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
             raise HTTPException(status_code=404, detail="No candles data available")
         df = df.drop_duplicates(subset=["timestamp"], keep="last")
         df = df.sort_values("timestamp")
-        rows = df.tail(config.max_records).to_dict(orient="records")
+        rows = df.to_dict(orient="records")
         rows = _opening_timestamp_rows(
             rows,
             end_time=end_time,
             interval_seconds=interval_seconds,
         )
+        if interval_seconds > 0:
+            rows = [
+                row
+                for row in rows
+                if isinstance(row.get("timestamp"), (int, float))
+                and row["timestamp"] + interval_seconds <= end_time
+            ]
+            timestamps = [row["timestamp"] for row in rows]
+            if any(
+                    current - previous != interval_seconds
+                    for previous, current in zip(timestamps, timestamps[1:])
+            ):
+                raise HTTPException(status_code=503, detail="Irregular candle history")
+            expected_latest = end_time - end_time % interval_seconds - interval_seconds
+            if not timestamps or timestamps[-1] != expected_latest:
+                raise HTTPException(status_code=503, detail="Stale candle history")
+        rows = rows[-config.max_records:]
+        if len(rows) < config.max_records:
+            raise HTTPException(status_code=503, detail="Insufficient closed candle history")
         if cacheable_interval:
             completed_at = int(time.time())
-            if completed_at // interval_seconds != end_time // interval_seconds:
+            if completed_at // interval_seconds != period_time // interval_seconds:
                 raise HTTPException(
                     status_code=503,
                     detail="Candle history crossed its cache boundary during processing.",
