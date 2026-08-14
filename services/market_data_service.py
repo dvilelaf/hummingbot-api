@@ -78,6 +78,7 @@ class MarketDataService:
         # Candle feeds management
         self._candle_feeds: Dict[str, Any] = {}
         self._candle_source_cache: Dict[Tuple[str, str], Tuple[Optional[str], Optional[float]]] = {}
+        self._candle_history_cache: Dict[Tuple[str, str, str, int], Tuple[int, List[Dict[str, Any]]]] = {}
         self._last_access_times: Dict[str, float] = {}
         self._feed_configs: Dict[str, Tuple[FeedType, Any]] = {}
 
@@ -130,6 +131,7 @@ class MarketDataService:
 
         self._candle_feeds.clear()
         self._candle_source_cache.clear()
+        self._candle_history_cache.clear()
         self._last_access_times.clear()
         self._feed_configs.clear()
 
@@ -415,6 +417,33 @@ class MarketDataService:
             return {"error": str(e)}
 
     # ==================== Candles ====================
+
+    def get_cached_candle_history(
+            self, key: Tuple[str, str, str, int], now: int, interval_seconds: int
+    ) -> Optional[List[Dict[str, Any]]]:
+        if key[2] not in ("1h", "1d") or interval_seconds <= 0:
+            return None
+        cached = self._candle_history_cache.get(key)
+        if cached is None:
+            return None
+        if cached[0] <= now:
+            self._candle_history_cache.pop(key, None)
+            return None
+        return [row.copy() for row in cached[1]]
+
+    def cache_candle_history(
+            self, key: Tuple[str, str, str, int], rows: List[Dict[str, Any]], now: int, interval_seconds: int
+    ) -> None:
+        if key[2] not in ("1h", "1d") or interval_seconds <= 0:
+            return
+        for cached_key, (expires_at, _) in list(self._candle_history_cache.items()):
+            if expires_at <= now:
+                self._candle_history_cache.pop(cached_key, None)
+        self._candle_history_cache.pop(key, None)
+        while len(self._candle_history_cache) >= 128:
+            self._candle_history_cache.pop(next(iter(self._candle_history_cache)))
+        expires_at = (now // interval_seconds + 1) * interval_seconds
+        self._candle_history_cache[key] = (expires_at, [row.copy() for row in rows])
 
     @staticmethod
     def validate_connector(connector_name: str) -> None:

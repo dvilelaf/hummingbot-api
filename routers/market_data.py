@@ -176,18 +176,36 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
             )
         )
         end_time = int(time.time())
-        try:
-            df = await asyncio.wait_for(
-                candles.fetch_candles(end_time=end_time, limit=config.max_records),
-                timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
+        interval_seconds = getattr(candles, "interval_in_seconds", 0)
+        cache_key = (connector_name, trading_pair, config.interval, config.max_records)
+        cacheable_interval = (config.interval, interval_seconds) in (("1h", 3600), ("1d", 86400))
+        if cacheable_interval:
+            cached_rows = market_data_service.get_cached_candle_history(
+                cache_key, end_time, interval_seconds
             )
-        except asyncio.TimeoutError:
-            raise
-        except Exception:
-            df = await asyncio.wait_for(
-                candles.fetch_candles(end_time=end_time, limit=config.max_records),
-                timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
-            )
+            if cached_rows is not None:
+                return cached_rows
+        for fetch_attempt in range(2 if cacheable_interval else 1):
+            try:
+                df = await asyncio.wait_for(
+                    candles.fetch_candles(end_time=end_time, limit=config.max_records),
+                    timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                raise
+            except Exception:
+                df = await asyncio.wait_for(
+                    candles.fetch_candles(end_time=end_time, limit=config.max_records),
+                    timeout=CANDLE_SOURCE_RESOLUTION_TIMEOUT,
+                )
+            if cacheable_interval:
+                observed_time = int(time.time())
+                if observed_time // interval_seconds != end_time // interval_seconds:
+                    if fetch_attempt:
+                        raise RuntimeError("Candle history crossed its cache boundary twice")
+                    end_time = observed_time
+                    continue
+            break
         if not hasattr(df, "drop_duplicates"):
             from pandas import DataFrame
 
@@ -197,11 +215,25 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
         df = df.drop_duplicates(subset=["timestamp"], keep="last")
         df = df.sort_values("timestamp")
         rows = df.tail(config.max_records).to_dict(orient="records")
-        return _opening_timestamp_rows(
+        rows = _opening_timestamp_rows(
             rows,
             end_time=end_time,
-            interval_seconds=getattr(candles, "interval_in_seconds", 0),
+            interval_seconds=interval_seconds,
         )
+        if cacheable_interval:
+            completed_at = int(time.time())
+            if completed_at // interval_seconds != end_time // interval_seconds:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Candle history crossed its cache boundary during processing.",
+                )
+            market_data_service.cache_candle_history(
+                cache_key,
+                rows,
+                completed_at,
+                interval_seconds,
+            )
+        return rows
     except HTTPException as e:
         if e.status_code == 404:
             detail = "No candle data available."
