@@ -1406,7 +1406,7 @@ def _gateway_swap_execution_terms(
     body: ProviderIntentRequest,
 ) -> tuple[str, str, Decimal, str]:
     base, quote = body.market_id.split("-", 1)
-    if body.side == "BUY":
+    if body.side == "BUY" and body.connector_name.casefold() != "jupiter":
         return quote, base, _gateway_swap_spend_amount(body), "SELL"
     return base, quote, body.quantity, body.side
 

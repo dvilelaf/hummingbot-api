@@ -3051,28 +3051,29 @@ def test_buy_swap_provider_intent_reports_quote_spend_notional(monkeypatch):
     SET_DEFAULT_WALLET_CALLS.clear()
     provider_boundary = _provider_boundary_module()
     service = FakeAccountsService()
-    monkeypatch.setattr(
-        service.gateway_client,
-        "execute_swap",
-        _async_return({"signature": "tx-buy-001", "status": "SUBMITTED"}),
-    )
+
+    async def execute_swap(**kwargs):
+        EXECUTE_SWAP_CALLS.append(kwargs)
+        return {"signature": "tx-buy-001", "status": "SUBMITTED"}
+
+    monkeypatch.setattr(service.gateway_client, "execute_swap", execute_swap)
 
     body = provider_boundary.ProviderIntentRequest(
         account_name="master_account",
         action="swap",
-        connector_name="aerodrome",
+        connector_name="jupiter",
         correlation_id="swap-base-buy-submitted-001",
-        market_id="AERO-USDC",
+        market_id="SOL-USDC",
         mode="mainnet",
-        quantity="0.1",
-        notional="10",
-        risk_metadata={"network": "ethereum-base"},
+        quantity="0.075",
+        notional="10.25",
+        risk_metadata={"network": "solana-mainnet-beta"},
         side="BUY",
         wallet_identity={
-            "address": "0x1111111111111111111111111111111111111111",
-            "chain": "ethereum",
-            "network": "ethereum-base",
-            "wallet_ref": "base:mainnet:evm_gateway",
+            "address": "9AtFd6KcR9tx5Etxc9SVkYrkZb7yC5BDibao7yPT5Ce1",
+            "chain": "solana",
+            "network": "mainnet-beta",
+            "wallet_ref": "solana:mainnet-beta:solana_gateway",
         },
     )
 
@@ -3085,8 +3086,14 @@ def test_buy_swap_provider_intent_reports_quote_spend_notional(monkeypatch):
     )
 
     assert result.status == "submitted"
-    assert result.submitted_quantity == provider_boundary.Decimal("0.1")
-    assert result.submitted_notional == provider_boundary.Decimal("10")
+    assert result.submitted_quantity == provider_boundary.Decimal("0.075")
+    assert result.submitted_notional == provider_boundary.Decimal("10.25")
+    assert LIVE_GATE_CALLS[0]["expected_notional"] == provider_boundary.Decimal("10.25")
+    assert EXECUTE_SWAP_CALLS[0]["base_asset"] == "SOL"
+    assert EXECUTE_SWAP_CALLS[0]["quote_asset"] == "USDC"
+    assert EXECUTE_SWAP_CALLS[0]["amount"] == provider_boundary.Decimal("0.075")
+    assert EXECUTE_SWAP_CALLS[0]["side"] == "BUY"
+    assert EXECUTE_SWAP_CALLS[0]["live_action_authorization"]["notional"] == "10.25"
 
 
 @pytest.mark.parametrize("notional", [None, "0", "-1"])
