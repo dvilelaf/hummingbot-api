@@ -2495,9 +2495,8 @@ class AccountsService:
         Returns:
             List of funding payment dictionaries
         """
-        await self.ensure_db_initialized()
-        
         try:
+            await self.ensure_db_initialized()
             async with self.db_manager.get_session_context() as session:
                 funding_repo = FundingRepository(session)
                 funding_payments = await funding_repo.get_funding_payments(
@@ -2506,11 +2505,29 @@ class AccountsService:
                     trading_pair=trading_pair,
                     limit=limit
                 )
-                return [funding_repo.to_dict(payment) for payment in funding_payments]
+                rows = [funding_repo.to_dict(payment) for payment in funding_payments]
+                for row in rows:
+                    for field in (
+                        "funding_payment_id",
+                        "timestamp",
+                        "trading_pair",
+                        "fee_currency",
+                    ):
+                        value = row.get(field)
+                        if not isinstance(value, str) or not value.strip():
+                            raise ValueError("Malformed durable funding payment history")
+                    timestamp = datetime.fromisoformat(row["timestamp"])
+                    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                        raise ValueError("Malformed durable funding payment history")
+                    for field in ("funding_rate", "funding_payment"):
+                        value = Decimal(str(row.get(field)))
+                        if not value.is_finite():
+                            raise ValueError("Malformed durable funding payment history")
+                return rows
                 
         except Exception as e:
             logger.error(f"Error getting funding payments: {e}")
-            return []
+            raise HTTPException(status_code=500, detail=f"Error getting funding payments: {str(e)}") from e
 
     async def get_total_funding_fees(self, account_name: str, connector_name: str,
                                    trading_pair: str) -> Dict:

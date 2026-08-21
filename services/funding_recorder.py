@@ -1,12 +1,14 @@
 import asyncio
+import hashlib
 import logging
-from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Dict, Optional
 
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.event.event_forwarder import SourceInfoEventForwarder
 from hummingbot.core.event.events import MarketEvent, FundingPaymentCompletedEvent
+from sqlalchemy.exc import IntegrityError
 
 from database import AsyncDatabaseManager, FundingRepository
 
@@ -94,54 +96,87 @@ class FundingRecorder:
             connector_name: Connector name
             position_data: Optional position data at time of payment
         """
-        try:
-            # Validate and convert funding data
-            funding_rate = Decimal(str(event.funding_rate))
-            funding_payment = Decimal(str(event.amount))
-            
-            # Create funding payment record
-            funding_data = {
-                "funding_payment_id": f"{connector_name}_{event.trading_pair}_{event.timestamp.timestamp()}",
-                "timestamp": event.timestamp,
-                "account_name": account_name,
-                "connector_name": connector_name,
-                "trading_pair": event.trading_pair,
-                "funding_rate": float(funding_rate),
-                "funding_payment": float(funding_payment),
-                "fee_currency": getattr(event, 'fee_currency', 'USDT'),  # Default to USDT if not provided
-                "exchange_funding_id": getattr(event, 'exchange_funding_id', None),
-            }
-            
-            # Add position data if provided
-            if position_data:
-                funding_data.update({
-                    "position_size": float(position_data.get("size", 0)),
-                    "position_side": position_data.get("side"),
-                })
-            
-            # Save to database
-            async with self.db_manager.get_session() as session:
-                funding_repo = FundingRepository(session)
-                
-                # Check if funding payment already exists
-                if await funding_repo.funding_payment_exists(funding_data["funding_payment_id"]):
-                    self.logger.info(f"Funding payment {funding_data['funding_payment_id']} already exists, skipping")
-                    return
-                
+        fee_currency = getattr(event, "fee_currency", None)
+        if not isinstance(fee_currency, str) or not fee_currency.strip():
+            collateral_token = getattr(self._connector, "get_sell_collateral_token", None)
+            fee_currency = (
+                collateral_token(event.trading_pair) if callable(collateral_token) else None
+            )
+        if not isinstance(fee_currency, str) or not fee_currency.strip():
+            raise ValueError("Funding payment currency unavailable")
+        fee_currency = fee_currency.strip()
+
+        funding_rate = Decimal(str(event.funding_rate))
+        funding_payment_amount = Decimal(str(event.amount))
+        if not funding_rate.is_finite() or not funding_payment_amount.is_finite():
+            raise ValueError("Funding payment rate and amount must be finite")
+        if isinstance(event.timestamp, datetime):
+            event_timestamp = event.timestamp
+        else:
+            timestamp = Decimal(str(event.timestamp))
+            if not timestamp.is_finite():
+                raise ValueError("Funding payment timestamp must be finite")
+            event_timestamp = datetime.fromtimestamp(float(timestamp), tz=UTC)
+        exchange_funding_id = getattr(event, "exchange_funding_id", None)
+        exchange_funding_id = str(exchange_funding_id).strip() if exchange_funding_id is not None else None
+        exchange_funding_id = exchange_funding_id or None
+
+        if exchange_funding_id:
+            funding_payment_id = f"{account_name}:{connector_name}:exchange:{exchange_funding_id}"
+        else:
+            identity = "\x1f".join(
+                (
+                    str(account_name),
+                    str(connector_name),
+                    str(event.trading_pair),
+                    event_timestamp.isoformat(),
+                    str(funding_rate),
+                    str(funding_payment_amount),
+                    fee_currency,
+                )
+            )
+            funding_payment_id = f"funding:{hashlib.sha256(identity.encode()).hexdigest()}"
+
+        funding_data = {
+            "funding_payment_id": funding_payment_id,
+            "timestamp": event_timestamp,
+            "account_name": account_name,
+            "connector_name": connector_name,
+            "trading_pair": event.trading_pair,
+            "funding_rate": funding_rate,
+            "funding_payment": funding_payment_amount,
+            "fee_currency": fee_currency,
+            "exchange_funding_id": exchange_funding_id,
+        }
+
+        if position_data:
+            funding_data.update({
+                "position_size": float(position_data.get("size", 0)),
+                "position_side": position_data.get("side"),
+            })
+
+        async with self.db_manager.get_session() as session:
+            funding_repo = FundingRepository(session)
+            if await funding_repo.funding_payment_exists(funding_data["funding_payment_id"]):
+                self.logger.info(f"Funding payment {funding_data['funding_payment_id']} already exists, skipping")
+                return
+
+            try:
                 funding_payment = await funding_repo.create_funding_payment(funding_data)
                 await session.commit()
-                
-                self.logger.info(
-                    f"Recorded funding payment for {account_name}/{connector_name}: "
-                    f"{event.trading_pair} - Rate: {funding_rate}, Payment: {funding_payment} "
-                    f"{funding_data['fee_currency']}"
-                )
-                
-                return funding_payment
-                
-        except (ValueError, InvalidOperation) as e:
-            self.logger.error(f"Error processing funding payment for {event.trading_pair}: {e}, skipping update")
-            return
-        except Exception as e:
-            self.logger.error(f"Unexpected error recording funding payment: {e}")
-            return
+            except IntegrityError:
+                await session.rollback()
+                if await funding_repo.funding_payment_exists(funding_data["funding_payment_id"]):
+                    self.logger.info(
+                        f"Funding payment {funding_data['funding_payment_id']} already exists, skipping"
+                    )
+                    return
+                raise
+
+            self.logger.info(
+                f"Recorded funding payment for {account_name}/{connector_name}: "
+                f"{event.trading_pair} - Rate: {funding_rate}, Payment: {funding_payment} "
+                f"{funding_data['fee_currency']}"
+            )
+
+            return funding_payment

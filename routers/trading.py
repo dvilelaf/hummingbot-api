@@ -671,22 +671,16 @@ async def get_funding_payments(
                 for connector_name in connectors_to_check:
                     # Only fetch funding payments from perpetual connectors
                     if connector_name in all_connectors[account_name] and "_perpetual" in connector_name:
-                        try:
-                            payments = await accounts_service.get_funding_payments(
-                                account_name=account_name,
-                                connector_name=connector_name,
-                                trading_pair=filter_request.trading_pair,
-                                limit=filter_request.limit * 2,  # Get more for pagination
-                            )
-                            # Add cursor-friendly identifier to each payment
-                            for payment in payments:
-                                payment["_cursor_id"] = (
-                                    f"{account_name}:{connector_name}:{payment.get('timestamp', '')}:{payment.get('trading_pair', '')}"
-                                )
-                            all_funding_payments.extend(payments)
-                        except Exception as e:
-                            # Log error but continue with other connectors
-                            logger.warning(f"Failed to get funding payments for {account_name}/{connector_name}: {e}")
+                        payments = await accounts_service.get_funding_payments(
+                            account_name=account_name,
+                            connector_name=connector_name,
+                            trading_pair=filter_request.trading_pair,
+                            limit=filter_request.limit * 2,  # Get more for pagination
+                        )
+                        # Add cursor-friendly identifier to each payment
+                        for payment in payments:
+                            payment["_cursor_id"] = payment["funding_payment_id"]
+                        all_funding_payments.extend(payments)
 
         # Sort by timestamp (most recent first) and then by cursor_id for consistency
         all_funding_payments.sort(key=lambda x: (x.get("timestamp", ""), x.get("_cursor_id", "")), reverse=True)
@@ -722,8 +716,10 @@ async def get_funding_payments(
             },
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching funding payments: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching funding payments: {str(e)}") from e
 
 
 def _standardize_in_flight_order_response(order, account_name: str, connector_name: str) -> dict:
