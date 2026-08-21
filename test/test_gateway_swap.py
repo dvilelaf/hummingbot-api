@@ -49,6 +49,7 @@ def test_gateway_swap_positive_quote_is_accepted():
 
 def test_gateway_swap_buy_quote_uses_inverted_sell_terms():
     assert gateway_swap._gateway_swap_terms(
+        connector_name="aerodrome",
         base="AERO",
         quote="USDC",
         amount=Decimal("0.00005"),
@@ -60,6 +61,7 @@ class _FakeGatewayClient:
     def __init__(self, result, estimate_result):
         self.result = result
         self.estimate_result = estimate_result
+        self.quote_calls = []
         self.estimate_calls = []
 
     async def ping(self):
@@ -69,6 +71,7 @@ class _FakeGatewayClient:
         return network_id.split("-", 1)
 
     async def quote_swap(self, **kwargs):
+        self.quote_calls.append(kwargs)
         return self.result
 
     async def estimate_gas(self, chain, network):
@@ -93,20 +96,44 @@ def _default_gas_estimate(observed_at=None):
     return {"fee": "0.007", "feeAsset": "SOL", "timestamp": int(observed_at.timestamp() * 1000)}
 
 
-def _get_quote(result, estimate_result=_DEFAULT_GAS_ESTIMATE, client_out=None):
+def _get_quote(result, estimate_result=_DEFAULT_GAS_ESTIMATE, client_out=None, side="SELL", amount=Decimal("1")):
     if estimate_result is _DEFAULT_GAS_ESTIMATE:
         estimate_result = _default_gas_estimate()
     request = gateway_swap.SwapQuoteRequest(
         connector="jupiter",
         network="solana-mainnet-beta",
         trading_pair="SOL-USDC",
-        side="SELL",
-        amount=Decimal("1"),
+        side=side,
+        amount=amount,
     )
     service = _FakeAccountsService(result, estimate_result)
     if client_out is not None:
         client_out.append(service.gateway_client)
     return asyncio.run(gateway_swap.get_swap_quote(request, service))
+
+
+def test_gateway_swap_jupiter_buy_quote_uses_exact_output_terms():
+    clients = []
+    response = _get_quote(
+        {**_valid_quote_result(), "amountIn": "10.25", "amountOut": "0.075", "maxAmountIn": "10.25"},
+        client_out=clients,
+        side="BUY",
+        amount=Decimal("0.075"),
+    )
+
+    call = clients[0].quote_calls[0]
+    assert (call["base_asset"], call["quote_asset"], call["amount"], call["side"]) == (
+        "SOL",
+        "USDC",
+        Decimal("0.075"),
+        "BUY",
+    )
+    assert (response.amount, response.amount_in, response.amount_out, response.max_amount_in) == (
+        Decimal("0.075"),
+        Decimal("10.25"),
+        Decimal("0.075"),
+        Decimal("10.25"),
+    )
 
 
 def _valid_quote_result(observed_at=None):

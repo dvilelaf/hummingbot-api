@@ -169,6 +169,7 @@ async def get_swap_quote(
 
         base, quote = request.trading_pair.split("-")
         gateway_base, gateway_quote, gateway_amount, gateway_side = _gateway_swap_terms(
+            connector_name=request.connector,
             base=base,
             quote=quote,
             amount=request.amount,
@@ -249,12 +250,15 @@ async def get_swap_quote(
 
 def _gateway_swap_terms(
     *,
+    connector_name: str,
     base: str,
     quote: str,
     amount: Decimal,
     side: str,
 ) -> tuple[str, str, Decimal, str]:
     if side.upper() == "BUY":
+        if connector_name.casefold() == "jupiter":
+            return base, quote, amount, "BUY"
         return quote, base, amount, "SELL"
     return base, quote, amount, side
 
