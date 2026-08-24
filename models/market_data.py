@@ -33,6 +33,7 @@ class CandleHistoryRequest(BaseModel):
     trading_pair: str
     interval: Literal["1m", "1h", "1d"] = "1m"
     max_records: int = Field(default=500, ge=1, le=500)
+    end_time: Optional[int] = Field(default=None, gt=0)
 
 
 class CandlesResponse(BaseModel):

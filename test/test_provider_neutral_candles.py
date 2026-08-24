@@ -119,12 +119,19 @@ def test_candle_history_request_has_no_provider_field(monkeypatch):
     assert request.max_records == 20
     assert not hasattr(request, "connector_name")
 
+    request = CandleHistoryRequest(trading_pair="BTC-USDT", end_time=123)
+    assert request.end_time == 123
+
     with pytest.raises(ValueError):
         CandleHistoryRequest(trading_pair="BTC-USDT", max_records=0)
     with pytest.raises(ValueError):
         CandleHistoryRequest(trading_pair="BTC-USDT", max_records=501)
     with pytest.raises(ValueError):
         CandleHistoryRequest(trading_pair="BTC-USDT", interval="1w")
+    with pytest.raises(ValueError):
+        CandleHistoryRequest(trading_pair="BTC-USDT", end_time=0)
+    with pytest.raises(ValueError):
+        CandleHistoryRequest(trading_pair="BTC-USDT", end_time=-1)
 
 
 def test_resolve_candle_source_uses_sorted_candidates_and_caches_success(monkeypatch):
@@ -308,6 +315,26 @@ def test_candle_history_hits_long_interval_cache_before_boundary(monkeypatch):
 
     assert third == rows
     assert feed.fetch_candles.await_count == 1
+
+
+def test_candle_history_forwards_explicit_end_time_without_latest_cache(monkeypatch):
+    factory, service_module, router = _install_hummingbot_stubs(monkeypatch)
+    from models.market_data import CandleHistoryRequest
+
+    service = _history_service(service_module, resolve_candle_source=AsyncMock(return_value="alpha"))
+    service.get_cached_candle_history = MagicMock()
+    service.cache_candle_history = MagicMock()
+    rows = [{"timestamp": 3600, "close": 10}]
+    feed = _history_feed(AsyncMock(return_value=rows), 3600)
+    factory.get_candle = MagicMock(return_value=feed)
+    config = CandleHistoryRequest(trading_pair="BTC-USDT", interval="1h", max_records=1, end_time=7200)
+
+    result = asyncio.run(router.get_candle_history(_request(service), config))
+
+    assert result == rows
+    feed.fetch_candles.assert_awaited_once_with(end_time=7200, limit=2)
+    service.get_cached_candle_history.assert_not_called()
+    service.cache_candle_history.assert_not_called()
 
 
 def test_candle_history_bypasses_cache_for_one_minute(monkeypatch):

@@ -178,12 +178,18 @@ async def get_candle_history(request: Request, config: CandleHistoryRequest):
             )
         )
         interval_seconds = getattr(candles, "interval_in_seconds", 0)
-        period_time = int(time.time())
-        exact_boundary = interval_seconds > 0 and period_time % interval_seconds == 0
-        end_time = period_time - int(exact_boundary)
+        if config.end_time is None:
+            period_time = int(time.time())
+            exact_boundary = interval_seconds > 0 and period_time % interval_seconds == 0
+            end_time = period_time - int(exact_boundary)
+        else:
+            period_time = config.end_time
+            exact_boundary = False
+            end_time = config.end_time
         cache_key = (connector_name, trading_pair, config.interval, config.max_records)
         cacheable_interval = (
-            (config.interval, interval_seconds) in (("1h", 3600), ("1d", 86400))
+            config.end_time is None
+            and (config.interval, interval_seconds) in (("1h", 3600), ("1d", 86400))
             and not exact_boundary
         )
         if cacheable_interval:
